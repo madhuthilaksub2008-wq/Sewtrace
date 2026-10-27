@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sewtrace"
+version = "0.1.0"
+description = "Three photos of a flat garment to a 1:1 sewing pattern, using SAM 3.1 and Muse models."
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "opencv-contrib-python-headless>=4.7",
+  "shapely>=2",
+  "pydantic>=2",
+  "reportlab",
+  "svgwrite",
+  "ezdxf",
+  "fastapi",
+  "uvicorn",
+  "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+sewtrace = "sewtrace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sewtrace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
