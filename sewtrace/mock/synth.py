@@ -194,7 +194,23 @@ def render(
     Returns photo, region masks (photo space), world_mm->photo_px homography,
     and marker corners in world mm (TL, TR, BR, BL).
     """
-    all_pts = np.vstack([p for polys in regions.values() for p in polys])
+    return render_layers(regions, colour, rng)
+
+
+def render_layers(
+    regions: dict[str, list[np.ndarray]],
+    colour: tuple[int, int, int],
+    rng: np.random.Generator,
+    overlays: dict[str, tuple[list[np.ndarray], tuple[int, int, int]]] | None = None,
+) -> tuple[np.ndarray, dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    """render(), plus flat overlays (e.g. a paper pattern) laid on top of the garment.
+
+    Overlays get their own masks but stay out of "garment"; regions keep their
+    full masks, as if seen through the overlay. No overlays gives render()'s output.
+    """
+    overlays = overlays or {}
+    all_pts = np.vstack([p for polys in regions.values() for p in polys]
+                        + [p for polys, _ in overlays.values() for p in polys])
     marker_total = MARKER_SIZE_MM + 2 * MARKER_BORDER_MM
     width_mm = all_pts[:, 0].max() + 120
     height_mm = all_pts[:, 1].max() + marker_total + 120
@@ -220,6 +236,16 @@ def render(
     if "sleeve" in regions and "body" in regions:
         seam = cv2.dilate(masks_world["sleeve"], np.ones((3, 3))) & masks_world["body"]
         world[seam > 0] *= 0.8
+    for name, (polys, bgr) in overlays.items():
+        m = np.zeros((h, w), np.uint8)
+        for poly in polys:
+            cv2.fillPoly(m, [np.round(poly * PX_PER_MM).astype(np.int32)], 255)
+        masks_world[name] = m
+        # Soft contact shadow just outside the overlay edge, then the overlay itself.
+        rim = cv2.GaussianBlur(m.astype(np.float32) / 255, (0, 0), 1.5 * PX_PER_MM)
+        world *= 1 - 0.25 * np.clip(rim - (m > 0), 0, 1)[..., None]
+        sheet = np.array(bgr, float) * (0.9 + 0.1 * light[..., None]) * (1 + 0.01 * rng.normal(size=(h, w, 1)))
+        world = np.where(m[..., None] > 0, sheet, world)
 
     # Marker on a white card, bottom left, below the garment.
     m0 = np.array([60.0, all_pts[:, 1].max() + 60])
