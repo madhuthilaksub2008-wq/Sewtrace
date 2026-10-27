@@ -19,11 +19,17 @@ class Homography:
 
     def px_to_mm(self, pts: np.ndarray) -> np.ndarray:
         """(N, 2) pixel points to (N, 2) mm points."""
-        raise NotImplementedError
+        return _apply(self.H, pts)
 
     def mm_to_px(self, pts: np.ndarray) -> np.ndarray:
         """(N, 2) mm points to (N, 2) pixel points."""
-        raise NotImplementedError
+        return _apply(np.linalg.inv(self.H), pts)
+
+
+def _apply(H: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    pts = np.asarray(pts, dtype=float).reshape(-1, 2)
+    h = np.c_[pts, np.ones(len(pts))] @ H.T
+    return h[:, :2] / h[:, 2:3]
 
 
 class MarkerNotFound(RuntimeError):
