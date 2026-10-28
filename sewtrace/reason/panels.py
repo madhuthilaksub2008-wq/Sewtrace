@@ -92,10 +92,12 @@ def build_prompt(spec: PanelSpec, measurements: dict[str, float]) -> str:
         "change it, and you do not return it.",
         "Infer ONLY these four fields. They are the whole answer:",
         f"1. front_neck_depth_mm: front neck depth, {inf.front_neck_depth_min_mm:g} to "
-        f"{inf.front_neck_depth_max_mm:g} mm. Draft: {neck_depth_mm(spec.panel('front')):.1f}.",
+        f"{inf.front_neck_depth_max_mm:g} mm. Draft: {neck_depth_mm(spec.panel('front')):.1f}, which is not a "
+        "measurement: the front outline shows the back neckline through the neck opening. Read the "
+        "front neck edge in the front photo.",
         f"2. back_neck_depth_mm: back neck depth, {inf.back_neck_depth_min_mm:g} to "
         f"{inf.back_neck_depth_max_mm:g} mm. Kids' back necks are shallow (about 15 to 25 mm). "
-        f"The back neck is hidden in the front photo, so use the back photo. Draft: "
+        f"Use the back photo. Draft: "
         f"{neck_depth_mm(spec.panel('back')):.1f}.",
         "3. sleeve_cap: the folded sleeve hides the cap shape. Give two handle lengths in mm of the",
         "   half cap curve (a cubic Bezier from the cap top to the underarm corner, horizontal",

@@ -193,6 +193,8 @@ class _Joints:
     shoulder_b: np.ndarray
     index_a: int              # outline samples nearest the shoulder points
     index_b: int
+    neck_a: int               # the two neck corners (where the shoulder seams meet the neck)
+    neck_b: int
     shoulder_dir_a: np.ndarray  # unit vectors along the shoulder seam, towards the neck
     shoulder_dir_b: np.ndarray
     side_dir_a: np.ndarray      # unit vectors along the side seam, towards the hem
@@ -292,7 +294,7 @@ def _find_joints(outline: Outline) -> _Joints:
     ib = c3 + int(np.argmin(np.linalg.norm(pts[c3 : c4 + 1] - shoulder_b, axis=1)))
     side_a = pts[max(other - reach, 0)] - under_a
     side_b = pts[min(reach, other)] - under_b
-    return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib,
+    return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib, c2, c3,
                    dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b))
 
 
@@ -343,6 +345,17 @@ def cut_sleeves(outline: Outline) -> tuple[Outline, np.ndarray]:
     Also returns a boolean array, True for each point of the body outline that lies on
     a default armhole, so callers can leave those points out of an edge comparison.
     """
+    body, invented, _ = cut_sleeves_flagged(outline)
+    return body, invented
+
+
+def cut_sleeves_flagged(outline: Outline) -> tuple[Outline, np.ndarray, np.ndarray]:
+    """cut_sleeves(), plus a boolean array that is True for each body point on the neck.
+
+    The neck is the outline between the two neck corners. On a front flat-lay it follows
+    the BACK neckline: the back panel is seen through the neck opening, so the front neck
+    edge is not on the outline (front neck depth is inferred, REQ-RSN-04).
+    """
     j = _find_joints(outline)
     pts, other = j.pts, j.other
     centre = _centroid(pts)
@@ -360,7 +373,11 @@ def cut_sleeves(outline: Outline) -> tuple[Outline, np.ndarray]:
     ]
     body = np.vstack([p for p, _ in parts])
     invented = np.concatenate([np.full(len(p), flag) for p, flag in parts])
-    return Outline.from_array(body), invented
+    neck = np.zeros(len(body), bool)
+    run_start = sum(len(p) for p, _ in parts[:5])  # first point of pts[index_a + 1 : index_b]
+    samples = np.arange(j.index_a + 1, j.index_b)
+    neck[run_start : run_start + len(samples)] = (samples >= j.neck_a) & (samples <= j.neck_b)
+    return Outline.from_array(body), invented, neck
 
 
 def remove_sleeves(outline: Outline) -> Outline:

@@ -81,6 +81,12 @@ underarm_tol_mm = 1.0
 cap_ease_min_mm = 0.0      # open decision D-03
 cap_ease_max_mm = 12.0
 max_adjust_calls = 3       # REQ-SEW-02
+# Shoulder and side pairs are the same seam measured in two photos. A code fix may set both
+# edges to their mean length when the pair differs by at most this much (each edge then moves
+# half of it). Above it the run fails loudly. Open decision D-02: 4 mm is about the tape
+# repeat limit of a real tee (SPEC 10.3 says 2 mm per reading) and a hem corner or shoulder
+# point moves at most 2 mm.
+measured_pair_max_fix_mm = 4.0
 
 [pattern]
 seam_allowance_mm = 10.0   # REQ-OUT-03

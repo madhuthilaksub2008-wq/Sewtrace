@@ -77,8 +77,15 @@ def outline_distance(a: np.ndarray, b: np.ndarray) -> float:
     return max(cKDTree(db).query(a)[0].mean(), cKDTree(da).query(b)[0].mean())
 
 
+def visible_half(truth: dict, view: str) -> np.ndarray:
+    """Half outline the mask shows. On the front that has the BACK neckline: the back panel is
+    seen through the neck opening (synth.silhouette_half), so the front neck is not visible."""
+    photo = truth["photos"][view]
+    return np.array(photo.get("visible_half_outline_mm", photo["half_outline_mm"]))
+
+
 def truth_edge_lengths(truth: dict, view: str) -> dict[str, float]:
-    pts = np.array(truth["photos"][view]["half_outline_mm"])
+    pts = visible_half(truth, view)
     panel = Panel(name=view, cut="", outline_mm=[tuple(p) for p in pts], edges=[
         {"name": k, "start": a, "end": b} for k, (a, b) in truth["photos"][view]["edges"].items()])
     return {e.name: length(panel.edge_points(e.name)) for e in panel.edges}
@@ -123,7 +130,7 @@ def test_smooth_outline_keeps_corners_and_spacing():
 def test_half_outline_matches_truth(halves, tees, name, view):
     """REQ-GEO-01: half outline matches truth."""
     half, _ = halves[name, view]
-    truth = np.array(tees[name][1]["photos"][view]["half_outline_mm"])
+    truth = visible_half(tees[name][1], view)
     pts = half.array()
     assert outline_distance(pts, truth) < 1.5
     assert pts[:, 0].min() >= 0
@@ -163,7 +170,7 @@ def test_rotated_photo(tees, session_client, view):
     for deg, frame_deg in ((7.0, -3.0), (-5.0, 4.0)):
         rmask, H = rotate_photo(mask, truth_homography(truth, view), deg, frame_deg)
         half, edges = extract(rmask, H, view)
-        ref = np.array(truth["photos"][view]["half_outline_mm"])
+        ref = visible_half(truth, view)
         assert outline_distance(half.array(), ref) < 1.5
         got, want = edge_lengths(half, edges), truth_edge_lengths(truth, view)
         for k in want:
@@ -176,7 +183,7 @@ def test_body_half_upside_down(tees, session_client):
     mask = session_client.segment(d / "front.jpg", "t-shirt")
     rmask, H = rotate_photo(mask, truth_homography(truth, "front"), 180.0, 0.0)
     half, _ = extract(rmask, H, "front")
-    ref = np.array(truth["photos"]["front"]["half_outline_mm"])
+    ref = visible_half(truth, "front")
     assert outline_distance(half.array(), ref) < 1.5
 
 
@@ -213,7 +220,7 @@ def test_req_geo_01_body_half_from_whole_garment_vs_truth(tees, session_client, 
     whole outline mean 0.38 mm worst. The synth armhole is a drafting-style curve, so these
     armhole numbers flatter the default; a real armhole will differ (fix item 4)."""
     half, edges = extract_mask_free(tees, session_client, name)
-    want = np.array(tees[name][1]["photos"]["front"]["half_outline_mm"])
+    want = visible_half(tees[name][1], "front")
     a, b = tees[name][1]["photos"]["front"]["edges"]["armhole"]
     got = half.array()
     got_tree = cKDTree(contour._resample_closed(got, 0.25))

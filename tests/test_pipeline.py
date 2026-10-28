@@ -62,6 +62,35 @@ def test_req_sew_04_failed_seams_stop_before_any_file(tmp_path, monkeypatch):
     assert not out.exists() or not any(out.iterdir())
 
 
+def test_req_sew_03_small_side_mismatch_is_fixed_and_exported(tmp_path, monkeypatch):
+    """REQ-SEW-03, D-02: back side 2 mm long. The code fix balances it, files are written,
+    and the six reported measurements are the measured ones (taken before the fix)."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+    real = pipeline.adjust_loop
+    seen = {}
+
+    def skewed(client, spec):
+        back = spec.panel("back")
+        longer = set_edge_length(back, "side", seams.edge_length(back, "side") + 2.0)
+        spec = spec.model_copy(update={"panels": [longer if p.name == "back" else p for p in spec.panels]})
+        seen["before"] = spec
+        return real(client, spec)
+
+    monkeypatch.setattr(pipeline, "adjust_loop", skewed)
+    result = run(tee, tmp_path / "out", client)
+    assert all(s.ok for s in result.spec.seams)
+    assert any(r["source"] == "pair_fix" and r["applied"] for r in result.seam_log)
+    assert all(path.exists() and path.stat().st_size > 0 for path in result.files.values())
+    logged = json.loads(result.files["seam_log"].read_text())
+    assert any(r["source"] == "pair_fix" for r in logged)
+    truth = json.loads((tee / "truth.json").read_text())["measurements"]
+    for k in MEASUREMENT_KEYS:
+        assert result.measurements[k] == pytest.approx(truth[k], abs=2.0), k
+    assert json.loads(result.files["measurements"].read_text()) == result.measurements
+
+
 def test_req_sew_04_cli_prints_failure_and_exits_nonzero(tmp_path, monkeypatch, capsys):
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)

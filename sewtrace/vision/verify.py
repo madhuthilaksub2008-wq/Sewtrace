@@ -4,13 +4,18 @@ Owner: Madhu. SPEC 9.4: the paper is a HALF front panel cut on the stitch line, 
 fold on the centre of the t-shirt. SAM masks "paper" and "t-shirt" (REQ-SEG-02) go to the
 marker mm frame. The t-shirt outline includes the sleeves, so they are cut off first, as
 for the front and back photos. Then each paper edge point gets its distance to the nearest
-body edge point, with three rules:
+body edge point, with four rules:
 
   * The fold edge of the paper is not a cut edge. It lies on the centre line, far inside
     the t-shirt edge, so it is found and left out (drawn grey in the overlay).
   * A paper point is compared with the body edge on its own side of the fold line only.
   * The armhole of the body outline is a default shape, because the sleeve hides the real
     one. Paper points nearest to it are left out, not compared.
+  * On a front flat-lay the "t-shirt" mask includes the back panel seen through the neck
+    opening, so the outer outline follows the BACK neckline, which sits higher than the
+    front one. The paper's front neck edge is lower by (front depth - back depth), so its
+    gap is that difference, not a cutting error. Paper points nearest to the body neck
+    are left out of the mean and reported on their own as information (REQ-VER-02).
 """
 
 from __future__ import annotations
@@ -42,6 +47,14 @@ class ProofResult(BaseModel):
     distances_mm: list[float]
     fold_mm: tuple[Point, Point] | None = None  # excluded fold edge, end points
     step_mm: float = 2.0  # spacing of points_mm along the paper edge
+    # Paper neck points: left out of the numbers above, kept as information. Their gap is
+    # front neck depth minus back neck depth, not a cutting error.
+    neck_points_mm: list[Point] = []
+    neck_distances_mm: list[float] = []
+
+    @property
+    def neck_mean_mm(self) -> float | None:
+        return float(np.mean(self.neck_distances_mm)) if self.neck_distances_mm else None
 
 
 def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
@@ -99,14 +112,29 @@ def edge_gaps(
     step_mm: float = 2.0,
     hidden: np.ndarray | None = None,
     fold: tuple[np.ndarray, np.ndarray] | None = None,
+    neck: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Paper edge resampled every ``step_mm``, and each point's distance to the body edge.
 
     ``hidden`` flags body points that are not a visible edge (the armhole, which the
-    sleeve covers). Paper points whose nearest body point is hidden are left out.
+    sleeve covers). ``neck`` flags body points on the neck edge, which on a front photo is
+    the back neckline. Paper points whose nearest body point is flagged are left out.
     ``fold`` is the paper's fold edge: its points are left out, and the body edge is cut
     to the paper's side of the fold line (``proof.centre_margin_mm`` past it).
     """
+    points, distances, _, _ = edge_gaps_split(paper_mm, body_mm, step_mm, hidden, fold, neck)
+    return points, distances
+
+
+def edge_gaps_split(
+    paper_mm: np.ndarray,
+    body_mm: np.ndarray,
+    step_mm: float = 2.0,
+    hidden: np.ndarray | None = None,
+    fold: tuple[np.ndarray, np.ndarray] | None = None,
+    neck: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """edge_gaps(), plus the left-out neck points: (points, gaps, neck points, neck gaps)."""
     cfg = get_config().proof
     ring = shapely.LinearRing(paper_mm)
     pts = shapely.line_interpolate_point(ring, np.arange(0, ring.length, step_mm))
@@ -126,10 +154,14 @@ def edge_gaps(
         keep_paper = shapely.distance(pts, shapely.LineString([p0, p1])) >= cfg.fold_exclude_mm
     body_edge = _body_side_runs(body_pts, keep_body)
     dist = np.asarray(shapely.distance(pts, body_edge), float)
+    near = cKDTree(body_pts[keep_body]).query(xy)[1]
     if hidden is not None:
-        near = cKDTree(body_pts[keep_body]).query(xy)[1]
         keep_paper &= ~np.asarray(hidden)[keep_body][near]
-    return xy[keep_paper], dist[keep_paper]
+    on_neck = np.zeros(len(xy), bool)
+    if neck is not None:
+        on_neck = keep_paper & np.asarray(neck)[keep_body][near]
+        keep_paper &= ~on_neck
+    return xy[keep_paper], dist[keep_paper], xy[on_neck], dist[on_neck]
 
 
 def gap_result(
@@ -138,6 +170,8 @@ def gap_result(
     tol_mm: float | None = None,
     fold: tuple[np.ndarray, np.ndarray] | None = None,
     step_mm: float = 2.0,
+    neck_points: np.ndarray | None = None,
+    neck_distances: np.ndarray | None = None,
 ) -> ProofResult:
     tol_mm = get_config().proof.gap_tolerance_mm if tol_mm is None else tol_mm
     return ProofResult(
@@ -150,6 +184,8 @@ def gap_result(
         distances_mm=[float(d) for d in distances],
         fold_mm=None if fold is None else ((float(fold[0][0]), float(fold[0][1])), (float(fold[1][0]), float(fold[1][1]))),
         step_mm=step_mm,
+        neck_points_mm=[] if neck_points is None else [(float(x), float(y)) for x, y in neck_points],
+        neck_distances_mm=[] if neck_distances is None else [float(d) for d in neck_distances],
     )
 
 
@@ -164,15 +200,17 @@ def verify_proof(
     prompts = client.config.sam.prompts
     paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
     garment = mask_outline_mm(client.segment(photo, prompts.garment), homography)
-    body, armhole = contour.cut_sleeves(contour.smooth_outline(Outline.from_array(garment)))
+    body, armhole, neck = contour.cut_sleeves_flagged(contour.smooth_outline(Outline.from_array(garment)))
     fold = find_fold_edge(paper, body.array())
-    points, distances = edge_gaps(paper, body.array(), step_mm, hidden=armhole, fold=fold)
-    return gap_result(points, distances, tol_mm, fold, step_mm)
+    points, distances, neck_pts, neck_dist = edge_gaps_split(
+        paper, body.array(), step_mm, hidden=armhole, fold=fold, neck=neck)
+    return gap_result(points, distances, tol_mm, fold, step_mm, neck_pts, neck_dist)
 
 
 def overlay_image(photo: str | Path, result: ProofResult, homography: Homography, out_path: str | Path) -> Path:
     """Paper edge drawn on the photo, green where the gap is within tolerance, red elsewhere.
-    The fold edge is drawn grey: it is not compared. Points left out (hidden armhole) are not drawn."""
+    The fold edge and the neck are drawn grey: they are not compared.
+    Points left out (hidden armhole) are not drawn."""
     image = cv2.imread(str(photo))
     if image is None:
         raise FileNotFoundError(photo)
@@ -185,6 +223,8 @@ def overlay_image(photo: str | Path, result: ProofResult, homography: Homography
             continue  # a stretch that was left out lies between these points
         colour = (40, 200, 40) if ok[i] else (30, 30, 230)
         cv2.line(image, tuple(np.round(a).astype(int)), tuple(np.round(b).astype(int)), colour, thick, cv2.LINE_AA)
+    for x, y in np.round(homography.mm_to_px(np.asarray(result.neck_points_mm).reshape(-1, 2))).astype(int):
+        cv2.circle(image, (int(x), int(y)), thick, (150, 150, 150), -1, cv2.LINE_AA)  # information only
     if result.fold_mm is not None:
         f0, f1 = np.round(homography.mm_to_px(np.asarray(result.fold_mm))).astype(int)
         cv2.line(image, tuple(f0), tuple(f1), (150, 150, 150), thick, cv2.LINE_AA)

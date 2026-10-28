@@ -33,7 +33,7 @@ def test_measurements_match_truth(halves, tees, name):
 
 def test_req_geo_04_whole_garment_mean_error_within_gate(halves, tees):
     """REQ-GEO-04, SPEC 10.1: on the whole-garment path the mean absolute error over the
-    6 measurements and 5 tees is 0.5 mm or less (the synthetic gate, now 0.42 mm). The single
+    6 measurements and 5 tees is 0.5 mm or less (the synthetic gate, now 0.37 mm). The single
     measurement bound is TOL_MM. SPEC 10.2 takes the shoulder across the back, where the
     sleeve joint of tee2 sits 0.5 mm off, so the worst single value is 1.58 mm (was 0.95 mm
     on the front)."""
@@ -42,6 +42,21 @@ def test_req_geo_04_whole_garment_mean_error_within_gate(halves, tees):
         got = measure_tee(*halves[name, "front"], *halves[name, "back"], *halves[name, "sleeve"])
         errors += [abs(got[k] - tees[name][1]["measurements"][k]) for k in MEASUREMENT_KEYS]
     assert np.mean(errors) <= 0.5 and max(errors) < TOL_MM
+
+
+@pytest.mark.parametrize("name", TEE_NAMES)
+def test_req_geo_04_front_photo_shows_back_neck_width_still_measured(halves, tees, name):
+    """REQ-GEO-04, REQ-RSN-04: the front mask shows the back neckline through the opening, so the
+    neck DEPTH read from the front outline is the back depth (it is inferred, not measured).
+    The neck WIDTH is still measured: within 1 mm on a neck with a radius of about 7 mm at the
+    neck point (a straight tangent there was 1.2 to 1.7 mm off)."""
+    params = tees[name][1]["params"]
+    front, edges = halves[name, "front"]
+    neck = front.array()[edges[0].start : edges[0].end + 1]
+    assert neck[0, 1] - neck[-1, 1] == pytest.approx(params["back_neck_depth"], abs=1.0)
+    assert abs(neck[0, 1] - neck[-1, 1] - params["front_neck_depth"]) > 30.0
+    got = measure_tee(*halves[name, "front"], *halves[name, "back"], *halves[name, "sleeve"])
+    assert got["neck_width"] == pytest.approx(tees[name][1]["measurements"]["neck_width"], abs=1.0)
 
 
 def test_measurements_on_rotated_photos(tees, session_client):

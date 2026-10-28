@@ -54,6 +54,28 @@ def _corner(into: np.ndarray, out_of: np.ndarray, reach_in: float = 8.0, reach_o
     return c1 + t[0] * d1
 
 
+NECK_FIT_MM = 12.0  # arc length from the neck point over which the neck curve is fitted
+NECK_SEARCH_MM = 15.0  # how far along the shoulder line the neck point is searched
+
+
+def _neck_point(neck: np.ndarray, shoulder: np.ndarray) -> np.ndarray:
+    """Neck point: where the neck curve meets the shoulder line.
+
+    A straight tangent is biased on a tight neck curve (a back neckline seen through the
+    neck opening on a front photo has a radius of about 7 mm at the neck point), so the
+    neck curve is fitted as x = f(y), a parabola, and intersected with the shoulder line.
+    Falls back to the tangent corner when the fit is not possible."""
+    run = _near_end(neck, 1.0, NECK_FIT_MM)
+    c, d = _fit_line(_near_end(shoulder[::-1], 1.0, 30.0))
+    if len(run) < 4 or np.ptp(run[:, 1]) < 1.0:
+        return _corner(neck, shoulder, reach_in=4.0, reach_out=30.0)
+    fit = np.polyfit(run[:, 1], run[:, 0], 2)
+    t = np.linspace(-NECK_SEARCH_MM, NECK_SEARCH_MM, 6001)
+    line = c + t[:, None] * d
+    t_best = int(np.argmin(np.abs(np.polyval(fit, line[:, 1]) - line[:, 0])))
+    return np.array([np.polyval(fit, line[t_best, 1]), line[t_best, 1]])
+
+
 def _shoulder_point(pts: np.ndarray, edges: list[Edge]) -> np.ndarray:
     """Shoulder seam point: where the shoulder edge meets the armhole. Corners come from
     end tangents, so smoothing that rounds a vertex does not shift them."""
@@ -77,7 +99,7 @@ def measure_tee(
     shoulder = _edge(f, front_edges, "shoulder")
     armhole = _edge(f, front_edges, "armhole")
     side = _edge(f, front_edges, "side")
-    neck_pt = _corner(neck, shoulder, reach_in=4.0, reach_out=30.0)
+    neck_pt = _neck_point(neck, shoulder)
     shoulder_pt = _shoulder_point(f, front_edges)
     underarm = _corner(armhole, side, reach_in=4.0, reach_out=30.0)
     hem_y = float(np.median(_interior(_edge(f, front_edges, "hem"))[:, 1]))

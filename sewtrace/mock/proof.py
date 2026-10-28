@@ -4,8 +4,11 @@ The paper is the half front stitch outline from truth.json, cut on the stitch li
 its fold on the centre of the t-shirt (the right half of the tee, fold at the tee's
 x origin). The tee is whole, with sleeves. The paper error is controllable (scale about
 the half-panel centroid, rotation, offset), so the overlay check (vision/verify.py) can be
-tested against an exact gap computed on the comparable edges only: the fold edge and the
-paper points nearest the (hidden) armhole are left out.
+tested against an exact gap computed on the comparable edges only: the fold edge, the
+paper points nearest the (hidden) armhole and the paper points nearest the body neck are
+left out. The tee mask has the BACK neckline, as on a real front photo: the back panel
+shows through the neck opening, so the front neck of the paper lies lower than the outline.
+The gap of those neck points is reported on its own (expected_neck_gap_mean_mm).
 
   <tee_dir>/<name>.jpg                photo, marker in frame
   <tee_dir>/<name>.masks/paper.png    the paper sheet
@@ -47,12 +50,15 @@ def expected_gaps(
     armhole: np.ndarray,
     centre_x_mm: float,
     step_mm: float = 2.0,
-) -> np.ndarray:
+    neck: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Exact distance from evenly spaced paper edge points to the body edge, mm.
 
-    Only comparable points count: not the fold edge, and not points whose nearest body
-    edge is the armhole (hidden under the sleeve on a real tee). The body edge is the
-    half on the paper's side of the tee centre line (plus the config margin).
+    Returns (compared gaps, neck gaps). Compared points are not the fold edge, not points
+    whose nearest body edge is the armhole (hidden under the sleeve on a real tee) and not
+    points whose nearest body edge is the neck (the back neckline). Neck gaps are the
+    left-out neck points. The body edge is the half on the paper's side of the tee centre
+    line (plus the config margin).
     """
     cfg = get_config().proof
     ring = shapely.LinearRing(paper)
@@ -62,7 +68,11 @@ def expected_gaps(
     d_body = np.asarray(shapely.distance(pts, body_edge), float)
     d_armhole = np.asarray(shapely.distance(pts, shapely.LineString(armhole)), float)
     d_fold = np.asarray(shapely.distance(pts, shapely.LineString(list(fold))), float)
-    return d_body[(d_fold >= cfg.fold_exclude_mm) & (d_armhole > d_body)]
+    d_neck = np.full(len(d_body), np.inf) if neck is None else np.asarray(
+        shapely.distance(pts, shapely.LineString(neck)), float)
+    comparable = (d_fold >= cfg.fold_exclude_mm) & (d_armhole > d_body)
+    on_neck = comparable & (d_neck <= d_body)
+    return d_body[comparable & ~on_neck], d_body[on_neck]
 
 
 def make_proof(
@@ -80,9 +90,10 @@ def make_proof(
     p = synth.TeeParams(**params)
     front = truth["photos"]["front"]
     origin = np.asarray(front["origin_mm"], float)
-    half = np.asarray(front["half_outline_mm"], float)
+    half = np.asarray(front["half_outline_mm"], float)  # the pattern: front neck
+    visible = np.asarray(front["visible_half_outline_mm"], float)  # the mask: back neck
     edges = front["edges"]
-    body = synth.mirror_full(half) + origin
+    body = synth.mirror_full(visible) + origin
     sleeves = [synth.flatlay_sleeve(p, s) + origin for s in (1, -1)]
     placed = paper_outline(half, scale, rotation_deg, offset_mm)
     paper = placed + origin
@@ -94,7 +105,10 @@ def make_proof(
     )
     synth._save(tee_dir, name, photo, masks)
     armhole = half[edges["armhole"][0] : edges["armhole"][1] + 1] + origin
-    gaps = expected_gaps(paper, body, fold, armhole, origin[0])
+    neck = visible[edges["neck"][0] : edges["neck"][1] + 1] + origin
+    # The rendered body has a zero-width sliver along the fold; the gap must not see it.
+    clean_body = synth.mirror_full(visible[: edges["fold"][0] + 1]) + origin
+    gaps, neck_gaps = expected_gaps(paper, clean_body, fold, armhole, origin[0], neck=neck)
     proof = {
         "paper": {"scale": scale, "rotation_deg": rotation_deg, "offset_mm": list(offset_mm)},
         "paper_outline_mm": paper.tolist(),
@@ -104,6 +118,7 @@ def make_proof(
         "marker_corners_mm": marker_mm.tolist(),
         "expected_gap_mean_mm": float(gaps.mean()),
         "expected_gap_max_mm": float(gaps.max()),
+        "expected_neck_gap_mean_mm": float(neck_gaps.mean()) if len(neck_gaps) else None,
     }
     (tee_dir / f"{name}.json").write_text(json.dumps(proof, indent=1))
     return proof

@@ -12,7 +12,7 @@ from sewtrace.reason import seams
 from sewtrace.reason.reshape import cap_width_mm, fit_cap, scale_cap_to_length
 from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, check_seams, edge_length
 from perturb import bulge_edge, set_edge_length
-from sewtrace.types import Panel, PanelSpec
+from sewtrace.types import Panel, PanelSpec, Seam
 
 MAX_ADJUST_CALLS = get_config().seam.max_adjust_calls
 CAP = "front.armhole+back.armhole~sleeve.cap"
@@ -182,13 +182,90 @@ def test_req_sew_03_05_mock_always_fails_then_code_fix_and_log(tees, client, mon
 
 
 def test_req_sew_03_rsn_05_measured_pair_failure_is_not_edited(tees, client):
-    """REQ-RSN-05: back shoulder 6 mm long. No model call, no code fix; require_seams_ok raises."""
+    """REQ-RSN-05: back shoulder 6 mm long, over the code fix limit (4 mm). No model call, no edit; raises."""
     spec = _back_shoulder_6mm_long(truth_spec(tees[0]))
     out, log = adjust_loop(client, spec)
     assert client.calls == 0 and out == spec.model_copy(update={"seams": out.seams})
     assert log[-1]["failing"] and "front.shoulder~back.shoulder" in log[-1]["failing"]
     with pytest.raises(SeamCheckFailed, match=r"front\.shoulder~back\.shoulder"):
         require_seams_ok(out, log)
+
+
+PAIR_LIMIT = get_config().seam.measured_pair_max_fix_mm
+
+
+def _pair_seam(spec: PanelSpec, edge: str) -> "Seam":
+    return next(s for s in check_seams(spec) if s.a == f"front.{edge}")
+
+
+def _side_2mm_long(spec: PanelSpec, mm: float = 2.0) -> PanelSpec:
+    back = spec.panel("back")
+    return _replace(spec, set_edge_length(back, "side", edge_length(back, "side") + mm))
+
+
+def test_req_sew_03_side_mismatch_is_balanced_by_code_and_logged(tees, client):
+    """REQ-SEW-03, D-02: back side 2 mm long. Code sets both sides to the mean; no model call; logged in mm."""
+    spec = _side_2mm_long(truth_spec(tees[0]))
+    assert not _pair_seam(spec, "side").ok
+    front0, back0 = (edge_length(spec.panel(n), "side") for n in ("front", "back"))
+    out, log = adjust_loop(client, spec)
+    assert client.calls == 0
+    assert all(s.ok for s in check_seams(out))
+    front1, back1 = (edge_length(out.panel(n), "side") for n in ("front", "back"))
+    mean = (front0 + back0) / 2
+    assert front1 == pytest.approx(mean, abs=1e-6) and back1 == pytest.approx(mean, abs=1e-6)
+    assert [r["source"] for r in log] == ["initial", "pair_fix"]
+    row = log[1]
+    assert row["failing"] == [] and "front.side~back.side" in log[0]["failing"]
+    changes = {(a["panel"], a["edge"]): a for a in row["applied"]}
+    assert changes[("front", "side")]["from_mm"] == pytest.approx(front0, abs=0.01)
+    assert changes[("front", "side")]["to_mm"] == pytest.approx(mean, abs=0.01)
+    assert changes[("back", "side")]["end_point_shift_mm"] == pytest.approx(1.0, abs=0.05)
+    # Only the hem corner moves: neck, shoulder, armhole and fold are as measured.
+    for name in ("front", "back"):
+        for edge in ("neck", "shoulder", "armhole", "fold"):
+            assert np.allclose(spec.panel(name).edge_points(edge), out.panel(name).edge_points(edge), atol=1e-6)
+    assert np.allclose(spec.panel("sleeve").outline_mm, out.panel("sleeve").outline_mm)
+
+
+def test_req_sew_03_shoulder_fix_keeps_the_neck_point_and_underarm(tees, client):
+    """REQ-SEW-03, D-02: shoulder mismatch moves the shoulder point; neck point and underarm stay."""
+    spec = truth_spec(tees[0])
+    back = spec.panel("back")
+    spec = _replace(spec, set_edge_length(back, "shoulder", edge_length(back, "shoulder") + 3.0))
+    assert 1.0 < abs(_pair_seam(spec, "shoulder").diff_mm) <= PAIR_LIMIT
+    out, log = adjust_loop(client, spec)
+    assert client.calls == 0 and all(s.ok for s in check_seams(out))
+    assert abs(_pair_seam(out, "shoulder").diff_mm) < 1e-6
+    for name in ("front", "back"):
+        before, after = spec.panel(name), out.panel(name)
+        assert np.allclose(before.edge_points("neck"), after.edge_points("neck"), atol=1e-6)
+        assert np.allclose(before.edge_points("shoulder")[0], after.edge_points("shoulder")[0], atol=1e-6)
+        assert np.allclose(before.edge_points("armhole")[-1], after.edge_points("armhole")[-1], atol=1e-6)
+        assert np.allclose(before.edge_points("side"), after.edge_points("side"), atol=1e-6)
+        # The armhole stays attached to the moved shoulder point.
+        assert np.allclose(after.edge_points("shoulder")[-1], after.edge_points("armhole")[0], atol=1e-9)
+    assert abs(next(a for a in log[1]["applied"] if a["panel"] == "front")["end_point_shift_mm"]) < 1.6
+
+
+def test_req_sew_03_pair_over_limit_is_not_edited_and_raises(tees, client):
+    """D-02: a mismatch just over the limit is left alone, so the run fails loudly."""
+    spec = _side_2mm_long(truth_spec(tees[0]), PAIR_LIMIT + 0.5)
+    out, log = adjust_loop(client, spec)
+    assert client.calls == 0 and [r["source"] for r in log] == ["initial"]
+    assert out == spec.model_copy(update={"seams": out.seams})
+    with pytest.raises(SeamCheckFailed, match=r"front\.side~back\.side"):
+        require_seams_ok(out, log)
+    at_limit = _side_2mm_long(truth_spec(tees[0]), PAIR_LIMIT - 0.05)
+    assert all(s.ok for s in check_seams(adjust_loop(client, at_limit)[0]))
+
+
+def test_req_sew_03_pair_fix_then_cap_loop_still_converges(tees, client):
+    """The shoulder fix changes the armhole a little; a failing cap is still fixed after it."""
+    spec = _longer_front_armhole(_side_2mm_long(truth_spec(tees[0])))
+    out, log = adjust_loop(client, spec)
+    assert log[1]["source"] == "pair_fix" and log[-1]["failing"] == []
+    require_seams_ok(out, log)
 
 
 def test_req_sew_03_cap_that_cannot_reach_range_fails_loudly(tees, client):

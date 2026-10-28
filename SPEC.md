@@ -434,7 +434,7 @@ Use the same definitions in the tape measure and in `sewtrace/vision/measure.py`
 | ID | Decision | Owner | Decide by |
 | --- | --- | --- | --- |
 | D-01 | Spark or Wonder for panel inference, after the Day 1 A/B test | Madhu | Oct 28 |
-| D-02 | Seam tolerance for shoulders, side seams and underarm | Madhu | Oct 30 |
+| D-02 | Seam tolerance for shoulders, side seams and underarm, and the largest front-to-back difference the code fix may balance (now 4 mm, `seam.measured_pair_max_fix_mm`) | Madhu | Oct 30 |
 | D-03 | Sleeve cap ease (now 0 to 12 mm) | Madhu | Oct 30 |
 | D-04 | Seam allowance value (now 10 mm) | Madhu | Oct 30 |
 

@@ -169,6 +169,19 @@ def measurements(p: TeeParams) -> dict[str, float]:
     }
 
 
+def silhouette_half(p: TeeParams, half: np.ndarray, view: str) -> np.ndarray:
+    """Half outline of the t-shirt mask as a real photo shows it.
+
+    On a front flat-lay the back panel is seen through the neck opening, and the back neck
+    is shallower than the front one. SAM masks both as "t-shirt", so the outer outline
+    follows the BACK neckline. The back photo shows the back neckline too (nothing lies
+    behind it). Only the neck differs between the two halves, so the back half is the
+    silhouette of both views. ``half`` is returned unchanged for any other view."""
+    if view != "front":
+        return half
+    return body_half(p, back=True)[0]
+
+
 def mirror_full(half: np.ndarray) -> np.ndarray:
     """Full symmetric outline from a half (fold at x = 0)."""
     other = half[::-1] * [-1, 1]
@@ -299,12 +312,15 @@ def make_tee(p: TeeParams, out: Path, seed: int) -> dict:
     for view in ("front", "back"):
         half, edges = body_half(p, back=(view == "back"))
         origin = np.array([p.chest_half + p.sleeve_length + 120, 80])
-        body = mirror_full(half) + origin
+        body = mirror_full(silhouette_half(p, half, view)) + origin
         sleeves = [flatlay_sleeve(p, s) + origin for s in (1, -1)]
         photo, masks, H, marker_mm = render({"body": [body], "sleeve": sleeves}, p.colour_bgr, rng)
         _save(out, view, photo, masks)
         truth["photos"][view] = {
             "half_outline_mm": half.tolist(),
+            # The outline the mask shows (same point indices, so same edges). Differs from
+            # half_outline_mm on the front: the back neck is seen through the opening.
+            "visible_half_outline_mm": silhouette_half(p, half, view).tolist(),
             "edges": edges,
             "origin_mm": origin.tolist(),
             "world_mm_to_photo_px": H.tolist(),

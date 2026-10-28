@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import cv2
@@ -70,7 +71,9 @@ def test_req_ver_02_perfect_paper_has_small_gap(proofs, client):
     assert truth["expected_gap_mean_mm"] < 1e-6
     assert r.mean_mm < 0.5
     assert r.frac_within_tol > 0.98
-    assert len(r.points_mm) == len(r.distances_mm) > 250
+    assert len(r.points_mm) == len(r.distances_mm) > 200
+    # Same sampling as before the neck rule: compared points plus the left-out neck points.
+    assert len(r.points_mm) + len(r.neck_points_mm) > 250
     assert r.fold_mm is not None
     p0, p1 = np.asarray(r.fold_mm)
     assert np.linalg.norm(p1 - p0) > 250  # the fold edge runs from the neck point to the hem
@@ -111,11 +114,62 @@ def test_req_ver_02_fold_edge_is_not_compared(proofs, client):
     hom = photo_homography(cv2.imread(str(photo)))
     paper = mask_outline_mm(client.segment(photo, "paper"), hom)
     garment = mask_outline_mm(client.segment(photo, "t-shirt"), hom)
-    body, armhole = contour.cut_sleeves(contour.smooth_outline(Outline.from_array(garment)))
-    _, naive = edge_gaps(paper, body.array(), hidden=armhole)
+    body, armhole, neck = contour.cut_sleeves_flagged(contour.smooth_outline(Outline.from_array(garment)))
+    _, naive = edge_gaps(paper, body.array(), hidden=armhole, neck=neck)
     assert naive.mean() > get_config().proof.gap_tolerance_mm  # every edge point counted
-    _, handled = edge_gaps(paper, body.array(), hidden=armhole, fold=find_fold_edge(paper, body.array()))
+    _, handled = edge_gaps(paper, body.array(), hidden=armhole, fold=find_fold_edge(paper, body.array()), neck=neck)
     assert handled.mean() < 0.5 and handled.max() < get_config().proof.gap_tolerance_mm
+
+
+def test_req_ver_02_back_neck_is_visible_in_the_tee_mask(proofs):
+    """The tee mask of a front flat-lay has the BACK neckline: the front neck of the paper lies lower."""
+    tee_dir, truth = proofs
+    spec = json.loads((tee_dir / "truth.json").read_text())
+    front = spec["photos"]["front"]
+    p = spec["params"]
+    visible = np.asarray(front["visible_half_outline_mm"])
+    assert visible[0, 1] == pytest.approx(p["back_neck_depth"], abs=1e-6)
+    assert np.asarray(front["half_outline_mm"])[0, 1] == pytest.approx(p["front_neck_depth"], abs=1e-6)
+    paper = np.asarray(truth["perfect"]["paper_outline_mm"])
+    body = np.asarray(truth["perfect"]["body_outline_mm"])
+    origin = np.asarray(front["origin_mm"])
+    assert paper[0, 1] - origin[1] == pytest.approx(p["front_neck_depth"], abs=1e-6)
+    assert body[0, 1] - origin[1] == pytest.approx(p["back_neck_depth"], abs=1e-6)
+
+
+def test_req_ver_02_neck_gap_is_reported_separately_not_in_the_mean(proofs, client):
+    """Regression (SPEC 10.1): with the back neck visible, a perfect paper has a neck gap of
+    front depth minus back depth. Old behaviour counted it: mean gap over 0.5 mm for a perfect
+    paper and more than 3 mm for a 1.02 paper whose cutting error is small. Now it is information."""
+    tee_dir, truth = proofs
+    for name in ("perfect", "scaled"):
+        photo = tee_dir / f"{name}.jpg"
+        hom = photo_homography(cv2.imread(str(photo)))
+        paper = mask_outline_mm(client.segment(photo, "paper"), hom)
+        garment = mask_outline_mm(client.segment(photo, "t-shirt"), hom)
+        body, armhole, neck = contour.cut_sleeves_flagged(contour.smooth_outline(Outline.from_array(garment)))
+        fold = find_fold_edge(paper, body.array())
+        _, old = edge_gaps(paper, body.array(), hidden=armhole, fold=fold)  # no neck rule
+        _, new = edge_gaps(paper, body.array(), hidden=armhole, fold=fold, neck=neck)
+        r, t = _verify(proofs, client, name)
+        print(f"{name}: mean without neck rule {old.mean():.2f} mm, with {new.mean():.2f} mm, "
+              f"neck info {r.neck_mean_mm:.1f} mm, expected {t['expected_neck_gap_mean_mm']:.1f} mm")
+        assert old.mean() > new.mean() + 1.0
+        if name == "perfect":  # the old code turned a perfect paper red
+            assert old.mean() > get_config().proof.gap_tolerance_mm
+        assert r.mean_mm == pytest.approx(new.mean(), abs=1e-9)
+        assert r.mean_mm == pytest.approx(t["expected_gap_mean_mm"], abs=0.5)
+        assert r.neck_mean_mm == pytest.approx(t["expected_neck_gap_mean_mm"], abs=2.0)
+        assert len(r.neck_points_mm) == len(r.neck_distances_mm) > 20
+        depth_diff = truth_depth_diff(tee_dir)
+        assert r.neck_mean_mm > 0.5 * depth_diff  # the neck gap is of the order front minus back depth
+    perfect, _ = _verify(proofs, client, "perfect")
+    assert perfect.mean_mm < 0.5 and perfect.frac_within_tol > 0.98  # the old code: mean over 0.5 mm
+
+
+def truth_depth_diff(tee_dir: Path) -> float:
+    p = json.loads((tee_dir / "truth.json").read_text())["params"]
+    return p["front_neck_depth"] - p["back_neck_depth"]
 
 
 def test_req_ver_02_find_fold_edge_needs_a_fold():
@@ -142,6 +196,7 @@ def test_req_ver_01_cli_verify_prints_gap_and_writes_overlay(proofs, tmp_path, m
     cli.main(["verify", str(tee_dir / "scaled.jpg"), "--out", str(out)])
     text = capsys.readouterr().out
     assert "mean gap" in text and "max" in text and "p95" in text and "within 3 mm" in text
+    assert "neck (information, not in the mean)" in text
     assert cv2.imread(str(out)) is not None
 
 

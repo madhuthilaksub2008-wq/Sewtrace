@@ -95,6 +95,10 @@ def _verify(photo: str, out: str | None) -> None:
     out_path = overlay_image(path, result, homography, out or path.with_suffix(".overlay.png"))
     print(f"mean gap {result.mean_mm:.2f} mm  max {result.max_mm:.2f} mm  p95 {result.p95_mm:.2f} mm")
     print(f"{100 * result.frac_within_tol:.1f}% of points within {result.tol_mm:g} mm")
+    if result.neck_mean_mm is not None:
+        print(f"neck (information, not in the mean): {len(result.neck_distances_mm)} points, "
+              f"mean gap {result.neck_mean_mm:.1f} mm. The photo shows the back neckline "
+              "through the neck opening, so this is about front depth minus back depth.")
     print(f"overlay {out_path}")
 
 
