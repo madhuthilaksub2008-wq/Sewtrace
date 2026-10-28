@@ -42,7 +42,7 @@ Follow these steps in order. Do not skip verification.
 
 - `pytest` must pass in full.
 - If you touched anything in `vision/`, `reason/` or `output/`, run `python -m sewtrace.cli eval` and confirm the synthetic mean error is 0.5 mm or less and all seams pass. Report the numbers.
-- If you touched output, run `python -m sewtrace.cli run data/raw/tee1` and confirm the files are produced.
+- If you touched output, run `python -m sewtrace.cli run data/synth/tee1` and confirm the files are produced.
 - Read your full `git diff` as the reviewer would. Remove debug output, dead code and accidental changes.
 - If anything fails, fix it. After 3 genuine attempts, stop and report the failure with the output.
 
