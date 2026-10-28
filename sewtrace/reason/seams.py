@@ -3,10 +3,14 @@
 Owner: Madhu. Joined seams must match within the seam's own range from config
 (SPEC 7.6.1), e.g. the whole sleeve cap against front plus back armhole (ease).
 
-The model only chooses which edge to change and its target length; the
-reshaping itself is deterministic (`set_edge_length`): the edge's end vertex
-slides along the edge tangent and the neighbouring edge follows with a linear
-falloff, so straight edges stay straight and the far corners stay put.
+Measured geometry is never edited here (REQ-RSN-05). The only quantity that can
+change to fix a seam is the sleeve cap shape, one of the inferred quantities of
+REQ-RSN-04: it is the one edge that is hidden in the photos. The model proposes the
+two cap handle lengths (`SeamAdjustment`); the code fix scales the handles to hit the
+middle of the allowed ease range. The cap end points stay fixed. A shoulder, side or
+underarm pair that fails comes from two measured edges, so no step edits it: the loop
+stops and `require_seams_ok` raises with the pair named. Neck depth and grain do not
+touch any seam, so they are not adjustable here.
 """
 
 from __future__ import annotations
@@ -16,36 +20,28 @@ import logging
 from functools import partial
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from sewtrace.api.client import MetaClient
 from sewtrace.config import get_config
+from sewtrace.reason.reshape import SleeveCap, cap_width_mm, fit_cap, scale_cap_to_length, with_sleeve_cap
 from sewtrace.types import Panel, PanelSpec, Seam
 
 log = logging.getLogger(__name__)
 
-# Edges whose end vertex may move: shoulder point, underarm, hem corner, cap underarm.
-ADJUSTABLE_EDGES = {"shoulder", "armhole", "side", "cap"}
-MOCK_FIX_FRACTION = 0.5  # the mock model fixes half the error, on one seam per call
+CAP_REF = "sleeve.cap"  # the only seam edge the loop may reshape
+MOCK_FIX_FRACTION = 0.5  # the mock model fixes half the error, on one call
 
-ADJUST_SCHEMA = {
-    "type": "object",
-    "required": ["adjustments"],
-    "properties": {
-        "adjustments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["panel", "edge", "target_length_mm"],
-                "properties": {
-                    "panel": {"enum": ["front", "back", "sleeve"]},
-                    "edge": {"enum": sorted(ADJUSTABLE_EDGES)},
-                    "target_length_mm": {"type": "number"},
-                },
-            },
-        },
-        "notes": {"type": "string"},
-    },
-}
+
+class SeamAdjustment(BaseModel):
+    """The whole seam-loop model answer: a new sleeve cap shape and nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sleeve_cap: SleeveCap
+
+
+ADJUST_SCHEMA = SeamAdjustment.model_json_schema()
 
 
 class SeamCheckFailed(Exception):
@@ -85,7 +81,11 @@ def check_seams(spec: PanelSpec) -> list[Seam]:
 
 
 def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = None) -> tuple[PanelSpec, list[dict]]:
-    """Model fixes failing seams; deterministic fallback after max_calls. Returns spec + log."""
+    """Model fixes a failing cap seam; deterministic fix after max_calls. Returns spec + log.
+
+    Pairs made only of measured edges cannot be fixed: the loop stops and the caller's
+    `require_seams_ok` fails loudly (REQ-SEW-04).
+    """
     max_calls = client.config.seam.max_adjust_calls if max_calls is None else max_calls
     history: list[dict] = []
     calls, source, applied = 0, "initial", []
@@ -102,11 +102,16 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
         })
         if not failing or source == "fallback":
             break
+        fixable = [s for s in failing if s.b == CAP_REF]
+        if not fixable:
+            log.warning("adjust_loop: %s fail between measured edges; nothing may change them",
+                        [seam_name(s) for s in failing])
+            break
         if calls < max_calls:
-            prompt = build_adjust_prompt(spec, failing)
-            answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, failing))
+            prompt = build_adjust_prompt(spec, fixable)
+            answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA)
             calls += 1
-            spec, applied = apply_adjustments(spec, answer)
+            spec, applied = apply_adjustment(spec, answer)
             source = "model"
         else:
             spec, applied = fallback_fix(spec)
@@ -121,111 +126,62 @@ def seam_name(seam: Seam) -> str:
 
 
 def build_adjust_prompt(spec: PanelSpec, failing: list[Seam]) -> str:
-    """Short text-only prompt: failing seams with lengths and allowed ranges."""
+    """Short text-only prompt: fixed prefix first (cache discount), then the failing cap seam."""
+    cfg = get_config().seam
+    sleeve = spec.panel("sleeve")
+    cap = fit_cap(sleeve.edge_points("cap"))
     rows = [
         f"- {s.a} ({s.len_a_mm:.1f} mm) sews to {s.b}"
         f"{f' x {s.b_count}' if s.b_count > 1 else ''} ({s.len_b_mm:.1f} mm): "
         f"b - a = {s.diff_mm:+.1f} mm, allowed {s.min_diff_mm:+.1f} to {s.max_diff_mm:+.1f}"
         for s in failing
     ]
-    cfg = get_config().seam
-    current = {f"{p.name}.{e.name}": round(edge_length(p, e.name), 1)
-               for p in spec.panels for e in p.edges if e.name in ADJUSTABLE_EDGES}
     return "\n".join([
         "You are a pattern maker checking a kids' t-shirt pattern (mm, half panels on fold).",
-        "These seams do not sew together within tolerance:",
-        *rows,
-        f"Current adjustable edge lengths: {json.dumps(current)}",
-        "Choose which edge(s) to lengthen or shorten. Prefer changing the back panel or the",
-        "sleeve cap; keep the front as measured. The whole sleeve cap (2 x the half cap) must be",
+        "The sleeve cap does not sew to the armholes within tolerance. You may change only the",
+        "sleeve cap shape: two handle lengths of the half cap curve (a cubic Bezier from the cap top",
+        "to the underarm corner, horizontal tangents at both ends). Longer handles give a longer cap.",
+        "Everything else is measured and fixed. Handles run from 0 to the cap width.",
+        "The whole sleeve cap (2 x the half cap) must be "
         f"{cfg.cap_ease_min_mm:g} to {cfg.cap_ease_max_mm:g} mm longer than front armhole plus back armhole (ease).",
-        "Edge lengths and target_length_mm are for the half panel. Code reshapes the edge to your target.",
-        "Return ONLY JSON matching this schema:",
+        "Return ONLY JSON with exactly this field and no other:",
         json.dumps(ADJUST_SCHEMA, separators=(",", ":")),
+        "Failing seam:",
+        *rows,
+        f"Cap width: {cap_width_mm(sleeve):.1f} mm. Current half cap length: {edge_length(sleeve, 'cap'):.1f} mm.",
+        f"Current handles: crown_run_mm {cap.crown_run_mm:.1f}, underarm_run_mm {cap.underarm_run_mm:.1f}.",
     ])
 
 
-def apply_adjustments(spec: PanelSpec, answer: dict) -> tuple[PanelSpec, list[dict]]:
-    """Apply the model's target lengths; unknown or wild requests are skipped."""
-    applied = []
-    for adj in answer.get("adjustments", []) if isinstance(answer, dict) else []:
-        try:
-            name, edge, target = adj["panel"], adj["edge"], float(adj["target_length_mm"])
-            panel = spec.panel(name)
-            current = edge_length(panel, edge)
-        except (KeyError, TypeError, ValueError, StopIteration):
-            log.warning("skipping malformed adjustment %r", adj)
-            continue
-        if edge not in ADJUSTABLE_EDGES or not 0.5 * current <= target <= 1.5 * current:
-            log.warning("skipping adjustment out of bounds %r", adj)
-            continue
-        spec = _replace_panel(spec, set_edge_length(panel, edge, target))
-        applied.append({"panel": name, "edge": edge, "from_mm": round(current, 2),
-                        "to_mm": round(edge_length(spec.panel(name), edge), 2)})
-    return spec, applied
+def apply_adjustment(spec: PanelSpec, answer: dict) -> tuple[PanelSpec, list[dict]]:
+    """Apply the model's cap shape; an answer that fails the schema or the cap width is skipped."""
+    try:
+        cap = SeamAdjustment.model_validate(answer).sleeve_cap
+    except ValidationError as exc:
+        log.warning("skipping adjustment that fails the schema: %s", exc.error_count())
+        return spec, []
+    sleeve = spec.panel("sleeve")
+    if max(cap.crown_run_mm, cap.underarm_run_mm) > cap_width_mm(sleeve):
+        log.warning("skipping adjustment with handles longer than the cap width: %r", cap)
+        return spec, []
+    return _set_cap(spec, cap)
 
 
-def fallback_fix(spec: PanelSpec, passes: int = 3) -> tuple[PanelSpec, list[dict]]:
-    """Code fix: set each failing seam's b edge to the middle of its allowed range."""
-    applied = []
-    for _ in range(passes):
-        seams = check_seams(spec)
-        refs = list(dict.fromkeys(s.b for s in seams if not s.ok and _adjustable(s.b)))
-        if not refs:
-            break
-        for ref in refs:
-            target = _targets(check_seams(spec))[ref]
-            name, edge = ref.split(".")
-            current = edge_length(spec.panel(name), edge)
-            spec = _replace_panel(spec, set_edge_length(spec.panel(name), edge, target))
-            applied.append({"panel": name, "edge": edge, "from_mm": round(current, 2),
-                            "to_mm": round(edge_length(spec.panel(name), edge), 2)})
-    return spec, applied
+def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
+    """Code fix: scale the cap handles so the whole cap sits in the middle of its ease range."""
+    cap_seam = next((s for s in check_seams(spec) if s.b == CAP_REF and not s.ok), None)
+    if cap_seam is None:
+        return spec, []
+    pts = spec.panel("sleeve").edge_points("cap")
+    return _set_cap(spec, scale_cap_to_length(pts, fit_cap(pts), _target_half_cap(cap_seam)))
 
 
-def set_edge_length(panel: Panel, edge: str, target: float, iters: int = 50) -> Panel:
-    """Slide the edge's end vertex along its tangent until the edge is `target` mm long."""
-    pts = panel.edge_points(edge)
-    tangent = pts[-1] - pts[-2]
-    tangent /= np.linalg.norm(tangent)
-    span = 0.5 * edge_length(panel, edge)
-    lo, hi = -span, span
-
-    def length_at(t: float) -> float:
-        return edge_length(move_edge_end(panel, edge, t * tangent), edge)
-
-    if length_at(lo) >= target:
-        hi = lo
-    elif length_at(hi) <= target:
-        lo = hi
-    for _ in range(iters):
-        mid = (lo + hi) / 2
-        lo, hi = (mid, hi) if length_at(mid) < target else (lo, mid)
-    return move_edge_end(panel, edge, (lo + hi) / 2 * tangent)
-
-
-def move_edge_end(panel: Panel, edge: str, delta: np.ndarray) -> Panel:
-    """Displace the edge's end vertex by delta; this edge and the next follow linearly."""
-    pts = np.asarray(panel.outline_mm, dtype=float)
-    e = next(x for x in panel.edges if x.name == edge)
-    nxt = next(x for x in panel.edges if x.start == e.end and x.name != edge)
-    new = pts.copy()
-    for ed, rising in ((e, True), (nxt, False)):
-        idx = _indices(ed.start, ed.end, len(pts))
-        seg = pts[idx]
-        cum = np.r_[0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
-        frac = cum / cum[-1] if cum[-1] > 0 else np.linspace(0, 1, len(seg))
-        w = frac if rising else 1 - frac
-        new[idx] = seg + w[:, None] * delta
-    return panel.model_copy(update={"outline_mm": [(float(x), float(y)) for x, y in new]})
-
-
-def _indices(start: int, end: int, n: int) -> list[int]:
-    return list(range(start, end + 1)) if start <= end else list(range(start, n)) + list(range(end + 1))
-
-
-def _adjustable(ref: str) -> bool:
-    return ":" not in ref and ref.split(".")[1] in ADJUSTABLE_EDGES
+def _set_cap(spec: PanelSpec, cap: SleeveCap) -> tuple[PanelSpec, list[dict]]:
+    before = edge_length(spec.panel("sleeve"), "cap")
+    sleeve = with_sleeve_cap(spec.panel("sleeve"), cap)
+    applied = [{"sleeve_cap": cap.model_dump(), "from_mm": round(before, 2),
+                "to_mm": round(edge_length(sleeve, "cap"), 2)}]
+    return _replace_panel(spec, sleeve), applied
 
 
 def _ref_length(spec: PanelSpec, ref: str) -> float:
@@ -241,35 +197,18 @@ def _ref_length(spec: PanelSpec, ref: str) -> float:
     return total
 
 
-def _excess(seam: Seam) -> float:
-    return max(seam.min_diff_mm - seam.diff_mm, seam.diff_mm - seam.max_diff_mm, 0.0)
-
-
-def _targets(seams: list[Seam]) -> dict[str, float]:
-    """Ideal half-panel length per b edge: middle of the intersection of its seams' allowed ranges."""
-    ranges: dict[str, tuple[float, float]] = {}
-    for s in seams:
-        lo, hi = (s.len_a_mm + s.min_diff_mm) / s.b_count, (s.len_a_mm + s.max_diff_mm) / s.b_count
-        if s.b in ranges:
-            lo, hi = max(lo, ranges[s.b][0]), min(hi, ranges[s.b][1])
-        ranges[s.b] = (lo, hi)
-    return {ref: (lo + hi) / 2 for ref, (lo, hi) in ranges.items()}
+def _target_half_cap(seam: Seam) -> float:
+    """Ideal half-cap length: the middle of the allowed range of the whole cap."""
+    return (seam.len_a_mm + (seam.min_diff_mm + seam.max_diff_mm) / 2) / seam.b_count
 
 
 def _mock_adjust(spec: PanelSpec, failing: list[Seam]) -> dict:
-    """Deliberately imperfect stand-in: worst seam only, half the error."""
-    fixable = [s for s in failing if _adjustable(s.b)]
-    if not fixable:
-        return {"adjustments": [], "notes": "mock: no adjustable edge"}
-    worst = max(fixable, key=_excess)
-    target = _targets(check_seams(spec))[worst.b]
-    current = worst.len_b_mm / worst.b_count
-    name, edge = worst.b.split(".")
-    return {
-        "adjustments": [{"panel": name, "edge": edge,
-                         "target_length_mm": round(current + MOCK_FIX_FRACTION * (target - current), 2)}],
-        "notes": f"mock: moved {worst.b} part way toward {target:.1f} mm",
-    }
+    """Deliberately imperfect stand-in: moves the cap only part way to the target."""
+    seam = failing[0]
+    pts = spec.panel("sleeve").edge_points("cap")
+    current = seam.len_b_mm / seam.b_count
+    target = current + MOCK_FIX_FRACTION * (_target_half_cap(seam) - current)
+    return SeamAdjustment(sleeve_cap=scale_cap_to_length(pts, fit_cap(pts), target)).model_dump()
 
 
 def _replace_panel(spec: PanelSpec, panel: Panel) -> PanelSpec:

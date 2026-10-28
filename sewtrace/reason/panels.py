@@ -1,66 +1,65 @@
 """T16: panel inference. Measured half outlines + photos -> PanelSpec.
 
-Owner: Madhu. In mock mode the "model" answer is the deterministic draft
-built from the measured outlines, which also serves as the fallback.
+Owner: Madhu. The model infers only what the photos cannot show (REQ-RSN-04):
+front neck depth, back neck depth, sleeve cap shape and grain line. It answers
+with the `PanelInference` model below, sent as structured output (REQ-RSN-02).
+Code applies those few numbers to the deterministic draft (`reshape`) and checks
+that no measured edge moved more than the config tolerance (REQ-RSN-05). A bad
+answer gets one retry, then the draft is used as is (REQ-RSN-03).
 
-The model sees the draft as named edge polylines (downsampled to ~5 mm on
-curves, 2 points on straight runs) and answers in the same shape, so code can
-rebuild the outline and edge index ranges. Cut, fold, notches, neckband and
-seams are always derived by code from the returned geometry.
+Neck width is measured, so it is never in the answer. The armhole is hidden under
+the sleeve in a flat-lay photo, but SPEC does not list it as model output. It stays
+the code default (config [contour.armhole]); only the cap shape can adapt to it.
+In mock mode the "model" answer is read off the draft.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from typing import Literal
 
 import numpy as np
+import shapely
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shapely.geometry import LineString, Polygon
 
 from sewtrace.api.client import MetaClient
 from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
+from sewtrace.reason.reshape import (
+    SleeveCap, cap_width_mm, fit_cap, neck_depth_mm, with_neck_depth, with_sleeve_cap,
+)
 from sewtrace.reason.seams import check_seams, edge_length
 from sewtrace.types import TEE_EDGES, TEE_PANELS, Edge, Outline, Panel, PanelSpec, PhotoSet
+from sewtrace.vision.measure import measure_tee
 
 log = logging.getLogger(__name__)
 
-PROMPT_STEP_MM = 5.0
-SIMPLIFY_MM = 0.3
-EDGE_GAP_MM = 2.0
 NOTCH_FRAC = 0.4  # armhole notch, fraction of armhole length up from the underarm
 DOUBLE_NOTCH_GAP_MM = 6.0
 CUTS = {"front": "1 on fold", "back": "1 on fold", "sleeve": "2 on fold"}
-
-_POLYLINE = {"type": "array", "minItems": 2,
-             "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}}
-
-ANSWER_SCHEMA = {
-    "type": "object",
-    "required": ["panels"],
-    "properties": {
-        "panels": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "required": ["name", "grain", "edges"],
-                "properties": {
-                    "name": {"enum": ["front", "back", "sleeve"]},
-                    "grain": {"enum": ["vertical", "horizontal"]},
-                    "edges": {
-                        "type": "object",
-                        "description": "edge name -> polyline [[x,y],...] in mm, in outline order; "
-                                       "each edge starts at the previous edge's last point",
-                        "additionalProperties": _POLYLINE,
-                    },
-                },
-            },
-        },
-        "front_neck_depth_mm": {"type": "number"},
-        "back_neck_depth_mm": {"type": "number"},
-        "notes": {"type": "string"},
-    },
+# Edges that must come back exactly as measured. The body fold is compared without its neck end,
+# which moves with the neck depth (the fold meets the neck curve at the inferred depth).
+MEASURED_EDGES = {
+    "front": ("shoulder", "armhole", "side", "hem"),
+    "back": ("shoulder", "armhole", "side", "hem"),
+    "sleeve": ("underarm", "hem", "fold"),
 }
+
+
+class PanelInference(BaseModel):
+    """The whole model answer (REQ-RSN-02, REQ-RSN-04). No other field is allowed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    front_neck_depth_mm: float = Field(
+        gt=0, description="Front neck depth in mm: from the neck point down to the neck curve at the fold.")
+    back_neck_depth_mm: float = Field(
+        gt=0, description="Back neck depth in mm: from the neck point down to the neck curve at the fold.")
+    sleeve_cap: SleeveCap = Field(description="Shape of the half sleeve cap.")
+    grain_line: Literal["vertical", "horizontal"] = Field(
+        description="Grain direction for front, back and sleeve. Vertical means parallel to the fold.")
 
 
 def draft_spec(
@@ -78,32 +77,38 @@ def draft_spec(
 
 
 def build_prompt(spec: PanelSpec, measurements: dict[str, float]) -> str:
-    draft = {"panels": _geometry(spec)["panels"]}
+    """Photos plus a few measured numbers. The only model output is PanelInference."""
+    cfg = get_config()
+    seam, inf = cfg.seam, cfg.inference
+    sleeve = spec.panel("sleeve")
+    cap = fit_cap(sleeve.edge_points("cap"))
     meas = {k: round(v, 1) for k, v in measurements.items()}
-    seam = get_config().seam
+    neck_half = float(spec.panel("front").edge_points("neck")[-1, 0])
+    arm = edge_length(spec.panel("front"), "armhole") + edge_length(spec.panel("back"), "armhole")
     return "\n".join([
         "You are an expert pattern maker. The three photos show one kids' round-neck t-shirt laid",
         "flat: front view, back view, and one sleeve folded flat. A segmentation model measured the",
-        "draft below from the photos (accurate to about 2 mm).",
-        "Coordinates: mm, x right, y DOWN. front, back and sleeve are HALF panels cut on the fold:",
-        "the fold is the line x = 0 and the panel lies at x >= 0. Outlines are stitch lines (no seam",
-        "allowance). Body edges run neck, shoulder, armhole, side, hem, fold; sleeve edges run cap,",
-        "underarm, hem, fold. Each edge starts at the previous edge's last point; fold ends at neck",
-        "(or cap) start.",
-        "Infer what the flat photos cannot show directly and correct the draft only where needed:",
-        "1. Neck depth: the front neck is usually deeper than the back (kids: back 15-25 mm). The",
-        "   back neck is hidden in the front photo; use the back photo. Edit each neck curve.",
-        "2. Sleeve cap: the folded sleeve hides the cap shape. Keep a smooth convex cap from (0,0)",
-        f"   whose whole length (2 x the half cap) is {seam.cap_ease_min_mm:g} to {seam.cap_ease_max_mm:g} mm",
-        "   longer than the front armhole plus the back armhole (ease).",
-        "3. Grain: knit tees normally have vertical grain (parallel to the fold) on all three.",
-        "Rules: keep every point within 10 mm of the draft unless a photo clearly disagrees; keep",
-        "edge names, order and the fold on x = 0; shoulder and side lengths must match front to back;",
-        "omit the neckband (code sizes it at 85% of the neckline).",
+        "garment from the photos (accurate to about 2 mm). Every measured edge is fixed: you cannot",
+        "change it, and you do not return it.",
+        "Infer ONLY these four fields. They are the whole answer:",
+        f"1. front_neck_depth_mm: front neck depth, {inf.front_neck_depth_min_mm:g} to "
+        f"{inf.front_neck_depth_max_mm:g} mm. Draft: {neck_depth_mm(spec.panel('front')):.1f}.",
+        f"2. back_neck_depth_mm: back neck depth, {inf.back_neck_depth_min_mm:g} to "
+        f"{inf.back_neck_depth_max_mm:g} mm. Kids' back necks are shallow (about 15 to 25 mm). "
+        f"The back neck is hidden in the front photo, so use the back photo. Draft: "
+        f"{neck_depth_mm(spec.panel('back')):.1f}.",
+        "3. sleeve_cap: the folded sleeve hides the cap shape. Give two handle lengths in mm of the",
+        "   half cap curve (a cubic Bezier from the cap top to the underarm corner, horizontal",
+        "   tangents at both ends): crown_run_mm and underarm_run_mm, each 0 to the cap width. Longer",
+        f"   handles make a longer, fuller cap. The cap width is {cap_width_mm(sleeve):.1f} mm. The whole",
+        f"   cap (2 x the half cap) must be {seam.cap_ease_min_mm:g} to {seam.cap_ease_max_mm:g} mm longer than",
+        f"   the front armhole plus the back armhole ({arm:.1f} mm). Draft handles: "
+        f"{cap.crown_run_mm:.1f}, {cap.underarm_run_mm:.1f}.",
+        "4. grain_line: vertical or horizontal for front, back and sleeve. Knit tees normally have",
+        "   vertical grain (parallel to the fold).",
+        f"Half neck width (measured, fixed): {neck_half:.1f} mm.",
         f"Measurements (mm): {json.dumps(meas)}",
-        f"Draft: {json.dumps(draft, separators=(',', ':'))}",
-        "Return ONLY JSON (no prose, no code fence) matching this schema:",
-        json.dumps(ANSWER_SCHEMA, separators=(",", ":")),
+        "Return ONLY JSON with exactly these four fields, no prose and no other field.",
     ])
 
 
@@ -111,38 +116,83 @@ def infer_panels(
     client: MetaClient, photos: PhotoSet, draft: PanelSpec, measurements: dict[str, float],
     *, history: list[dict] | None = None,
 ) -> PanelSpec:
-    """Ask the model to refine the draft; validate; fall back to the draft.
+    """Ask the model for the four inferred fields; apply and check them; fall back to the draft.
 
     Pass `history` (a list) to receive one record per attempt.
     """
     history = history if history is not None else []
     images = [photos.front, photos.back, photos.sleeve]
-    prompt = build_prompt(draft, measurements)
+    base_prompt = build_prompt(draft, measurements)
+    prompt = base_prompt
     for attempt in (1, 2):
         calls = client.calls
-        answer = client.reason(prompt, images, mock=lambda: _mock_answer(draft))
-        spec, problems = parse_answer(answer, draft)
-        if spec is not None:
-            problems += validate_spec(spec, draft)
+        answer = client.reason(prompt, images, mock=lambda: _mock_answer(draft),
+                               schema=PanelInference.model_json_schema())
+        spec, problems = apply_answer(answer, draft)
         record = {"attempt": attempt, "new_call": client.calls > calls, "problems": problems,
-                  "notes": answer.get("notes", "") if isinstance(answer, dict) else ""}
+                  "answer": answer}
         history.append(record)
-        if not problems:
+        if spec is not None and not problems:
             record["result"] = "accepted"
             log.info("infer_panels: model answer accepted on attempt %d", attempt)
             return spec
         record["result"] = "retry" if attempt == 1 else "fallback"
-        log.warning("infer_panels attempt %d invalid: %s", attempt, problems)
-        prompt = build_prompt(draft, measurements) + (
+        log.warning("infer_panels attempt %d rejected: %s", attempt, problems)
+        prompt = base_prompt + (
             "\nYour previous answer was rejected for: " + "; ".join(problems[:10])
-            + ". Fix these and return the full JSON again."
+            + ". Fix these and return the four fields again."
         )
     log.warning("infer_panels: falling back to the measured draft")
     return draft
 
 
-def validate_spec(spec: PanelSpec, draft: PanelSpec, max_drift_mm: float = 15.0) -> list[str]:
-    """Problems found (empty list = valid)."""
+def apply_answer(answer: dict, draft: PanelSpec) -> tuple[PanelSpec | None, list[str]]:
+    """Parse (pydantic), apply to the draft and validate. Returns (spec or None, problems)."""
+    try:
+        inference = PanelInference.model_validate(answer)
+    except ValidationError as exc:
+        return None, [f"answer rejected by the schema: {_errors(exc)}"]
+    problems = inference_problems(inference, draft)
+    if problems:
+        return None, problems
+    spec = apply_inference(draft, inference)
+    return spec, validate_spec(spec, draft)
+
+
+def inference_problems(inference: PanelInference, draft: PanelSpec) -> list[str]:
+    """Values outside the ranges from config or outside the sleeve geometry."""
+    cfg = get_config().inference
+    problems = []
+    for name, depth in (("front", inference.front_neck_depth_mm), ("back", inference.back_neck_depth_mm)):
+        lo, hi = getattr(cfg, f"{name}_neck_depth_min_mm"), getattr(cfg, f"{name}_neck_depth_max_mm")
+        if not lo <= depth <= hi:
+            problems.append(f"{name}_neck_depth_mm {depth:g} is outside {lo:g} to {hi:g}")
+    width = cap_width_mm(draft.panel("sleeve"))
+    for field in ("crown_run_mm", "underarm_run_mm"):
+        value = getattr(inference.sleeve_cap, field)
+        if value > width:
+            problems.append(f"sleeve_cap.{field} {value:g} is more than the cap width {width:.1f}")
+    return problems
+
+
+def apply_inference(draft: PanelSpec, inference: PanelInference) -> PanelSpec:
+    """Draft with the four inferred quantities applied. Nothing else is edited."""
+    by = {p.name: p for p in draft.panels}
+    panels = [
+        with_neck_depth(by["front"], inference.front_neck_depth_mm),
+        with_neck_depth(by["back"], inference.back_neck_depth_mm),
+        with_sleeve_cap(by["sleeve"], inference.sleeve_cap),
+    ]
+    return _assemble([p.model_copy(update={"grain": inference.grain_line}) for p in panels])
+
+
+def refresh_derived(spec: PanelSpec) -> PanelSpec:
+    """Recompute notches, neckband and seams after the outlines changed (after the seam loop)."""
+    return _assemble([p for p in spec.panels if p.name in TEE_EDGES])
+
+
+def validate_spec(spec: PanelSpec, draft: PanelSpec) -> list[str]:
+    """Problems found (empty list = valid): structure, then measured values (REQ-RSN-05)."""
     problems = []
     names = [p.name for p in spec.panels]
     problems += [f"missing panel {n}" for n in TEE_PANELS if n not in names]
@@ -159,42 +209,47 @@ def validate_spec(spec: PanelSpec, draft: PanelSpec, max_drift_mm: float = 15.0)
         if panel.on_fold and pts[:, 0].min() < -1.0:
             problems.append(f"{panel.name}: on-fold panel crosses x = 0")
         problems += _edge_problems(panel, len(pts))
-        ref = next((p for p in draft.panels if p.name == panel.name), None)
-        if ref is not None and panel.name in TEE_EDGES and len(ref.outline_mm) >= 3:
-            drift = LineString([*pts, pts[0]]).hausdorff_distance(
-                LineString([*ref.outline_mm, ref.outline_mm[0]]))
-            if drift > max_drift_mm:
-                problems.append(f"{panel.name}: outline drifts {drift:.1f} mm from draft")
+    if not problems:
+        problems += measured_changes(draft, spec)
     return problems
 
 
-def parse_answer(answer: dict, draft: PanelSpec) -> tuple[PanelSpec | None, list[str]]:
-    """Model JSON -> PanelSpec (None plus problems if it cannot be built)."""
-    if not isinstance(answer, dict) or not isinstance(answer.get("panels"), list):
-        return None, ["answer has no panels list"]
-    given = {p.get("name"): p for p in answer["panels"] if isinstance(p, dict)}
-    panels, problems = [], []
-    for name, edge_names in TEE_EDGES.items():
-        raw = given.get(name)
-        if raw is None:
-            problems.append(f"missing panel {name}")
+def measured_changes(draft: PanelSpec, spec: PanelSpec) -> list[str]:
+    """Measured values that differ from the draft by more than the config tolerance (REQ-RSN-05).
+
+    Compares the visible edges, the neck width, the cap end points, the fold, and the six
+    measurements. The neck depth and the cap shape between its end points may change.
+    """
+    tol = get_config().inference.measured_tol_mm
+    problems = []
+    for name, edges in MEASURED_EDGES.items():
+        before, after = draft.panel(name), spec.panel(name)
+        for edge in edges:
+            moved = _moved_mm(before.edge_points(edge), after.edge_points(edge))
+            if moved > tol:
+                problems.append(f"{name}.{edge} moved {moved:.1f} mm from the measured edge (limit {tol:g})")
+    for name in ("front", "back"):
+        before, after = draft.panel(name), spec.panel(name)
+        # Only the part of the fold below both neck starts is measured.
+        cut = max(before.edge_points("neck")[0, 1], after.edge_points("neck")[0, 1])
+        moved = _moved_mm(_fold_below(before.edge_points("fold"), cut), _fold_below(after.edge_points("fold"), cut))
+        n0, n1 = before.edge_points("neck"), after.edge_points("neck")
+        if len(n0) != len(n1):
+            problems.append(f"{name}.neck changed its point count")
             continue
-        try:
-            segs = [np.asarray(raw["edges"][e], dtype=float).reshape(-1, 2) for e in edge_names]
-        except (KeyError, TypeError, ValueError) as exc:
-            problems.append(f"{name}: bad or missing edge ({exc})")
-            continue
-        outline, edges, gaps = _join(list(zip(edge_names, segs)))
-        if gaps:
-            problems += [f"{name}: {g}" for g in gaps]
-            continue
-        grain = raw.get("grain", "vertical")
-        panel = _body_panel(name, Outline.from_array(outline), edges)
-        panels.append(panel.model_copy(update={"grain": grain if grain in ("vertical", "horizontal")
-                                                else "vertical"}))
+        # Same x everywhere and the same neck point: the neck width stays as measured.
+        moved = max(moved, float(np.abs(n0[:, 0] - n1[:, 0]).max()), float(np.linalg.norm(n0[-1] - n1[-1])))
+        if moved > tol:
+            problems.append(f"{name} fold or neck width moved {moved:.1f} mm from measured (limit {tol:g})")
+    c0, c1 = draft.panel("sleeve").edge_points("cap"), spec.panel("sleeve").edge_points("cap")
+    ends = max(float(np.linalg.norm(c0[0] - c1[0])), float(np.linalg.norm(c0[-1] - c1[-1])))
+    if ends > tol:
+        problems.append(f"sleeve.cap end points moved {ends:.1f} mm from measured (limit {tol:g})")
     if problems:
-        return None, problems
-    return _assemble(panels), []
+        return problems
+    before, after = _measure(draft), _measure(spec)
+    return [f"measurement {k} changed by {after[k] - before[k]:+.1f} mm (limit {tol:g})"
+            for k in before if abs(after[k] - before[k]) > tol]
 
 
 def estimate_tokens(text: str) -> int:
@@ -247,53 +302,6 @@ def _point_at(pts: np.ndarray, dist: float) -> tuple[float, float]:
     return (float(np.interp(dist, cum, pts[:, 0])), float(np.interp(dist, cum, pts[:, 1])))
 
 
-def _join(segs: list[tuple[str, np.ndarray]]) -> tuple[np.ndarray, list[Edge], list[str]]:
-    """Edge polylines (sharing end points) -> outline, edge index ranges, gap problems."""
-    pts, edges, gaps = [], [], []
-    for i, (name, seg) in enumerate(segs):
-        if len(seg) < 2:
-            gaps.append(f"edge {name} has fewer than 2 points")
-            continue
-        nxt = segs[(i + 1) % len(segs)][1]
-        if len(nxt) and np.linalg.norm(seg[-1] - nxt[0]) > EDGE_GAP_MM:
-            gaps.append(f"edge {name} does not meet the next edge")
-        start = len(pts)
-        pts.extend(seg[:-1])
-        edges.append(Edge(name=name, start=start, end=len(pts)))
-    if edges:
-        edges[-1] = Edge(name=edges[-1].name, start=edges[-1].start, end=0)
-    return np.asarray(pts), edges, gaps
-
-
-def _simplify(seg: np.ndarray, step: float = PROMPT_STEP_MM) -> list[list[float]]:
-    """Resample at ~step mm, then drop points within SIMPLIFY_MM of a straight run."""
-    cum = np.r_[0, np.cumsum(np.linalg.norm(np.diff(seg, axis=0), axis=1))]
-    n = max(1, int(np.ceil(cum[-1] / step)))
-    s = np.linspace(0, cum[-1], n + 1)
-    res = np.c_[np.interp(s, cum, seg[:, 0]), np.interp(s, cum, seg[:, 1])]
-    line = LineString(res).simplify(SIMPLIFY_MM, preserve_topology=False)
-    return [[round(x, 1), round(y, 1)] for x, y in line.coords]
-
-
-def _geometry(spec: PanelSpec) -> dict:
-    """Spec as the answer schema: downsampled named edge polylines per panel."""
-    return {"panels": [
-        {"name": p.name, "grain": p.grain,
-         "edges": {e: _simplify(p.edge_points(e)) for e in TEE_EDGES[p.name]}}
-        for p in spec.panels if p.name in TEE_EDGES
-    ]}
-
-
-def _mock_answer(draft: PanelSpec) -> dict:
-    """Deterministic stand-in: the draft geometry echoed back, with neck depths read off it."""
-    answer = _geometry(draft)
-    for name in ("front", "back"):
-        neck = draft.panel(name).edge_points("neck")
-        answer[f"{name}_neck_depth_mm"] = round(float(neck[:, 1].max() - neck[:, 1].min()), 1)
-    answer["notes"] = "mock: draft accepted unchanged"
-    return answer
-
-
 def _edge_problems(panel: Panel, n: int) -> list[str]:
     problems = []
     names = [e.name for e in panel.edges]
@@ -308,3 +316,38 @@ def _edge_problems(panel: Panel, n: int) -> list[str]:
         if np.ptp(pts[:, 0]) <= 0 or np.ptp(pts[:, 1]) <= 0:
             problems.append("neckband: non-positive length or width")
     return problems
+
+
+def _moved_mm(before: np.ndarray, after: np.ndarray) -> float:
+    """Largest distance between two polylines, in mm, and between their end points.
+
+    Densified, so point counts may differ; the end points catch an edge that slid along itself."""
+    shape = float(shapely.hausdorff_distance(LineString(before), LineString(after), densify=0.05))
+    ends = max(float(np.linalg.norm(before[0] - after[0])), float(np.linalg.norm(before[-1] - after[-1])))
+    return max(shape, ends)
+
+
+def _fold_below(fold: np.ndarray, cut_y: float) -> np.ndarray:
+    """Fold polyline from the hem up to y = cut_y (y grows downward), cut by interpolation."""
+    kept = fold[fold[:, 1] > cut_y]
+    x_cut = float(np.interp(cut_y, fold[::-1, 1], fold[::-1, 0]))
+    return np.vstack([kept, [x_cut, cut_y]])
+
+
+def _measure(spec: PanelSpec) -> dict[str, float]:
+    front, sleeve = spec.panel("front"), spec.panel("sleeve")
+    return measure_tee(front.outline(), front.edges, sleeve.outline(), sleeve.edges)
+
+
+def _errors(exc: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(str(x) for x in e['loc']) or 'answer'}: {e['msg']}" for e in exc.errors()[:10])
+
+
+def _mock_answer(draft: PanelSpec) -> dict:
+    """Deterministic stand-in built through the same pydantic model: values read off the draft."""
+    return PanelInference(
+        front_neck_depth_mm=round(neck_depth_mm(draft.panel("front")), 1),
+        back_neck_depth_mm=round(neck_depth_mm(draft.panel("back")), 1),
+        sleeve_cap=fit_cap(draft.panel("sleeve").edge_points("cap")),
+        grain_line="vertical",
+    ).model_dump()

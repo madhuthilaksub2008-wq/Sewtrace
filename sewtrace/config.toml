@@ -64,6 +64,13 @@ paper = "paper"
 shoulder_handle = 0.45
 underarm_handle = 0.12
 
+[inference]                # REQ-RSN-04, REQ-RSN-05
+measured_tol_mm = 0.5      # a measured edge may not move more than this after inference
+front_neck_depth_min_mm = 15.0   # accepted range for the inferred depths (neck point to fold)
+front_neck_depth_max_mm = 120.0
+back_neck_depth_min_mm = 5.0
+back_neck_depth_max_mm = 60.0
+
 [seam]                     # SPEC 7.6.1, mm
 shoulder_tol_mm = 1.0
 side_tol_mm = 1.0

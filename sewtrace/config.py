@@ -90,6 +90,21 @@ class ContourConfig(_Strict):
     armhole: ArmholeConfig
 
 
+class InferenceConfig(_Strict):
+    measured_tol_mm: float = Field(gt=0)
+    front_neck_depth_min_mm: float = Field(gt=0)
+    front_neck_depth_max_mm: float = Field(gt=0)
+    back_neck_depth_min_mm: float = Field(gt=0)
+    back_neck_depth_max_mm: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _ranges(self) -> InferenceConfig:
+        if (self.front_neck_depth_min_mm > self.front_neck_depth_max_mm
+                or self.back_neck_depth_min_mm > self.back_neck_depth_max_mm):
+            raise ValueError("a neck depth minimum is more than its maximum")
+        return self
+
+
 class SeamConfig(_Strict):
     shoulder_tol_mm: float = Field(ge=0)
     side_tol_mm: float = Field(ge=0)
@@ -125,6 +140,7 @@ class AppConfig(_Strict):
     reasoning: ReasoningConfig
     sam: SamConfig
     contour: ContourConfig
+    inference: InferenceConfig
     seam: SeamConfig
     pattern: PatternConfig
     proof: ProofConfig
