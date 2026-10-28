@@ -29,6 +29,7 @@
 With no `META_API_KEY` (or `SEWTRACE_MOCK=1`):
 
 - `segment(photo, prompt)` serves `<photo>.masks/<prompt>.png` written by the
-  synth, with about 1 px of edge jitter.
+  synth, with about 1 px of edge jitter. `t-shirt.png` is the whole garment with
+  sleeves, as real SAM returns it. `body.png` is ground truth only.
 - `reason(prompt, images, mock=fn)` returns `fn()`, so each caller supplies its
   own deterministic stand-in answer.

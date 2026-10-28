@@ -50,7 +50,7 @@ def extract(mask: np.ndarray, H: Homography, view: str):
     if view == "sleeve":
         half = contour.sleeve_half(outline)
         return half, contour.label_sleeve_edges(half)
-    half = contour.body_half(outline)
+    half = contour.body_half(contour.remove_sleeves(outline))
     return half, contour.label_body_edges(half)
 
 
@@ -60,7 +60,7 @@ def halves(tees, session_client) -> dict[tuple[str, str], tuple]:
         out = {}
         for name, (d, truth) in tees.items():
             for view in VIEWS:
-                mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "body")
+                mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "t-shirt")
                 out[name, view] = extract(mask, truth_homography(truth, view), view)
         _SESSION["halves"] = out
     return _SESSION["halves"]
@@ -154,7 +154,7 @@ def rotate_photo(mask: np.ndarray, H: Homography, deg: float, frame_deg: float):
 @pytest.mark.parametrize("view", VIEWS)
 def test_rotated_photo(tees, session_client, view):
     d, truth = tees["tee3"]
-    mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "body")
+    mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "t-shirt")
     for deg, frame_deg in ((7.0, -3.0), (-5.0, 4.0)):
         rmask, H = rotate_photo(mask, truth_homography(truth, view), deg, frame_deg)
         half, edges = extract(rmask, H, view)
@@ -167,9 +167,95 @@ def test_rotated_photo(tees, session_client, view):
 
 def test_body_half_upside_down(tees, session_client):
     d, truth = tees["tee1"]
-    mask = session_client.segment(d / "front.jpg", "body")
+    mask = session_client.segment(d / "front.jpg", "t-shirt")
     rmask, H = rotate_photo(mask, truth_homography(truth, "front"), 180.0, 0.0)
     half, _ = extract(rmask, H, "front")
     ref = np.array(truth["photos"]["front"]["half_outline_mm"])
     assert outline_distance(half.array(), ref) < 1.5
 
+
+
+# ---- whole-garment masks: sleeve removal (REQ-SEG-02, REQ-GEO-01, SPEC 10.1) -----------
+
+def whole_outline(tees, client, name: str, view: str = "front") -> Outline:
+    d, truth = tees[name]
+    mask = client.segment(d / f"{view}.jpg", "t-shirt")
+    return contour.smooth_outline(contour.mask_to_outline(mask, truth_homography(truth, view)))
+
+
+@pytest.mark.parametrize("name", TEE_NAMES)
+@pytest.mark.parametrize("view", ("front", "back"))
+def test_req_geo_01_shoulder_and_underarm_points_match_truth(tees, session_client, name, view):
+    """REQ-GEO-01: both sleeve joints are found on the whole-garment outline: underarm points
+    within 1 mm (measured 0.5 mm worst), shoulder points within 2 mm (1.4 mm worst: the
+    shoulder seam and sleeve top meet at a kink of only about 15 degrees)."""
+    _, truth = tees[name]
+    p, org = truth["params"], np.array(truth["photos"][view]["origin_mm"])
+    shoulder, underarm = contour.find_sleeve_joints(whole_outline(tees, session_client, name, view))
+    want_s = np.array([[org[0] + sx * p["shoulder_half"], org[1] + p["shoulder_drop"]] for sx in (1, -1)])
+    want_u = np.array([[org[0] + sx * p["chest_half"], org[1] + p["shoulder_drop"] + p["armhole_depth"]] for sx in (1, -1)])
+    for got, want, tol in ((shoulder, want_s, 2.0), (underarm, want_u, 1.0)):
+        dist = np.linalg.norm(got[:, None] - want[None], axis=2)
+        assert dist.min(axis=1).max() < tol and dist.min(axis=0).max() < tol  # each joint matched once
+
+
+@pytest.mark.parametrize("name", TEE_NAMES)
+def test_req_geo_01_body_half_from_whole_garment_vs_truth(tees, session_client, name):
+    """REQ-GEO-01: whole-garment mask -> body half outline vs truth. Measured over the 5 tees:
+    outside the armhole mean 0.12 to 0.23 mm, max 0.72 mm; the default armhole (its shape is
+    not visible in the photo) mean 0.67 to 1.04 mm, max 1.79 mm, length error up to 0.83 mm;
+    whole outline mean 0.38 mm worst. The synth armhole is a drafting-style curve, so these
+    armhole numbers flatter the default; a real armhole will differ (fix item 4)."""
+    half, edges = extract_mask_free(tees, session_client, name)
+    want = np.array(tees[name][1]["photos"]["front"]["half_outline_mm"])
+    a, b = tees[name][1]["photos"]["front"]["edges"]["armhole"]
+    got = half.array()
+    got_tree = cKDTree(contour._resample_closed(got, 0.25))
+    d_rest = got_tree.query(np.vstack([want[:a], want[b + 1 :]]))[0]
+    d_arm = got_tree.query(contour._resample_open(want[a : b + 1], 0.5))[0]
+    assert d_rest.mean() < 0.5 and d_rest.max() < 1.5
+    assert d_arm.mean() < 1.5 and d_arm.max() < 2.5
+    assert outline_distance(got, want) < 1.0  # including the armhole
+    arm_got = edge_lengths(half, edges)["armhole"]
+    assert arm_got == pytest.approx(truth_edge_lengths(tees[name][1], "front")["armhole"], abs=1.5)
+
+
+def extract_mask_free(tees, client, name):
+    return extract(client.segment(tees[name][0] / "front.jpg", "t-shirt"), truth_homography(tees[name][1], "front"), "front")
+
+
+def test_req_geo_01_reviewer_repro_whole_garment_sidecar(tees):
+    """The review repro: the raw whole-garment sidecar mask (sleeves included) used to give
+    chest +67.9, body length -33.1, shoulder +313.0 and armhole depth +37.5 mm."""
+    from sewtrace.vision.measure import measure_tee
+
+    d, truth = tees["tee1"]
+    raw = cv2.imread(str(d / "front.masks" / "t-shirt.png"), cv2.IMREAD_GRAYSCALE) > 127
+    front = extract(raw, truth_homography(truth, "front"), "front")
+    sleeve_mask = cv2.imread(str(d / "sleeve.masks" / "sleeve.png"), cv2.IMREAD_GRAYSCALE) > 127
+    sleeve = extract(sleeve_mask, truth_homography(truth, "sleeve"), "sleeve")
+    got = measure_tee(*front, *sleeve)
+    for k in ("chest_width", "body_length", "shoulder_width", "armhole_depth"):
+        assert got[k] == pytest.approx(truth["measurements"][k], abs=2.0), k
+
+
+def test_req_geo_01_body_only_mask_is_an_error(tees):
+    """A mask without sleeves has no joints: fail loudly instead of cutting the body."""
+    d, truth = tees["tee1"]
+    body = cv2.imread(str(d / "front.masks" / "body.png"), cv2.IMREAD_GRAYSCALE) > 127
+    outline = contour.smooth_outline(contour.mask_to_outline(body, truth_homography(truth, "front")))
+    with pytest.raises(ValueError, match="sleeves"):
+        contour.remove_sleeves(outline)
+
+
+def test_req_geo_01_default_armhole_geometry():
+    """The default armhole starts and ends on the joints, bows towards the body centre and
+    leaves the shoulder seam and meets the side seam at right angles."""
+    shoulder, underarm = np.array([140.0, 12.0]), np.array([160.0, 152.0])
+    arm = contour.default_armhole(shoulder, underarm, np.array([-1.0, -0.15]) / 1.011,
+                                  np.array([0.02, 1.0]), np.array([0.0, 200.0]))
+    assert np.allclose(arm[0], shoulder) and np.allclose(arm[-1], underarm)
+    assert arm[:, 0].min() < shoulder[0]  # bows towards the centre (x = 0)
+    start, end = arm[1] - arm[0], arm[-1] - arm[-2]
+    assert abs(start @ np.array([-1.0, -0.15]) / np.linalg.norm(start) / 1.011) < 0.05
+    assert abs(end @ np.array([0.02, 1.0]) / np.linalg.norm(end)) < 0.05

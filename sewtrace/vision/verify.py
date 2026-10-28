@@ -1,8 +1,9 @@
 """T25: overlay proof. Paper FRONT laid on the tee; how far is its edge from the tee's?
 
-Owner: Madhu. SAM masks "paper" and "body" on the proof photo, both outlines go
-to the marker mm frame, and every paper edge point gets its distance to the
-nearest body edge point.
+Owner: Madhu. SAM masks "paper" and "t-shirt" (REQ-SEG-02) on the proof photo, both
+outlines go to the marker mm frame, and every paper edge point gets its distance
+to the nearest body edge point. The t-shirt outline includes the sleeves, so they
+are cut off first, as for the front and back photos.
 """
 
 from __future__ import annotations
@@ -13,10 +14,12 @@ import cv2
 import numpy as np
 import shapely
 from pydantic import BaseModel
+from scipy.spatial import cKDTree
 
 from sewtrace.api.client import MetaClient
 from sewtrace.config import get_config
-from sewtrace.types import Point
+from sewtrace.types import Outline, Point
+from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography
 
 
@@ -41,12 +44,25 @@ def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
     return homography.px_to_mm(biggest.reshape(-1, 2).astype(float))
 
 
-def edge_gaps(paper_mm: np.ndarray, body_mm: np.ndarray, step_mm: float = 2.0) -> tuple[np.ndarray, np.ndarray]:
-    """Paper edge resampled every ``step_mm``, and each point's distance to the body edge."""
+def edge_gaps(
+    paper_mm: np.ndarray,
+    body_mm: np.ndarray,
+    step_mm: float = 2.0,
+    hidden: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Paper edge resampled every ``step_mm``, and each point's distance to the body edge.
+
+    ``hidden`` flags body points that are not a visible edge (the armhole, which the
+    sleeve covers). Paper points whose nearest body point is hidden are left out.
+    """
     ring = shapely.LinearRing(paper_mm)
     pts = shapely.line_interpolate_point(ring, np.arange(0, ring.length, step_mm))
-    dist = shapely.distance(pts, shapely.LinearRing(body_mm))
-    return shapely.get_coordinates(pts), np.asarray(dist, float)
+    dist = np.asarray(shapely.distance(pts, shapely.LinearRing(body_mm)), float)
+    xy = shapely.get_coordinates(pts)
+    if hidden is not None:
+        keep = ~hidden[cKDTree(body_mm).query(xy)[1]]
+        return xy[keep], dist[keep]
+    return xy, dist
 
 
 def gap_result(points: np.ndarray, distances: np.ndarray, tol_mm: float | None = None) -> ProofResult:
@@ -72,9 +88,9 @@ def verify_proof(
     """Gap between the paper edge and the tee body edge on a proof photo."""
     prompts = client.config.sam.prompts
     paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
-    # Body-only prompt is temporary until the whole-garment mask (fix item 3).
-    body = mask_outline_mm(client.segment(photo, prompts.mock_body), homography)
-    points, distances = edge_gaps(paper, body, step_mm)
+    garment = mask_outline_mm(client.segment(photo, prompts.garment), homography)
+    body, armhole = contour.cut_sleeves(contour.smooth_outline(Outline.from_array(garment)))
+    points, distances = edge_gaps(paper, body.array(), step_mm, hidden=armhole)
     return gap_result(points, distances, tol_mm)
 
 

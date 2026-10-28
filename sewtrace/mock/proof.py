@@ -6,7 +6,8 @@ overlay check (vision/verify.py) can be tested against a known gap:
 
   <tee_dir>/proof.jpg                photo, marker in frame
   <tee_dir>/proof.masks/paper.png    the paper sheet
-  <tee_dir>/proof.masks/body.png     full tee body, as if seen through the paper
+  <tee_dir>/proof.masks/t-shirt.png  whole tee with sleeves, as if seen through the paper
+  <tee_dir>/proof.masks/body.png     ground truth only: the tee body without sleeves
   <tee_dir>/proof.json               paper params, outlines, expected gap
 
     python -m sewtrace.mock.proof data/raw/tee1 --scale 1.02

@@ -30,11 +30,22 @@ def test_measurements_match_truth(halves, tees, name):
         assert got[k] == pytest.approx(want[k], abs=TOL_MM), k
 
 
+def test_req_geo_04_whole_garment_mean_error_within_gate(halves, tees):
+    """REQ-GEO-04, SPEC 10.1: on the whole-garment path the mean absolute error over the
+    6 measurements and 5 tees is 0.5 mm or less (the synthetic gate). Per tee it is 0.2
+    to 0.51 mm; the worst single measurement is 0.95 mm."""
+    errors = []
+    for name in TEE_NAMES:
+        got = measure_tee(*halves[name, "front"], *halves[name, "sleeve"])
+        errors += [abs(got[k] - tees[name][1]["measurements"][k]) for k in MEASUREMENT_KEYS]
+    assert np.mean(errors) <= 0.5 and max(errors) < 1.5
+
+
 def test_measurements_on_rotated_photos(tees, session_client):
     d, truth = tees["tee4"]
     parts = []
     for view, deg, frame_deg in (("front", 6.0, -2.0), ("sleeve", -4.0, 3.0)):
-        mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "body")
+        mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "t-shirt")
         rmask, H = rotate_photo(mask, truth_homography(truth, view), deg, frame_deg)
         parts.extend(extract(rmask, H, view))
     got = measure_tee(*parts)

@@ -4,11 +4,16 @@ Owner: Madhu. See sewtrace/types.py for the coordinate convention.
 
 Pipeline per photo:
     outline = smooth_outline(mask_to_outline(mask, H))
-    half = body_half(outline)            # or sleeve_half(outline)
-    edges = label_body_edges(half)       # or label_sleeve_edges(half)
+    half = body_half(remove_sleeves(outline))   # or sleeve_half(outline)
+    edges = label_body_edges(half)              # or label_sleeve_edges(half)
+
+SAM masks the whole t-shirt, sleeves included (REQ-SEG-02), so the front and back
+outlines pass through remove_sleeves() first.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -16,14 +21,21 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 
+from sewtrace.config import get_config
 from sewtrace.types import TEE_EDGES, Edge, Outline
 from sewtrace.vision.marker import Homography
+from sewtrace.vision.measure import _corner, _fit_line
 
 UPSAMPLE = 2           # mask upsampling before tracing, for a sub-pixel edge
 CORNER_DEG = 30.0      # turning angle that counts as a corner
 CORNER_WINDOW_MM = 4.0
 SMOOTH_SIGMA_MM = 1.5
 FOLD_TOL_MM = 1.0
+JOINT_SPACING_MM = 1.0   # outline spacing for the sleeve joint search
+JOINT_TRIM_MM = 4.0      # ends of the sleeve-top run ignored by the line fits (corner rounding)
+JOINT_MARGIN_MM = 4.0    # points this close to the split are ignored by both line fits
+JOINT_MIN_RUN_MM = 15.0  # shortest straight run on each side of the shoulder point
+JOINT_REACH_MM = 20.0    # tangent fit length at the underarm point
 
 
 # ---- polyline helpers -------------------------------------------------------
@@ -153,6 +165,207 @@ def _smooth_pinned(seg: np.ndarray, sigma: float) -> np.ndarray:
     sm = gaussian_filter1d(ext, sigma, axis=0, mode="nearest")[m : m + len(seg)]
     sm[0], sm[-1] = seg[0], seg[-1]
     return sm
+
+
+def _signed_turning(pts: np.ndarray, k: int) -> np.ndarray:
+    """Turning angle (deg) at each point of a closed polyline, positive where the
+    outline is convex when its shoelace area is positive."""
+    v1 = pts - np.roll(pts, k, axis=0)
+    v2 = np.roll(pts, -k, axis=0) - pts
+    cross = v1[:, 0] * v2[:, 1] - v1[:, 1] * v2[:, 0]
+    return np.degrees(np.arctan2(cross, (v1 * v2).sum(axis=1)))
+
+
+@dataclass(frozen=True)
+class _Joints:
+    """Sleeve joints of a whole-garment outline, found by walking it once.
+
+    ``pts`` is the outline resampled at JOINT_SPACING_MM and rolled so that it starts
+    at the first underarm point, then runs along the hem side to the second one
+    (index ``other``), then over the sleeves and the neck back to the start.
+    """
+
+    pts: np.ndarray
+    other: int
+    underarm_a: np.ndarray    # at index ``other``
+    underarm_b: np.ndarray    # at index 0
+    shoulder_a: np.ndarray    # between the first two sleeve-top corners and the neck
+    shoulder_b: np.ndarray
+    index_a: int              # outline samples nearest the shoulder points
+    index_b: int
+    shoulder_dir_a: np.ndarray  # unit vectors along the shoulder seam, towards the neck
+    shoulder_dir_b: np.ndarray
+    side_dir_a: np.ndarray      # unit vectors along the side seam, towards the hem
+    side_dir_b: np.ndarray
+
+
+def _line_ssr(pts: np.ndarray) -> float:
+    c, d = _fit_line(pts)
+    r = (pts - c) - ((pts - c) @ d)[:, None] * d
+    return float((r**2).sum())
+
+
+def _breakpoint(run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Shoulder point on the run from the sleeve's outer hem corner to the neck corner.
+
+    The run is two straight lines (sleeve top, shoulder seam) that meet at a kink of
+    only 10 to 25 degrees, too soft for a corner detector. Find the split that makes
+    both lines fit best, then intersect the two fitted lines. Returns the point and
+    the unit direction of the shoulder seam (towards the neck).
+    """
+    s = _cumlen(run)
+    lo, hi = JOINT_TRIM_MM + JOINT_MIN_RUN_MM, s[-1] - JOINT_TRIM_MM - JOINT_MIN_RUN_MM
+    best: tuple[float, int] | None = None
+    for i in np.nonzero((s >= lo) & (s <= hi))[0]:
+        left = run[(s >= JOINT_TRIM_MM) & (s <= s[i] - JOINT_MARGIN_MM)]
+        right = run[(s >= s[i] + JOINT_MARGIN_MM) & (s <= s[-1] - JOINT_TRIM_MM)]
+        cost = _line_ssr(left) + _line_ssr(right)
+        if best is None or cost < best[0]:
+            best = (cost, int(i))
+    if best is None:
+        raise ValueError("sleeve top and shoulder seam are too short to find the shoulder point")
+    split = best[1]
+    c1, d1 = _fit_line(run[(s >= JOINT_TRIM_MM) & (s <= s[split] - JOINT_MARGIN_MM)])
+    c2, d2 = _fit_line(run[(s >= s[split] + JOINT_MARGIN_MM) & (s <= s[-1] - JOINT_TRIM_MM)])
+    point = run[split]
+    A = np.c_[d1, -d2]
+    if abs(np.linalg.det(A)) > 1e-3:
+        t = np.linalg.solve(A, c2 - c1)
+        crossing = c1 + t[0] * d1
+        if np.linalg.norm(crossing - point) <= 2 * JOINT_MARGIN_MM:  # else the lines are near parallel
+            point = crossing
+    if d2 @ (run[-1] - run[0]) < 0:
+        d2 = -d2
+    return point, d2
+
+
+def _ring_run(pts: np.ndarray, first: int, last: int) -> np.ndarray:
+    """Samples first..last inclusive of a closed polyline, wrapping."""
+    n = len(pts)
+    return pts[np.arange(first, last + 1 + (n if last < first else 0)) % n]
+
+
+def _find_joints(outline: Outline) -> _Joints:
+    """Shoulder and underarm points of a whole t-shirt outline (REQ-GEO-01).
+
+    Underarm points are the two sharpest concave corners. They split the outline into
+    the hem arc (two body hem corners) and the top arc (neck corners and the sleeve
+    hem corners: six in all). The shoulder point of each sleeve lies on the run between
+    its outer hem corner and the neck corner.
+    """
+    pts = _resample_closed(_orient_like_synth(outline.array()), JOINT_SPACING_MM)
+    n = len(pts)
+    k = max(int(round(CORNER_WINDOW_MM / JOINT_SPACING_MM)), 1)
+    turn = gaussian_filter1d(_signed_turning(pts, k), k / 2, mode="wrap")
+    convex = sorted(_peaks(turn, CORNER_DEG, 2 * k))
+    concave = sorted(_peaks(-turn, CORNER_DEG, 2 * k)[:2])
+    if len(concave) < 2:
+        raise ValueError("found no underarm corners: is the whole t-shirt, with both sleeves, in the mask?")
+    u1, u2 = concave
+    between = [c for c in convex if u1 < c < u2]
+    outside = [c for c in convex if not u1 < c < u2]
+    start, other_abs = (u1, u2) if len(between) < len(outside) else (u2, u1)
+    pts = np.roll(pts, -start, axis=0)
+    other = (other_abs - start) % n
+    convex = sorted((c - start) % n for c in convex)
+    hem = [c for c in convex if 0 < c < other]
+    top = [c for c in convex if c > other]
+    if len(top) != 6:
+        raise ValueError(
+            f"found {len(top)} convex corners over the sleeves and neck, expected 6 "
+            "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask?"
+        )
+    c0, c1, c2, c3, c4, c5 = top
+    reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
+    h = hem[0] if hem else other // 2
+
+    def underarm(into_lo: int, into_hi: int, out_lo: int, out_hi: int) -> np.ndarray:
+        return _corner(_ring_run(pts, into_lo, into_hi), _ring_run(pts, out_lo, out_hi), JOINT_REACH_MM, JOINT_REACH_MM)
+
+    prev = hem[-1] if hem else 0
+    under_a = underarm(other - min(reach, other - prev - 2), other, other, other + min(reach, c0 - other - 2))
+    under_b = underarm(n - min(reach, n - c5 - 2), n, 0, min(reach, h - 2))
+
+    shoulder_a, dir_a = _breakpoint(pts[c1 : c2 + 1])
+    shoulder_b, dir_b = _breakpoint(pts[c3 : c4 + 1][::-1])  # walked from the sleeve to the neck
+    ia = c1 + int(np.argmin(np.linalg.norm(pts[c1 : c2 + 1] - shoulder_a, axis=1)))
+    ib = c3 + int(np.argmin(np.linalg.norm(pts[c3 : c4 + 1] - shoulder_b, axis=1)))
+    side_a = pts[max(other - reach, 0)] - under_a
+    side_b = pts[min(reach, other)] - under_b
+    return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib,
+                   dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b))
+
+
+def find_sleeve_joints(outline: Outline) -> tuple[np.ndarray, np.ndarray]:
+    """(shoulder points, underarm points) of a whole t-shirt outline: two (2, 2) arrays, mm.
+
+    Row 0 is the sleeve met first on the outline walk (a), row 1 the other (b).
+    """
+    j = _find_joints(outline)
+    return np.vstack([j.shoulder_a, j.shoulder_b]), np.vstack([j.underarm_a, j.underarm_b])
+
+
+def _perp_towards(direction: np.ndarray, toward: np.ndarray) -> np.ndarray:
+    """Unit vector perpendicular to ``direction`` that points to the side of ``toward``."""
+    perp = np.array([-direction[1], direction[0]])
+    perp /= np.linalg.norm(perp)
+    return perp if perp @ toward > 0 else -perp
+
+
+def default_armhole(
+    shoulder: np.ndarray,
+    underarm: np.ndarray,
+    shoulder_dir: np.ndarray,
+    side_dir: np.ndarray,
+    centre: np.ndarray,
+) -> np.ndarray:
+    """Armhole from the shoulder point to the underarm point, about 1 mm apart.
+
+    The flat-lay photo shows only the two end points. The default is a cubic Bezier
+    that leaves the shoulder seam at a right angle and meets the side seam at a right
+    angle, both bending towards the body centre (handle lengths in config).
+    """
+    cfg = get_config().contour.armhole
+    chord = float(np.linalg.norm(underarm - shoulder))
+    ctrl1 = shoulder + cfg.shoulder_handle * chord * _perp_towards(shoulder_dir, centre - shoulder)
+    ctrl2 = underarm + cfg.underarm_handle * chord * _perp_towards(side_dir, centre - underarm)
+    t = np.linspace(0, 1, max(int(np.ceil(chord)), 8))[:, None]
+    return ((1 - t) ** 3 * shoulder + 3 * (1 - t) ** 2 * t * ctrl1
+            + 3 * (1 - t) * t**2 * ctrl2 + t**3 * underarm)
+
+
+def cut_sleeves(outline: Outline) -> tuple[Outline, np.ndarray]:
+    """Whole t-shirt outline -> body outline: cut each sleeve off at the shoulder point
+    and the underarm point and close the gap with the default armhole (REQ-GEO-01).
+
+    Only the two joints are visible in a flat-lay photo, so the armhole shape here is
+    a default, not a measurement. The model infers the real shape (REQ-RSN-04).
+    Also returns a boolean array, True for each point of the body outline that lies on
+    a default armhole, so callers can leave those points out of an edge comparison.
+    """
+    j = _find_joints(outline)
+    pts, other = j.pts, j.other
+    centre = _centroid(pts)
+    arm_a = default_armhole(j.shoulder_a, j.underarm_a, j.shoulder_dir_a, j.side_dir_a, centre)
+    arm_b = default_armhole(j.shoulder_b, j.underarm_b, j.shoulder_dir_b, j.side_dir_b, centre)
+    parts = [
+        (j.underarm_b[None], False),
+        (pts[1:other], False),
+        (j.underarm_a[None], True),
+        (arm_a[::-1][1:-1], True),
+        (j.shoulder_a[None], True),
+        (pts[j.index_a + 1 : j.index_b], False),
+        (j.shoulder_b[None], True),
+        (arm_b[1:-1], True),
+    ]
+    body = np.vstack([p for p, _ in parts])
+    invented = np.concatenate([np.full(len(p), flag) for p, flag in parts])
+    return Outline.from_array(body), invented
+
+
+def remove_sleeves(outline: Outline) -> Outline:
+    """cut_sleeves() without the armhole flags."""
+    return cut_sleeves(outline)[0]
 
 
 def body_half(outline: Outline) -> Outline:

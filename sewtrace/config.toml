@@ -55,8 +55,14 @@ min_score = 0.5            # drop masks below this score (unconfirmed API field;
 garment = "t-shirt"        # front, back and the t-shirt in the proof photo
 sleeve = "sleeve"
 paper = "paper"
-# TEMPORARY (fix item 3 removes it): mock SAM sidecars are body-only masks named "body".
-mock_body = "body"
+
+[contour.armhole]          # default armhole between shoulder point and underarm point
+# A flat-lay photo hides the armhole under the sleeve, so only its two end points are
+# visible. The default is a cubic Bezier that leaves the shoulder seam and meets the
+# side seam at right angles. Handles are fractions of the end-point distance. The
+# model is meant to infer the real shape (REQ-RSN-04, fix item 4).
+shoulder_handle = 0.45
+underarm_handle = 0.12
 
 [seam]                     # SPEC 7.6.1, mm
 shoulder_tol_mm = 1.0

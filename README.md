@@ -7,8 +7,8 @@ together. Built for the Meta Global AI Developer Hackathon 2026 (Indie track).
 ```
 3 photos + marker
   > marker detection + homography (px to mm)          sewtrace/vision/marker.py
-  > SAM 3.1 masks (garment, body, sleeve)              sewtrace/api/client.py
-  > contours, smoothing, symmetry, edges (mm)          sewtrace/vision/contour.py
+  > SAM 3.1 masks (t-shirt, sleeve)                      sewtrace/api/client.py
+  > contours, sleeve removal, symmetry, edges (mm)   sewtrace/vision/contour.py
   > Muse Spark/Wonder: panel spec JSON                 sewtrace/reason/panels.py
   > sewability check loop (max 3 calls)                sewtrace/reason/seams.py
   > tiled A4 PDF, SVG/DXF                              sewtrace/output/

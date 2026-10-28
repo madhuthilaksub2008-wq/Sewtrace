@@ -32,14 +32,14 @@ def photo_set(garment_dir: Path) -> PhotoSet:
     return PhotoSet(**{v: str(garment_dir / f"{v}.jpg") for v in ("front", "back", "sleeve")})
 
 
-def trace(client: MetaClient, photo: str, region: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
-    """Photo -> labelled half outline in mm."""
+def trace(client: MetaClient, photo: str, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
+    """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt."""
     h = photo_homography(cv2.imread(photo))
-    outline = contour.smooth_outline(contour.mask_to_outline(client.segment(photo, region), h))
+    outline = contour.smooth_outline(contour.mask_to_outline(client.segment(photo, prompt), h))
     if sleeve:
         half = contour.sleeve_half(outline)
         return half, contour.label_sleeve_edges(half)
-    half = contour.body_half(outline)
+    half = contour.body_half(contour.remove_sleeves(outline))
     return half, contour.label_body_edges(half)
 
 
@@ -50,9 +50,8 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     photos = photo_set(garment_dir)
     prompts = client.config.sam.prompts
 
-    # Body-only prompt is temporary until the whole-garment mask (fix item 3).
-    front, front_edges = trace(client, photos.front, prompts.mock_body)
-    back, back_edges = trace(client, photos.back, prompts.mock_body)
+    front, front_edges = trace(client, photos.front, prompts.garment)
+    back, back_edges = trace(client, photos.back, prompts.garment)
     sleeve, sleeve_edges = trace(client, photos.sleeve, prompts.sleeve, sleeve=True)
     measurements = measure_tee(front, front_edges, sleeve, sleeve_edges)
 

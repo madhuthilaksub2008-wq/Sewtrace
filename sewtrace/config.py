@@ -74,12 +74,20 @@ class SamPrompts(_Strict):
     garment: str
     sleeve: str
     paper: str
-    mock_body: str  # temporary, see config.toml
 
 
 class SamConfig(_Strict):
     min_score: float = Field(ge=0, le=1)
     prompts: SamPrompts
+
+
+class ArmholeConfig(_Strict):
+    shoulder_handle: float = Field(gt=0, lt=1)
+    underarm_handle: float = Field(gt=0, lt=1)
+
+
+class ContourConfig(_Strict):
+    armhole: ArmholeConfig
 
 
 class SeamConfig(_Strict):
@@ -116,6 +124,7 @@ class AppConfig(_Strict):
     models: ModelsConfig
     reasoning: ReasoningConfig
     sam: SamConfig
+    contour: ContourConfig
     seam: SeamConfig
     pattern: PatternConfig
     proof: ProofConfig

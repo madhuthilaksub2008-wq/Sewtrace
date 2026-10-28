@@ -4,8 +4,11 @@ Each tee is drawn from known geometry, so every downstream number can be
 checked against exact ground truth:
 
   data/raw/teeN/front.jpg, back.jpg, sleeve.jpg   photos with ArUco marker
-  data/raw/teeN/<photo>.masks/<region>.png         ground-truth region masks
-                                                    (the mock SAM serves these)
+  data/raw/teeN/<photo>.masks/<prompt>.png         region masks named by SAM prompt
+                                                    (the mock SAM serves these):
+                                                    "t-shirt" = the whole garment, sleeves
+                                                    included; "sleeve"; and the ground-truth
+                                                    "body" (no sleeves), never requested
   data/raw/teeN/truth.json                         params, measurements, half
                                                     outlines in mm, world->photo H
   data/ground_truth.csv                            the 6 tape-measure points
@@ -162,7 +165,9 @@ def flatlay_sleeve(p: TeeParams, side: int) -> np.ndarray:
     direction = np.array([np.cos(np.radians(30)), np.sin(np.radians(30))])
     normal = np.array([direction[1], -direction[0]])  # points up and out
     mid_out = (top + under) / 2 + direction * p.sleeve_length
-    hem = sleeve_hem_half(p)
+    # The sleeve opening as sewn, narrower than the folded-sleeve photo's armhole-based
+    # minimum, so the sleeve leaves the body at the underarm point as on a real flat tee.
+    hem = p.sleeve_hem_half
     poly = np.vstack([arm, [mid_out - normal * hem, mid_out + normal * hem]])
     return poly * [side, 1]
 
@@ -229,7 +234,7 @@ def render_layers(
             cv2.fillPoly(m, [np.round(poly * PX_PER_MM).astype(np.int32)], 255)
         masks_world[name] = m
         garment |= m
-    masks_world["garment"] = garment
+    masks_world["t-shirt"] = garment  # named by the SAM prompt that asks for it
     fabric = np.array(colour, float) * light[..., None] * (1 + 0.04 * rng.normal(size=(h, w, 1)))
     world = np.where(garment[..., None] > 0, fabric, world)
     # Faint seam shadow where sleeves meet the body.

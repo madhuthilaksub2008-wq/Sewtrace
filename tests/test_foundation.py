@@ -1,4 +1,6 @@
 import json
+
+import cv2
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +27,7 @@ def client(tmp_path) -> MetaClient:
 def test_synth_writes_photos_and_masks(tee_dir):
     for view in ("front", "back", "sleeve"):
         assert (tee_dir / f"{view}.jpg").exists()
-        assert (tee_dir / f"{view}.masks" / "garment.png").exists()
+        assert (tee_dir / f"{view}.masks" / "t-shirt.png").exists()
     truth = json.loads((tee_dir / "truth.json").read_text())
     assert truth["measurements"]["chest_width"] == 320
 
@@ -47,8 +49,8 @@ def test_edges_cover_outline_in_order(tee_dir):
 
 
 def test_mock_segment_is_cached(client, tee_dir):
-    m1 = client.segment(tee_dir / "front.jpg", "body")
-    m2 = client.segment(tee_dir / "front.jpg", "body")
+    m1 = client.segment(tee_dir / "front.jpg", "t-shirt")
+    m2 = client.segment(tee_dir / "front.jpg", "t-shirt")
     assert client.calls == 1
     assert np.array_equal(m1, m2) and m1.sum() > 0
 
@@ -58,3 +60,28 @@ def test_reason_mock_and_cache(client):
     assert answer == {"ok": 1}
     assert client.reason("hello", mock=lambda: {"ok": 2}) == {"ok": 1}
     assert client.calls == 1
+
+
+def test_req_seg_02_mock_serves_whole_garment_for_tshirt(client, tee_dir):
+    """REQ-SEG-02: the mock answers "t-shirt" with the whole garment, sleeves included,
+    and "sleeve" with the sleeve photo mask. It never serves the sleeveless body."""
+    side = tee_dir / "front.masks"
+
+    def sidecar(name: str) -> np.ndarray:
+        return cv2.imread(str(side / f"{name}.png"), cv2.IMREAD_GRAYSCALE) > 127
+
+    got = client.segment(tee_dir / "front.jpg", "t-shirt")
+    whole, body = sidecar("t-shirt"), sidecar("body")
+    assert (got & whole).sum() / whole.sum() > 0.98 and (got & ~whole).sum() / whole.sum() < 0.02
+    assert whole.sum() > 1.2 * body.sum()  # sleeves are in
+    assert (whole & ~body).sum() > 0.2 * whole.sum()
+    assert (got & ~body).sum() > 0.2 * got.sum()  # not the body mask
+    assert client.segment(tee_dir / "sleeve.jpg", "sleeve").sum() > 0
+
+
+def test_req_seg_02_prompts_come_from_config():
+    from sewtrace.config import get_config
+
+    prompts = get_config().sam.prompts
+    assert (prompts.garment, prompts.sleeve, prompts.paper) == ("t-shirt", "sleeve", "paper")
+    assert not hasattr(prompts, "mock_body")

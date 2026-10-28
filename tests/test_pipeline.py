@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -74,3 +75,17 @@ def test_req_sew_04_cli_prints_failure_and_exits_nonzero(tmp_path, monkeypatch, 
     assert exit_.value.code == 1
     assert "front.side~back.side" in capsys.readouterr().err
     assert not (tmp_path / "out" / "pattern.pdf").exists()
+
+
+def test_req_seg_02_pipeline_asks_for_spec_prompts(tmp_path):
+    """REQ-SEG-02: front and back ask for "t-shirt", the sleeve photo for "sleeve"."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+    asked = []
+    real = client.segment
+    client.segment = lambda photo, prompt: (asked.append((Path(photo).name, prompt)), real(photo, prompt))[1]
+
+    run(tee, tmp_path / "out", client)
+
+    assert asked == [("front.jpg", "t-shirt"), ("back.jpg", "t-shirt"), ("sleeve.jpg", "sleeve")]
