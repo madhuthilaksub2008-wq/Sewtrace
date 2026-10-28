@@ -21,12 +21,16 @@ Work in progress. Until real captures exist, `sewtrace.mock.synth` renders
 synthetic tees (known geometry, printed ArUco marker, camera tilt), and the
 Meta API calls are mocked. See `docs/CONTRIBUTING.md`.
 
+Put real captures in `data/raw/<tee>/` (`front.jpg`, `back.jpg`, `sleeve.jpg`). Write the tape
+measure values in mm to `data/ground_truth/<tee>.json` (SPEC 10.3). `sewtrace eval data/raw`
+stops with an error for a tee that has no such file.
+
 ## Setup
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
 cp .env.example .env            # leave META_API_KEY empty to stay mocked
-python -m sewtrace.mock.synth   # writes data/raw/tee1..tee5 + data/ground_truth.csv
+python -m sewtrace.mock.synth   # writes data/synth/tee1..tee5 (each with truth.json)
 pytest
 ```

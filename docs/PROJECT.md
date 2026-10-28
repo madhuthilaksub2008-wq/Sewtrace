@@ -169,8 +169,8 @@ armhole).
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e '.[dev]'
-python -m sewtrace.cli synth             # 5 synthetic tees in data/raw
-python -m sewtrace.cli run data/raw/tee1 # pattern files in out/tee1
+python -m sewtrace.cli synth             # 5 synthetic tees in data/synth
+python -m sewtrace.cli run data/synth/tee1 # pattern files in out/tee1
 python -m sewtrace.cli eval              # out/eval/results.md
 pytest
 ```

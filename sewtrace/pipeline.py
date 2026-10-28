@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from sewtrace.api.client import MetaClient
 from sewtrace.output.pdf import render_pdf
@@ -15,7 +16,7 @@ from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
 from sewtrace.reason.seams import adjust_loop, require_seams_ok
 from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
-from sewtrace.vision.marker import photo_homography
+from sewtrace.vision.marker import Homography, photo_homography
 from sewtrace.vision.measure import measure_tee
 
 
@@ -32,9 +33,27 @@ def photo_set(garment_dir: Path) -> PhotoSet:
     return PhotoSet(**{v: str(garment_dir / f"{v}.jpg") for v in ("front", "back", "sleeve")})
 
 
-def trace(client: MetaClient, photo: str, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
+class PhotoMissing(FileNotFoundError):
+    """A capture photo is missing or is not an image (REQ-CAP-01)."""
+
+
+def load_photo(view: str, path: str | Path) -> np.ndarray:
+    """Read one capture photo; the error names the view and the path."""
+    image = cv2.imread(str(path)) if Path(path).is_file() else None
+    if image is None:
+        raise PhotoMissing(f"{view} photo {path} is missing or is not an image. Put the file there and run again.")
+    return image
+
+
+def photo_scale(view: str, path: str | Path) -> Homography:
+    """Photo px -> mm for one capture photo. Raises, naming the photo, when the file is
+    missing (REQ-CAP-01), the marker is not found (REQ-CAP-02) or it is off by more than
+    marker.tolerance_mm (REQ-SCL-03)."""
+    return photo_homography(load_photo(view, path), f"{view} photo {path}")
+
+
+def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
     """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt."""
-    h = photo_homography(cv2.imread(photo))
     outline = contour.smooth_outline(contour.mask_to_outline(client.segment(photo, prompt), h))
     if sleeve:
         half = contour.sleeve_half(outline)
@@ -49,11 +68,13 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     calls_before = client.calls
     photos = photo_set(garment_dir)
     prompts = client.config.sam.prompts
+    # Check all three photos before the first paid call (REQ-CAP-01, REQ-CAP-02, REQ-SCL-03).
+    scale = {view: photo_scale(view, path) for view, path in photos}
 
-    front, front_edges = trace(client, photos.front, prompts.garment)
-    back, back_edges = trace(client, photos.back, prompts.garment)
-    sleeve, sleeve_edges = trace(client, photos.sleeve, prompts.sleeve, sleeve=True)
-    measurements = measure_tee(front, front_edges, sleeve, sleeve_edges)
+    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment)
+    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment)
+    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True)
+    measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
     spec = infer_panels(client, photos, draft, measurements)

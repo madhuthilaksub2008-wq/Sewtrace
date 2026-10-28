@@ -3,26 +3,27 @@
 Each tee is drawn from known geometry, so every downstream number can be
 checked against exact ground truth:
 
-  data/raw/teeN/front.jpg, back.jpg, sleeve.jpg   photos with ArUco marker
-  data/raw/teeN/<photo>.masks/<prompt>.png         region masks named by SAM prompt
-                                                    (the mock SAM serves these):
-                                                    "t-shirt" = the whole garment, sleeves
-                                                    included; "sleeve"; and the ground-truth
-                                                    "body" (no sleeves), never requested
-  data/raw/teeN/truth.json                         params, measurements, half
-                                                    outlines in mm, world->photo H
-  data/ground_truth.csv                            the 6 tape-measure points
+  data/synth/teeN/front.jpg, back.jpg, sleeve.jpg  photos with ArUco marker
+  data/synth/teeN/<photo>.masks/<prompt>.png       region masks named by SAM prompt
+                                                   (the mock SAM serves these):
+                                                   "t-shirt" = the whole garment, sleeves
+                                                   included; "sleeve"; and the ground-truth
+                                                   "body" (no sleeves), never requested
+  data/synth/teeN/truth.json                       params, measurements (SPEC 10.2),
+                                                   half outlines in mm, world->photo H
+
+Synthetic tees live in data/synth, apart from real captures in data/raw, so a
+synthetic name can never match real ground truth (data/ground_truth/<tee>.json).
 
 Photos are rendered top-down at PX_PER_MM, then warped by a small random
 camera homography (tilt, rotation, scale), so the marker step has real work.
 
-    python -m sewtrace.mock.synth --out data/raw
+    python -m sewtrace.mock.synth --out data/synth
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -30,7 +31,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from sewtrace.config import MARKER_ID, MARKER_SIZE_MM
+from sewtrace.config import MARKER_ID, MARKER_SIZE_MM, get_config
 
 PX_PER_MM = 3.0
 MARKER_BORDER_MM = 15.0
@@ -142,13 +143,29 @@ def _join(parts: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, tuple[int
 
 
 def measurements(p: TeeParams) -> dict[str, float]:
+    """The six SPEC 10.2 measurements, read off the exact synthetic geometry.
+
+    Independent of sewtrace/vision/measure.py: every value comes from the half outlines
+    built here (corner points and the exact side line), not from the code under test."""
+    front, fe = body_half(p)
+    back, be = body_half(p, back=True)
+    sleeve, se = sleeve_half(p)
+    underarm = front[fe["armhole"][1]]  # armhole ends where the side seam starts
+    side = front[fe["side"][0] : fe["side"][1] + 1]
+    chest_y = underarm[1] + get_config().pattern.chest_drop_mm
     return {
-        "chest_width": 2 * p.chest_half,
-        "body_length": p.length,
-        "shoulder_width": 2 * p.shoulder_half,
-        "sleeve_length": p.sleeve_length,
-        "neck_width": 2 * p.neck_half,
-        "armhole_depth": p.armhole_depth,
+        # Straight across the front, chest_drop_mm below the underarm points.
+        "chest_width": 2 * float(np.interp(chest_y, side[:, 1], side[:, 0])),
+        # High point of the shoulder (the neck point, y minimum) to the hem line.
+        "body_length": float(front[fe["hem"][0], 1] - front[:, 1].min()),
+        # Shoulder seam point (shoulder meets armhole) to the other one, across the back.
+        "shoulder_width": 2 * float(back[be["armhole"][0], 0]),
+        # Shoulder seam point is the cap top (point 0); the fold runs from the hem back to it.
+        "sleeve_length": float(sleeve[se["fold"][0], 1] - sleeve[0, 1]),
+        # Seam to seam across the neck opening.
+        "neck_width": 2 * float(front[fe["neck"][1], 0]),
+        # Shoulder seam point straight down to the underarm point.
+        "armhole_depth": float(underarm[1] - front[fe["armhole"][0], 1]),
     }
 
 
@@ -320,22 +337,15 @@ def _save(out: Path, view: str, photo: np.ndarray, masks: dict[str, np.ndarray])
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--out", default="data/raw")
+    ap.add_argument("--out", default="data/synth")
     ap.add_argument("--only", nargs="*", help="tee names, e.g. tee1")
     args = ap.parse_args(argv)
     out = Path(args.out)
-    rows = []
     for i, p in enumerate(TEES):
         if args.only and p.name not in args.only:
             continue
-        truth = make_tee(p, out / p.name, seed=i)
-        rows.append({"tee": p.name, **truth["measurements"]})
+        make_tee(p, out / p.name, seed=i)
         print(f"wrote {out / p.name}")
-    if rows:
-        with (out.parent / "ground_truth.csv").open("w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0]))
-            w.writeheader()
-            w.writerows(rows)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from sewtrace.config import ModelConfig, Settings
 
@@ -59,6 +60,20 @@ class BudgetExceeded(ApiError):
 
 class CacheMiss(ApiError):
     """Offline mode and the answer is not in the cache."""
+
+
+class SegmentationFailed(ApiError):
+    """SAM found no mask that scores high enough (REQ-SEG-04)."""
+
+
+class SamResult(BaseModel):
+    """One mask SAM returned, with its score. The real response shape is unconfirmed
+    (Day 1 test, REQ-API-09); _call_sam turns it into these and nothing else changes."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    mask: np.ndarray  # bool, H x W
+    score: float
 
 
 class HttpError(Exception):
@@ -117,21 +132,40 @@ class MetaClient:
     # ---- public API -------------------------------------------------------
 
     def segment(self, image_path: str | Path, prompt: str) -> np.ndarray:
-        """Boolean HxW mask of the text ``prompt`` (SAM takes text prompts only, REQ-SEG-01)."""
+        """Boolean HxW mask of the text ``prompt`` (SAM takes text prompts only, REQ-SEG-01).
+
+        With several masks, the highest score wins (REQ-SEG-03). If that score is below
+        ``sam.min_score``, raises SegmentationFailed (REQ-SEG-04). The best mask and its
+        score are cached together, so the threshold is checked on every call and a low
+        score is never paid for twice."""
         image_path = Path(image_path)
         model = self.config.models.sam
-        key = self._key("sam", model.id, prompt, [image_path], {"min_score": self.config.sam.min_score})
-        cached = self.cache_dir / f"{key}.png"
-        if cached.exists():
-            return cv2.imread(str(cached), cv2.IMREAD_GRAYSCALE) > 127
-        self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
-        self.calls += 1
-        if self.settings.mock:
-            mask = _mock_segment(image_path, prompt, self.config.sam.prompts.garment)
+        key = self._key("sam", model.id, prompt, [image_path], {})
+        cached, cached_score = self.cache_dir / f"{key}.png", self.cache_dir / f"{key}.score.json"
+        if cached.exists() and cached_score.exists():
+            best = SamResult(
+                mask=cv2.imread(str(cached), cv2.IMREAD_GRAYSCALE) > 127,
+                score=float(json.loads(cached_score.read_text())["score"]),
+            )
         else:
-            mask = self._call_sam(image_path, prompt)
-        cv2.imwrite(str(cached), mask.astype(np.uint8) * 255)
-        return mask
+            self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
+            self.calls += 1
+            if self.settings.mock:
+                results = _mock_segment(image_path, prompt, self.config.sam.prompts.garment)
+            else:
+                results = self._call_sam(image_path, prompt)
+            if not results:
+                raise SegmentationFailed(f"{image_path}: SAM returned no mask for the prompt {prompt!r}.")
+            best = max(results, key=lambda r: r.score)
+            cv2.imwrite(str(cached), best.mask.astype(np.uint8) * 255)
+            cached_score.write_text(json.dumps({"score": best.score}))
+        min_score = self.config.sam.min_score
+        if best.score < min_score:
+            raise SegmentationFailed(
+                f"{image_path}: best SAM score {best.score:.2f} for the prompt {prompt!r} is below "
+                f"the minimum {min_score:g}. Take the photo again on a plain, contrasting background."
+            )
+        return best.mask
 
     def reason(
         self,
@@ -172,7 +206,7 @@ class MetaClient:
 
     # ---- real endpoints ---------------------------------------------------
 
-    def _call_sam(self, image_path: Path, prompt: str) -> np.ndarray:
+    def _call_sam(self, image_path: Path, prompt: str) -> list[SamResult]:
         # UNCONFIRMED: the SAM 3.1 request and response shape is not known until
         # the Day 1 test (REQ-API-09). When it is, build the request here and send
         # it through self._paid(self.config.models.sam, ...). Nothing else changes.
@@ -292,14 +326,16 @@ def _usage_from(response: dict[str, Any], estimate: Usage) -> Usage:
     )
 
 
-def _mock_segment(image_path: Path, prompt: str, garment_prompt: str) -> np.ndarray:
+def _mock_segment(image_path: Path, prompt: str, garment_prompt: str) -> list[SamResult]:
+    """The mock is always sure of its one mask: score 1.0."""
     sidecar = image_path.with_suffix(".masks") / f"{prompt}.png"
     if sidecar.exists():
         mask = cv2.imread(str(sidecar), cv2.IMREAD_GRAYSCALE) > 127
-        return _jitter_edges(mask, seed=int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16))
+        seed = int(hashlib.sha256(prompt.encode()).hexdigest()[:8], 16)
+        return [SamResult(mask=_jitter_edges(mask, seed=seed), score=1.0)]
     if prompt != garment_prompt:
         raise FileNotFoundError(f"mock SAM has no '{prompt}' mask for {image_path}")
-    return _threshold_largest(cv2.imread(str(image_path)))
+    return [SamResult(mask=_threshold_largest(cv2.imread(str(image_path))), score=1.0)]
 
 
 def _jitter_edges(mask: np.ndarray, seed: int) -> np.ndarray:

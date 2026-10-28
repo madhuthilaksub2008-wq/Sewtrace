@@ -38,6 +38,7 @@ def _replace(spec: PanelSpec, panel: Panel) -> PanelSpec:
 
 
 def test_edge_length_of_straight_shoulder(tees):
+    """REQ-SEW-01: edge length of straight shoulder."""
     p = synth.TEES[0]
     front = truth_spec(tees[0]).panel("front")
     expected = np.hypot(p.shoulder_half - p.neck_half, p.shoulder_drop)
@@ -45,6 +46,7 @@ def test_edge_length_of_straight_shoulder(tees):
 
 
 def test_truth_passes_all_seams(tees, client):
+    """REQ-SEW-01: truth passes all seams."""
     for tee in tees:
         spec = truth_spec(tee)
         checked = check_seams(spec)
@@ -100,6 +102,7 @@ def test_req_sew_02_cap_loop_converges_and_measured_edges_stay(tees, client):
 
 
 def test_perturbed_loop_is_cached(tees, client):
+    """REQ-API-02: perturbed loop is cached."""
     spec = _longer_front_armhole(truth_spec(tees[1]))
     out1, log1 = adjust_loop(client, spec)
     calls = client.calls
@@ -109,6 +112,7 @@ def test_perturbed_loop_is_cached(tees, client):
 
 
 def test_perfect_model_needs_no_fallback(tees, client, monkeypatch):
+    """REQ-SEW-02: perfect model needs no fallback."""
     monkeypatch.setattr(seams, "MOCK_FIX_FRACTION", 1.0)
     out, log = adjust_loop(client, _longer_front_armhole(truth_spec(tees[0])))
     assert log[-1]["source"] == "model" and log[-1]["failing"] == []

@@ -13,17 +13,22 @@ threshold crossing, does not wobble with the edge's sub-pixel phase.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
 
-from sewtrace.config import MARKER_DICT, MARKER_ID, MARKER_SIZE_MM
+from sewtrace.config import MARKER_DICT, MARKER_ID, MARKER_SIZE_MM, get_config
+
+
+# marker_error_mm needs at least this fraction of the grid edge points to be found.
+MIN_GRID_FOUND = 0.9
 
 
 @dataclass
 class Homography:
     H: np.ndarray  # 3x3, photo px -> mm
+    marker_error_mm: float = 0.0  # set by photo_homography (REQ-SCL-03)
 
     def px_to_mm(self, pts: np.ndarray) -> np.ndarray:
         """(N, 2) pixel points to (N, 2) mm points."""
@@ -41,7 +46,11 @@ def _apply(H: np.ndarray, pts: np.ndarray) -> np.ndarray:
 
 
 class MarkerNotFound(RuntimeError):
-    pass
+    """No whole marker in the photo (REQ-CAP-02)."""
+
+
+class MarkerRejected(RuntimeError):
+    """The marker is there but too inaccurate to scale the photo (REQ-SCL-03)."""
 
 
 def detect_marker(image: np.ndarray, marker_id: int = MARKER_ID) -> np.ndarray:
@@ -141,14 +150,12 @@ def _fit_line(pts: np.ndarray) -> np.ndarray:
     return np.r_[normal, normal @ pts.mean(axis=0)]
 
 
-def refine_grid(
-    gray: np.ndarray, corners: np.ndarray, marker_id: int = MARKER_ID, marker_size_mm: float = MARKER_SIZE_MM
-) -> np.ndarray:
-    """Re-solve the corners from every black/white cell edge of the marker.
-
-    Each edge point is located across its edge, then the homography is fitted
-    so the points land on their grid lines (x = j * cell or y = i * cell).
-    """
+def _grid_edge_points(
+    gray: np.ndarray, corners: np.ndarray, marker_id: int, marker_size_mm: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Sub-pixel photo points on every black/white cell edge of the marker, with the grid
+    line each one belongs to: (points px, axis 0 = x line or 1 = y line, line position mm,
+    fraction of the expected points that were found near where the corners put them)."""
     img = gray.astype(np.float32)
     dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, MARKER_DICT))
     white = np.ones((8, 8), bool)
@@ -176,9 +183,37 @@ def refine_grid(
     ok = np.isfinite(pts).all(axis=1)
     if ok.sum() < 100:
         raise ValueError("too few grid edge points")
-    H = _fit_gridlines(pts[ok], axis[ok], value[ok])
+    return pts[ok], axis[ok], value[ok], float(ok.mean())
+
+
+def refine_grid(
+    gray: np.ndarray, corners: np.ndarray, marker_id: int = MARKER_ID, marker_size_mm: float = MARKER_SIZE_MM
+) -> np.ndarray:
+    """Re-solve the corners from every black/white cell edge of the marker.
+
+    Each edge point is located across its edge, then the homography is fitted
+    so the points land on their grid lines (x = j * cell or y = i * cell).
+    """
+    pts, axis, value, _ = _grid_edge_points(gray, corners, marker_id, marker_size_mm)
+    H = _fit_gridlines(pts, axis, value)
     s = marker_size_mm
     return _apply(np.linalg.inv(H), np.float64([[0, 0], [s, 0], [s, s], [0, s]]))
+
+
+def marker_error_mm(
+    gray: np.ndarray, corners: np.ndarray, marker_id: int = MARKER_ID, marker_size_mm: float = MARKER_SIZE_MM
+) -> float:
+    """Marker error in mm after refinement (REQ-SCL-03): the 95th percentile of the distance
+    between the marker's cell edges, mapped to mm by the corner homography, and their ideal
+    grid lines. The corners fix the outer square, so the inner grid is an independent check
+    that the photo is flat and square on to the marker. The four sides are 100 mm by construction."""
+    pts, axis, value, found = _grid_edge_points(gray, corners, marker_id, marker_size_mm)
+    if found < MIN_GRID_FOUND:
+        # Points far from their grid line are not found at all: do not let them hide a bad marker.
+        raise ValueError(f"only {100 * found:.0f}% of the marker edges are where the corners put them")
+    mm = homography_from_marker(corners, marker_size_mm).px_to_mm(pts)
+    resid = np.abs(mm[np.arange(len(mm)), axis] - value)
+    return float(np.percentile(resid, 95))
 
 
 def _edge_points(img: np.ndarray, p: np.ndarray, toward_light: np.ndarray, w: float = 3.0) -> np.ndarray:
@@ -239,6 +274,28 @@ def homography_from_marker(corners_px: np.ndarray, marker_size_mm: float = MARKE
     return Homography(H=H / H[2, 2])
 
 
-def photo_homography(image: np.ndarray) -> Homography:
-    """detect_marker + homography_from_marker."""
-    return homography_from_marker(detect_marker(image))
+def photo_homography(image: np.ndarray, name: str = "photo") -> Homography:
+    """detect_marker + homography_from_marker, then the marker error check (REQ-SCL-03).
+
+    ``name`` is what the user calls the photo ("front photo data/raw/tee1/front.jpg"); it
+    goes into every error message (REQ-CAP-02)."""
+    try:
+        corners = detect_marker(image)
+    except MarkerNotFound as err:
+        raise MarkerNotFound(
+            f"{name}: the whole marker is not in the photo. Put the printed marker flat in view and take the photo again."
+        ) from err
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    tolerance = get_config().marker.tolerance_mm
+    try:
+        error = marker_error_mm(gray, corners)
+    except ValueError as err:
+        raise MarkerRejected(
+            f"{name}: the marker edges cannot be read ({err}). Take the photo again from directly above, in good light."
+        ) from err
+    if error > tolerance:
+        raise MarkerRejected(
+            f"{name}: marker error {error:.2f} mm is more than {tolerance:g} mm. "
+            "Take the photo again from directly above, with the marker flat."
+        )
+    return replace(homography_from_marker(corners), marker_error_mm=error)

@@ -25,14 +25,17 @@ def client(tmp_path) -> MetaClient:
 
 
 def test_synth_writes_photos_and_masks(tee_dir):
+    """C-08: synth writes photos and masks."""
     for view in ("front", "back", "sleeve"):
         assert (tee_dir / f"{view}.jpg").exists()
         assert (tee_dir / f"{view}.masks" / "t-shirt.png").exists()
     truth = json.loads((tee_dir / "truth.json").read_text())
-    assert truth["measurements"]["chest_width"] == 320
+    # SPEC 10.2: chest is 25 mm below the underarm point; the side seam flares 4 mm over 228 mm.
+    assert truth["measurements"]["chest_width"] == pytest.approx(2 * (160 + 4 * 25 / 228), abs=0.01)
 
 
 def test_sleeve_cap_matches_armhole_plus_ease(tee_dir):
+    """REQ-SEW-01: sleeve cap matches armhole plus ease."""
     spec = truth_spec(tee_dir)
     cap = spec.panel("sleeve").edge_points("cap")
     arm = spec.panel("front").edge_points("armhole")
@@ -41,6 +44,7 @@ def test_sleeve_cap_matches_armhole_plus_ease(tee_dir):
 
 
 def test_edges_cover_outline_in_order(tee_dir):
+    """REQ-GEO-03: edges cover outline in order."""
     front = truth_spec(tee_dir).panel("front")
     assert [e.name for e in front.edges] == ["neck", "shoulder", "armhole", "side", "hem", "fold"]
     for a, b in zip(front.edges, front.edges[1:]):
@@ -49,6 +53,7 @@ def test_edges_cover_outline_in_order(tee_dir):
 
 
 def test_mock_segment_is_cached(client, tee_dir):
+    """REQ-API-02: mock segment is cached."""
     m1 = client.segment(tee_dir / "front.jpg", "t-shirt")
     m2 = client.segment(tee_dir / "front.jpg", "t-shirt")
     assert client.calls == 1
@@ -56,6 +61,7 @@ def test_mock_segment_is_cached(client, tee_dir):
 
 
 def test_reason_mock_and_cache(client):
+    """REQ-API-02: reason mock and cache."""
     answer = client.reason("hello", mock=lambda: {"ok": 1})
     assert answer == {"ok": 1}
     assert client.reason("hello", mock=lambda: {"ok": 2}) == {"ok": 1}

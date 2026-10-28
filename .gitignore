@@ -5,6 +5,7 @@ __pycache__/
 .env
 cache/
 data/raw/
+data/synth/
 data/runs/
 out/
 .claude/worktrees/

@@ -5,10 +5,13 @@ import cv2
 import numpy as np
 import pytest
 
+from sewtrace.config import get_config
 from sewtrace.mock import synth
+from sewtrace.vision import marker
 from sewtrace.vision.marker import (
     Homography,
     MarkerNotFound,
+    MarkerRejected,
     _apply,
     detect_marker,
     homography_from_marker,
@@ -42,6 +45,7 @@ def _square_scene(rng: np.random.Generator, size: int = 900) -> tuple[np.ndarray
 
 
 def test_known_square_corners():
+    """REQ-SCL-01: known square corners."""
     rng = np.random.default_rng(3)
     for _ in range(3):
         photo, truth = _square_scene(rng)
@@ -50,6 +54,7 @@ def test_known_square_corners():
 
 
 def test_homography_maps_corners_to_marker_square():
+    """REQ-SCL-02: homography maps corners to marker square."""
     corners = np.array([[110.0, 205.0], [402.0, 198.0], [410.0, 497.0], [104.0, 503.0]])
     hom = homography_from_marker(corners, 100.0)
     expect = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], float)
@@ -59,6 +64,7 @@ def test_homography_maps_corners_to_marker_square():
 
 
 def test_corner_order_follows_marker_not_image():
+    """REQ-SCL-02: corner order follows marker not image."""
     photo, truth = _square_scene(np.random.default_rng(5))
     rotated = cv2.rotate(photo, cv2.ROTATE_90_CLOCKWISE)
     h = photo.shape[0]
@@ -68,6 +74,7 @@ def test_corner_order_follows_marker_not_image():
 
 
 def test_marker_not_found():
+    """REQ-CAP-02: marker not found."""
     with pytest.raises(MarkerNotFound):
         detect_marker(np.full((400, 400, 3), 200, np.uint8))
 
@@ -96,13 +103,85 @@ def garment_errors(tees) -> dict[tuple[int, str], np.ndarray]:
 @pytest.mark.parametrize("view", VIEWS)
 @pytest.mark.parametrize("tee", range(len(synth.TEES)))
 def test_garment_points_within_tolerance(garment_errors, tee, view):
+    """REQ-SCL-02: garment points within tolerance."""
     err = garment_errors[tee, view]
     print(f"{synth.TEES[tee].name} {view}: max {err.max():.3f} mm, mean {err.mean():.3f} mm")
     assert err.max() < 0.8
 
 
 def test_garment_error_overall(garment_errors):
+    """REQ-SCL-02: garment error overall."""
     errs = np.concatenate(list(garment_errors.values()))
     print(f"all photos: max {errs.max():.3f} mm, mean {errs.mean():.3f} mm, p95 {np.percentile(errs, 95):.3f} mm")
     assert errs.mean() < 0.2
     assert np.percentile(errs, 95) < 0.5
+
+
+# ---- REQ-SCL-02, REQ-SCL-03, REQ-CAP-02 ------------------------------------------------
+
+@pytest.mark.parametrize("view", VIEWS)
+@pytest.mark.parametrize("tee", range(len(synth.TEES)))
+def test_req_scl_02_measured_marker_side_is_100_mm(tees, tee, view):
+    """REQ-SCL-02: on tilted synthetic photos, the true marker corners (from the synth
+    camera, not from the detector) are 100 mm +/- 1.0 mm apart after the homography."""
+    d = tees[tee]
+    truth = json.loads((d / "truth.json").read_text())["photos"][view]
+    # The drawn marker edge is half a world pixel before marker_corners_mm (see _garment_error).
+    corners_world = np.array(truth["marker_corners_mm"]) - 0.5 / synth.PX_PER_MM
+    hom = photo_homography(cv2.imread(str(d / f"{view}.jpg")))
+    mm = hom.px_to_mm(_apply(np.array(truth["world_mm_to_photo_px"]), corners_world))
+    sides = np.linalg.norm(mm - np.roll(mm, -1, axis=0), axis=1)
+    assert np.abs(sides - 100.0).max() <= 1.0
+    assert hom.marker_error_mm <= get_config().marker.tolerance_mm
+
+
+def _bowed_marker_photo(amp_px: float) -> np.ndarray:
+    """Marker on a card that bows by amp_px in the middle (not flat), then a tilted camera."""
+    size = 900
+    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    world = np.full((size, size), 240, np.uint8)
+    world[300:600, 300:600] = cv2.aruco.generateImageMarker(d, 0, 300)
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    bow = amp_px * np.sin(np.pi * np.clip((xx - 300) / 300, 0, 1)) * np.sin(np.pi * np.clip((yy - 300) / 300, 0, 1))
+    world = cv2.remap(world, xx, yy + bow, cv2.INTER_LINEAR, borderValue=240)
+    cam = synth._camera_homography(size, size, np.random.default_rng(3))
+    photo = cv2.warpPerspective(world, cam, (size, size), borderMode=cv2.BORDER_REPLICATE)
+    return cv2.GaussianBlur(photo, (0, 0), 0.8)
+
+
+def test_req_scl_03_flat_marker_passes_and_reports_error():
+    """REQ-SCL-03: a flat tilted marker is accepted; its error is far below the tolerance."""
+    hom = photo_homography(_bowed_marker_photo(0.0), "front photo f.jpg")
+    assert 0.0 <= hom.marker_error_mm < 0.1 * get_config().marker.tolerance_mm
+
+
+def test_req_scl_03_distorted_marker_is_rejected_with_retake_advice():
+    """REQ-SCL-03: a marker that is not flat (3 mm bow) is rejected; the message names the
+    photo and tells the user to take it again from directly above."""
+    with pytest.raises(MarkerRejected, match=r"front photo f\.jpg.*directly above"):
+        photo_homography(_bowed_marker_photo(9.0), "front photo f.jpg")
+
+
+def test_req_scl_03_error_over_tolerance_is_rejected(monkeypatch):
+    """REQ-SCL-03: the limit is marker.tolerance_mm; the message gives the error and the limit."""
+    photo, _ = _square_scene(np.random.default_rng(3))
+    monkeypatch.setattr(marker, "marker_error_mm", lambda *a, **k: 1.4)
+    with pytest.raises(MarkerRejected, match=r"s\.jpg: marker error 1\.40 mm is more than 1 mm.*directly above"):
+        photo_homography(photo, "s.jpg")
+    monkeypatch.setattr(marker, "marker_error_mm", lambda *a, **k: 0.99)
+    assert photo_homography(photo, "s.jpg").marker_error_mm == 0.99
+
+
+def test_req_cap_02_missing_or_partial_marker_names_the_photo(tees):
+    """REQ-CAP-02: no marker, or only part of it, is rejected with the photo's name."""
+    with pytest.raises(MarkerNotFound, match=r"back photo b\.jpg"):
+        photo_homography(np.full((400, 400, 3), 200, np.uint8), "back photo b.jpg")
+    d = tees[0]
+    image = cv2.imread(str(d / "front.jpg"))
+    truth = json.loads((d / "truth.json").read_text())["photos"]["front"]
+    px = _apply(np.array(truth["world_mm_to_photo_px"]), np.array(truth["marker_corners_mm"]))
+    x0, y0 = px.min(axis=0).astype(int)
+    x1, y1 = px.max(axis=0).astype(int)
+    image[y0 : (y0 + y1) // 2, x0:x1] = 245  # cover the top half of the marker
+    with pytest.raises(MarkerNotFound, match=r"front photo f\.jpg"):
+        photo_homography(image, "front photo f.jpg")

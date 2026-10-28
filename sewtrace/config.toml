@@ -49,7 +49,7 @@ max_tokens = 32000
 est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
 
 [sam]
-min_score = 0.5            # drop masks below this score (unconfirmed API field; Day 1 test)
+min_score = 0.5            # REQ-SEG-04: stop when the best mask scores less (score field unconfirmed; Day 1 test)
 
 [sam.prompts]              # REQ-SEG-02
 garment = "t-shirt"        # front, back and the t-shirt in the proof photo
@@ -82,7 +82,7 @@ max_adjust_calls = 3       # REQ-SEW-02
 [pattern]
 seam_allowance_mm = 10.0   # REQ-OUT-03
 neckband_allowance_mm = 6.0
-chest_drop_mm = 25.0       # chest drop; not read by code yet (measurement definitions, fix item 6)
+chest_drop_mm = 25.0       # chest is measured this far below the underarm points (SPEC 10.2)
 
 [proof]
 gap_tolerance_mm = 3.0     # REQ-VER-03
@@ -95,4 +95,7 @@ fold_exclude_mm = 1.5      # paper points this close to the fold edge are left o
 centre_margin_mm = 10.0    # body edge this far past the fold line still counts as the same side
 
 [marker]
-tolerance_mm = 1.0
+tolerance_mm = 1.0          # REQ-SCL-03: reject a photo whose marker error is more than this
+
+[ground_truth]
+repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third

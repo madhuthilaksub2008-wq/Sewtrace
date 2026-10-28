@@ -20,6 +20,8 @@ from sewtrace.api.client import (
     CacheMiss,
     HttpError,
     MetaClient,
+    SamResult,
+    SegmentationFailed,
     Usage,
 )
 from sewtrace.config import AppConfig, Settings, load_config
@@ -138,6 +140,7 @@ def test_req_api_03_sam_price_is_per_image(tmp_path):
 
 
 def test_c07_api_key_is_not_written_to_cache_or_ledger(tmp_path):
+    """C-07: the key never reaches a cache file or the ledger."""
     client, _ = _client(tmp_path, FakeTransport(_answer()))
     client.reason("p")
     assert all(KEY not in p.read_text() for p in tmp_path.iterdir() if p.is_file())
@@ -322,6 +325,7 @@ def test_req_api_08_settings_load_reads_offline_env(monkeypatch, tmp_path):
 
 
 def test_no_key_without_offline_means_mock(monkeypatch, tmp_path):
+    """C-08: no key without offline means mock."""
     monkeypatch.delenv("SEWTRACE_OFFLINE", raising=False)
     monkeypatch.delenv("META_API_KEY", raising=False)
     monkeypatch.setenv("SEWTRACE_CACHE_DIR", str(tmp_path))
@@ -330,6 +334,7 @@ def test_no_key_without_offline_means_mock(monkeypatch, tmp_path):
 
 
 def test_real_call_without_key_fails_loudly(tmp_path):
+    """C-07: real call without key fails loudly."""
     client, _ = _client(tmp_path, FakeTransport(_answer()), key="")
     with pytest.raises(ApiError, match="META_API_KEY"):
         client.reason("p")
@@ -361,3 +366,61 @@ def test_req_api_01_only_the_client_imports_an_http_client():
             if any(name == b or name.startswith(b + ".") for b in BANNED):
                 offenders.append(f"{path.relative_to(package)} imports {name}")
     assert offenders == []
+
+
+# ---- SAM scores (REQ-SEG-03, REQ-SEG-04) ---------------------------------------------
+
+def _sam_client(tmp_path, results, **kwargs):
+    """A real-mode client whose SAM call returns ``results`` (the response shape is unconfirmed)."""
+    client, _ = _client(tmp_path, FakeTransport(), **kwargs)
+    asked = []
+    client._call_sam = lambda image, prompt: asked.append((image, prompt)) or results
+    return client, asked
+
+
+def _blob(x0: int) -> np.ndarray:
+    mask = np.zeros((40, 40), bool)
+    mask[10:30, x0 : x0 + 10] = True
+    return mask
+
+
+def test_req_seg_03_highest_score_mask_wins(tmp_path, photo):
+    """REQ-SEG-03: SAM returns two masks; the one with the higher score is used."""
+    low, high = SamResult(mask=_blob(2), score=0.6), SamResult(mask=_blob(20), score=0.9)
+    for order in ((low, high), (high, low)):
+        client, _ = _sam_client(tmp_path / f"c{id(order)}", list(order))
+        assert np.array_equal(client.segment(photo, "t-shirt"), high.mask)
+
+
+def test_req_seg_04_low_score_stops_and_names_photo_and_prompt(tmp_path, photo):
+    """REQ-SEG-04: best score below sam.min_score raises, naming the photo and the prompt."""
+    min_score = load_config().sam.min_score
+    client, asked = _sam_client(tmp_path, [SamResult(mask=_blob(2), score=min_score - 0.01),
+                                           SamResult(mask=_blob(20), score=0.1)])
+    with pytest.raises(SegmentationFailed, match=r"p\.jpg.*'sleeve'.*below"):
+        client.segment(photo, "sleeve")
+    # The score is cached with the mask: asking again fails again without a second paid call.
+    with pytest.raises(SegmentationFailed):
+        client.segment(photo, "sleeve")
+    assert len(asked) == 1
+
+
+def test_req_seg_04_score_at_threshold_passes_and_empty_result_fails(tmp_path, photo):
+    """REQ-SEG-04: a score equal to the threshold is accepted; no mask at all is an error."""
+    min_score = load_config().sam.min_score
+    client, _ = _sam_client(tmp_path / "ok", [SamResult(mask=_blob(2), score=min_score)])
+    assert client.segment(photo, "t-shirt").any()
+    empty, _ = _sam_client(tmp_path / "empty", [])
+    with pytest.raises(SegmentationFailed, match="no mask"):
+        empty.segment(photo, "t-shirt")
+
+
+def test_req_seg_03_mock_masks_score_one(tmp_path, photo):
+    """REQ-SEG-03: the mock returns one mask with score 1.0 (sidecar or threshold)."""
+    from sewtrace.api.client import _mock_segment
+
+    img = np.full((40, 40, 3), 255, np.uint8)
+    img[10:30, 10:30] = 0
+    cv2.imwrite(str(photo), img)
+    results = _mock_segment(photo, "t-shirt", "t-shirt")
+    assert len(results) == 1 and results[0].score == 1.0

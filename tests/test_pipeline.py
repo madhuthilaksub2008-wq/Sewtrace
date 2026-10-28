@@ -15,6 +15,7 @@ from sewtrace.types import MEASUREMENT_KEYS
 
 
 def test_photos_to_pattern_end_to_end(tmp_path):
+    """REQ-CAP-01: photos to pattern end to end."""
     tee = tmp_path / "tee3"
     synth.make_tee(synth.TEES[2], tee, seed=2)
     client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
@@ -88,3 +89,51 @@ def test_req_seg_02_pipeline_asks_for_spec_prompts(tmp_path):
     run(tee, tmp_path / "out", client)
 
     assert asked == [("front.jpg", "t-shirt"), ("back.jpg", "t-shirt"), ("sleeve.jpg", "sleeve")]
+
+
+def _client(tmp_path) -> MetaClient:
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+
+
+@pytest.mark.parametrize("damage", ["missing", "not_an_image"])
+def test_req_cap_01_missing_photo_names_view_and_path_before_any_call(tmp_path, damage):
+    """REQ-CAP-01: a missing or unreadable photo gives a clear error with the view and the
+    path, and no model call is made."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    if damage == "missing":
+        (tee / "back.jpg").unlink()
+    else:
+        (tee / "back.jpg").write_bytes(b"this is not a jpeg")
+    client = _client(tmp_path)
+    with pytest.raises(pipeline.PhotoMissing, match=r"back photo .*back\.jpg is missing or is not an image") as err:
+        run(tee, tmp_path / "out", client)
+    assert str(tee / "back.jpg") in str(err.value)
+    assert client.calls == 0
+
+
+def test_req_cap_02_marker_not_found_names_photo_before_any_call(tmp_path):
+    """REQ-CAP-02: a photo with no marker is rejected with its name; nothing is paid for first."""
+    import cv2
+    import numpy as np
+
+    from sewtrace.vision.marker import MarkerNotFound
+
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    cv2.imwrite(str(tee / "sleeve.jpg"), np.full((600, 600, 3), 120, np.uint8))
+    client = _client(tmp_path)
+    with pytest.raises(MarkerNotFound, match=r"sleeve photo .*sleeve\.jpg"):
+        run(tee, tmp_path / "out", client)
+    assert client.calls == 0
+
+
+def test_req_cap_01_cli_missing_photo_prints_error_and_exits_nonzero(tmp_path, capsys):
+    """REQ-CAP-01: the CLI shows the message, not a traceback."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    (tee / "front.jpg").unlink()
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["run", str(tee), "--out", str(tmp_path / "out")])
+    assert exit_.value.code == 1
+    assert "front photo" in capsys.readouterr().err

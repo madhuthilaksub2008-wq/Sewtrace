@@ -19,14 +19,15 @@ from sewtrace.config import get_config
 
 Point = tuple[float, float]
 
-# The six ground-truth measurements (proof metric, parent page section 4).
+# The six proof measurements, defined in SPEC 10.2 (REQ-GEO-04). Same words for the
+# tape measure and for sewtrace/vision/measure.py.
 MEASUREMENT_KEYS = (
-    "chest_width",     # full body width at underarm level
-    "body_length",     # high point shoulder (neck point) to hem, vertical
-    "shoulder_width",  # shoulder point to shoulder point
-    "sleeve_length",   # sleeve cap top to sleeve hem, along the fold
-    "neck_width",      # neck point to neck point
-    "armhole_depth",   # shoulder point to underarm, vertical
+    "chest_width",     # straight across the front, pattern.chest_drop_mm (25 mm) below the underarm points
+    "body_length",     # high point of the shoulder to the hem, parallel to the centre line
+    "shoulder_width",  # one shoulder seam point to the other, across the back
+    "sleeve_length",   # shoulder seam point to the sleeve hem, along the fold
+    "neck_width",      # straight across the neck opening, seam to seam
+    "armhole_depth",   # shoulder seam point straight down to the underarm point
 )
 
 TEE_PANELS = ("front", "back", "sleeve", "neckband")

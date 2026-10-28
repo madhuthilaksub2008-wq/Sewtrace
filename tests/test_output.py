@@ -34,6 +34,7 @@ def _page_count(data: bytes) -> int:
 
 @pytest.mark.parametrize("i", TEES)
 def test_pdf_pages_and_size(specs, tmp_path, i):
+    """REQ-OUT-01: pdf pages and size."""
     spec = specs[i]
     path = render_pdf(spec, tmp_path / "p.pdf")
     data = path.read_bytes()
@@ -51,6 +52,7 @@ def test_pdf_pages_and_size(specs, tmp_path, i):
 
 
 def test_test_square_exact(specs, tmp_path):
+    """REQ-OUT-02: test square exact."""
     side = 100 * 72 / 25.4
     x, y, w, h = cover_test_square_pt()
     assert w == pytest.approx(side, abs=1e-9) and h == pytest.approx(side, abs=1e-9)
@@ -63,6 +65,7 @@ def test_test_square_exact(specs, tmp_path):
 
 @pytest.mark.parametrize("i", TEES)
 def test_cut_line_encloses_stitch_by_allowance(specs, i):
+    """REQ-OUT-03: cut line encloses stitch by allowance."""
     for panel in specs[i].panels:
         sa = panel.seam_allowance_mm
         cut = L.cut_polygon(panel)
@@ -86,6 +89,7 @@ def test_cut_line_encloses_stitch_by_allowance(specs, i):
 
 
 def test_notches_cross_cut_line(specs):
+    """REQ-OUT-04: notches cross cut line."""
     sheet = L.layout(specs[0])
     arts = {a.name: a for a in sheet.panels}
     for name in ("front", "back", "sleeve"):
@@ -97,6 +101,7 @@ def test_notches_cross_cut_line(specs):
 
 @pytest.mark.parametrize("i", TEES)
 def test_layout_no_overlap(specs, i):
+    """REQ-OUT-01: layout no overlap."""
     sheet = L.layout(specs[i])
     polys = [Polygon(a.cut) for a in sheet.panels]
     for a in range(len(polys)):
@@ -108,6 +113,7 @@ def test_layout_no_overlap(specs, i):
 
 @pytest.mark.parametrize("i", TEES)
 def test_dxf_layers_units_and_cut_bbox(specs, tmp_path, i):
+    """REQ-OUT-05: dxf layers units and cut bbox."""
     spec = specs[i]
     path = render_dxf(spec, tmp_path / "p.dxf")
     doc = ezdxf.readfile(path)
@@ -136,6 +142,7 @@ def test_dxf_layers_units_and_cut_bbox(specs, tmp_path, i):
 
 
 def test_svg_mm_units(specs, tmp_path):
+    """REQ-OUT-05: svg mm units."""
     path = render_svg(specs[0], tmp_path / "p.svg")
     root = ET.parse(path).getroot()
     assert root.get("width").endswith("mm") and root.get("height").endswith("mm")
@@ -148,6 +155,7 @@ def test_svg_mm_units(specs, tmp_path):
 
 
 def test_preview_png(specs, tmp_path):
+    """REQ-OUT-04: preview png."""
     path = L.render_preview(specs[0], tmp_path / "p.png", px_per_mm=1.0)
     img = cv2.imread(str(path))
     sheet = L.layout(specs[0])

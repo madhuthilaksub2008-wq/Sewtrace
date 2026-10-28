@@ -138,6 +138,10 @@ class MarkerConfig(_Strict):
     tolerance_mm: float = Field(gt=0)
 
 
+class GroundTruthConfig(_Strict):
+    repeat_tol_mm: float = Field(gt=0)
+
+
 class AppConfig(_Strict):
     api: ApiConfig
     models: ModelsConfig
@@ -149,6 +153,7 @@ class AppConfig(_Strict):
     pattern: PatternConfig
     proof: ProofConfig
     marker: MarkerConfig
+    ground_truth: GroundTruthConfig
 
     @property
     def reasoning_model(self) -> ModelConfig:

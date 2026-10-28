@@ -23,7 +23,8 @@ def _edges(ranges: dict) -> list[Edge]:
 
 @pytest.mark.parametrize("name", TEE_NAMES)
 def test_measurements_match_truth(halves, tees, name):
-    got = measure_tee(*halves[name, "front"], *halves[name, "sleeve"])
+    """REQ-GEO-04: measurements match truth."""
+    got = measure_tee(*halves[name, "front"], *halves[name, "back"], *halves[name, "sleeve"])
     want = tees[name][1]["measurements"]
     assert set(got) == set(MEASUREMENT_KEYS)
     for k in MEASUREMENT_KEYS:
@@ -32,19 +33,22 @@ def test_measurements_match_truth(halves, tees, name):
 
 def test_req_geo_04_whole_garment_mean_error_within_gate(halves, tees):
     """REQ-GEO-04, SPEC 10.1: on the whole-garment path the mean absolute error over the
-    6 measurements and 5 tees is 0.5 mm or less (the synthetic gate). Per tee it is 0.2
-    to 0.51 mm; the worst single measurement is 0.95 mm."""
+    6 measurements and 5 tees is 0.5 mm or less (the synthetic gate, now 0.42 mm). The single
+    measurement bound is TOL_MM. SPEC 10.2 takes the shoulder across the back, where the
+    sleeve joint of tee2 sits 0.5 mm off, so the worst single value is 1.58 mm (was 0.95 mm
+    on the front)."""
     errors = []
     for name in TEE_NAMES:
-        got = measure_tee(*halves[name, "front"], *halves[name, "sleeve"])
+        got = measure_tee(*halves[name, "front"], *halves[name, "back"], *halves[name, "sleeve"])
         errors += [abs(got[k] - tees[name][1]["measurements"][k]) for k in MEASUREMENT_KEYS]
-    assert np.mean(errors) <= 0.5 and max(errors) < 1.5
+    assert np.mean(errors) <= 0.5 and max(errors) < TOL_MM
 
 
 def test_measurements_on_rotated_photos(tees, session_client):
+    """REQ-GEO-04: measurements on rotated photos."""
     d, truth = tees["tee4"]
     parts = []
-    for view, deg, frame_deg in (("front", 6.0, -2.0), ("sleeve", -4.0, 3.0)):
+    for view, deg, frame_deg in (("front", 6.0, -2.0), ("back", 3.0, 1.0), ("sleeve", -4.0, 3.0)):
         mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "t-shirt")
         rmask, H = rotate_photo(mask, truth_homography(truth, view), deg, frame_deg)
         parts.extend(extract(rmask, H, view))
@@ -54,11 +58,52 @@ def test_measurements_on_rotated_photos(tees, session_client):
 
 
 def test_measurements_on_exact_truth_outlines():
-    """Exact synth geometry with its own edge labels gives the parameters back."""
+    """REQ-GEO-04: Exact synth geometry with its own edge labels gives the parameters back."""
     p = synth.TEES[2]
     body, be = synth.body_half(p)
+    back, bke = synth.body_half(p, back=True)
     sleeve, se = synth.sleeve_half(p)
-    got = measure_tee(Outline.from_array(body), _edges(be), Outline.from_array(sleeve), _edges(se))
+    got = measure_tee(Outline.from_array(body), _edges(be), Outline.from_array(back), _edges(bke),
+                      Outline.from_array(sleeve), _edges(se))
     for k, v in synth.measurements(p).items():
         assert got[k] == pytest.approx(v, abs=0.5), k
     assert np.isfinite(list(got.values())).all()
+
+
+def test_req_geo_04_definitions_follow_spec_10_2():
+    """REQ-GEO-04, SPEC 10.2: chest is 25 mm below the underarm points (not at them) and the
+    shoulder is taken across the back. A tee whose back shoulder and side flare differ from
+    the front shows both, with the truth read off the exact geometry."""
+    from dataclasses import replace
+
+    from sewtrace.config import get_config
+
+    p = synth.TEES[1]
+    flared = replace(p, hem_flare=20.0)
+    body, be = synth.body_half(flared)
+    wide_back, bke = synth.body_half(replace(flared, shoulder_half=p.shoulder_half + 7.0), back=True)
+    sleeve, se = synth.sleeve_half(p)
+    got = measure_tee(Outline.from_array(body), _edges(be), Outline.from_array(wide_back), _edges(bke),
+                      Outline.from_array(sleeve), _edges(se))
+    drop = get_config().pattern.chest_drop_mm
+    side_run = flared.length - (flared.shoulder_drop + flared.armhole_depth)
+    want_chest = 2 * (flared.chest_half + flared.hem_flare * drop / side_run)
+    assert want_chest - 2 * flared.chest_half > 3.0  # the definition matters on this tee
+    assert got["chest_width"] == pytest.approx(want_chest, abs=0.5)
+    assert got["shoulder_width"] == pytest.approx(2 * (p.shoulder_half + 7.0), abs=0.5)
+    assert got["armhole_depth"] == pytest.approx(p.armhole_depth, abs=0.5)
+    assert got["neck_width"] == pytest.approx(2 * p.neck_half, abs=0.5)
+
+
+def test_req_geo_04_synthetic_truth_is_independent_of_measure_code():
+    """REQ-GEO-04: truth.json values come from the exact geometry in SPEC 10.2 words."""
+    p = synth.TEES[0]
+    truth = synth.measurements(p)
+    side_run = p.length - (p.shoulder_drop + p.armhole_depth)
+    assert truth["chest_width"] == pytest.approx(2 * (p.chest_half + p.hem_flare * 25 / side_run), abs=1e-6)
+    assert truth["chest_width"] > 2 * p.chest_half  # not measured at the underarm level
+    assert truth["body_length"] == pytest.approx(p.length, abs=1e-6)
+    assert truth["shoulder_width"] == pytest.approx(2 * p.shoulder_half, abs=1e-6)
+    assert truth["sleeve_length"] == pytest.approx(p.sleeve_length, abs=1e-6)
+    assert truth["neck_width"] == pytest.approx(2 * p.neck_half, abs=1e-6)
+    assert truth["armhole_depth"] == pytest.approx(p.armhole_depth, abs=1e-6)

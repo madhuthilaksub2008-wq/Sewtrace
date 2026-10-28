@@ -55,6 +55,7 @@ def meas(tee_dir: Path) -> dict:
 
 
 def test_draft_matches_truth(tees):
+    """REQ-GEO-03: draft matches truth."""
     for tee in tees:
         draft, truth = draft_spec(*measured(tee)), truth_spec(tee)
         assert [p.name for p in draft.panels] == ["front", "back", "sleeve", "neckband"]
@@ -69,6 +70,7 @@ def test_draft_matches_truth(tees):
 
 
 def test_notches_sit_on_their_edges(tees):
+    """REQ-OUT-04: notches sit on their edges."""
     draft = draft_spec(*measured(tees[0]))
     assert len(draft.panel("front").notches) == 1
     assert len(draft.panel("back").notches) == 2
@@ -173,8 +175,10 @@ def test_req_rsn_04_05_valid_answer_changes_only_inferred_quantities(tees):
                 assert np.allclose(a, b, atol=cfg.measured_tol_mm), (name, edge)
         assert not np.allclose(draft.panel("sleeve").edge_points("cap")[5], spec.panel("sleeve").edge_points("cap")[5])
         f0, f1 = draft.panel("front"), spec.panel("front")
-        before = measure_tee(f0.outline(), f0.edges, draft.panel("sleeve").outline(), draft.panel("sleeve").edges)
-        after = measure_tee(f1.outline(), f1.edges, spec.panel("sleeve").outline(), spec.panel("sleeve").edges)
+        before = measure_tee(f0.outline(), f0.edges, draft.panel("back").outline(), draft.panel("back").edges,
+                             draft.panel("sleeve").outline(), draft.panel("sleeve").edges)
+        after = measure_tee(f1.outline(), f1.edges, spec.panel("back").outline(), spec.panel("back").edges,
+                            spec.panel("sleeve").outline(), spec.panel("sleeve").edges)
         assert after == pytest.approx(before, abs=cfg.measured_tol_mm)
 
 
@@ -211,6 +215,7 @@ def test_req_rsn_03_05_side_seam_moved_2mm_is_rejected_retried_then_fallback(tee
 
 
 def test_infer_panels_mock_valid_and_cached(tees, client):
+    """REQ-RSN-02: infer panels mock valid and cached."""
     tee = tees[1]
     draft = draft_spec(*measured(tee))
     history: list[dict] = []
@@ -241,6 +246,7 @@ def test_req_rsn_03_retries_then_falls_back(tees, client, monkeypatch):
 
 
 def test_validate_catches_self_intersection_and_missing_panel(tees):
+    """REQ-RSN-02: validate catches self intersection and missing panel."""
     draft = draft_spec(*measured(tees[0]))
     front = draft.panel("front")
     pts = list(front.outline_mm)
@@ -254,6 +260,7 @@ def test_validate_catches_self_intersection_and_missing_panel(tees):
 
 
 def test_validate_catches_moved_sleeve_and_bad_edges(tees):
+    """REQ-RSN-05: validate catches moved sleeve and bad edges."""
     draft = draft_spec(*measured(tees[0]))
     sleeve = draft.panel("sleeve")
     moved = sleeve.model_copy(update={

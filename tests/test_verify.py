@@ -43,6 +43,7 @@ def _verify(proofs, client, name: str) -> tuple[ProofResult, dict]:
 
 
 def test_proof_writes_photo_and_masks(proofs):
+    """REQ-VER-01: proof writes photo and masks."""
     tee_dir, _ = proofs
     for mask in ("paper", "body"):
         m = cv2.imread(str(tee_dir / "perfect.masks" / f"{mask}.png"), cv2.IMREAD_GRAYSCALE)
@@ -51,6 +52,7 @@ def test_proof_writes_photo_and_masks(proofs):
 
 
 def test_edge_gaps_square():
+    """REQ-VER-02: edge gaps square."""
     inner = np.array([[0, 0], [100, 0], [100, 100], [0, 100]], float)
     outer = inner * 1.04 - 2.0
     pts, d = edge_gaps(outer, inner, step_mm=2.0)
@@ -89,6 +91,7 @@ def test_req_ver_02_gap_matches_known_paper_error(proofs, client, name):
 
 
 def test_overlay_marks_gaps_red_and_green(proofs, client, tmp_path):
+    """REQ-VER-03: overlay marks gaps red and green."""
     tee_dir, _ = proofs
     r, _ = _verify(proofs, client, "scaled")
     hom = photo_homography(cv2.imread(str(tee_dir / "scaled.jpg")))

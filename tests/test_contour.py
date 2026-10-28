@@ -92,6 +92,7 @@ def edge_lengths(half: Outline, edges) -> dict[str, float]:
 # ---- unit tests ---------------------------------------------------------------
 
 def test_mask_to_outline_square():
+    """REQ-GEO-01: mask to outline square."""
     mask = np.zeros((200, 300), bool)
     mask[50:150, 100:250] = True  # 150 x 100 px, edges at pixel boundaries
     H = Homography(np.diag([0.5, 0.5, 1.0]))
@@ -102,6 +103,7 @@ def test_mask_to_outline_square():
 
 
 def test_smooth_outline_keeps_corners_and_spacing():
+    """REQ-GEO-01: smooth outline keeps corners and spacing."""
     rng = np.random.default_rng(0)
     square = np.array([[0, 0], [100, 0], [100, 60], [0, 60]], float)
     dense = contour._resample_closed(square, 0.3)
@@ -119,6 +121,7 @@ def test_smooth_outline_keeps_corners_and_spacing():
 @pytest.mark.parametrize("name", TEE_NAMES)
 @pytest.mark.parametrize("view", VIEWS)
 def test_half_outline_matches_truth(halves, tees, name, view):
+    """REQ-GEO-01: half outline matches truth."""
     half, _ = halves[name, view]
     truth = np.array(tees[name][1]["photos"][view]["half_outline_mm"])
     pts = half.array()
@@ -130,6 +133,7 @@ def test_half_outline_matches_truth(halves, tees, name, view):
 @pytest.mark.parametrize("name", TEE_NAMES)
 @pytest.mark.parametrize("view", VIEWS)
 def test_edge_labels_match_truth(halves, tees, name, view):
+    """REQ-GEO-03: edge labels match truth."""
     half, edges = halves[name, view]
     panel = "sleeve" if view == "sleeve" else "front"
     assert [e.name for e in edges] == list(TEE_EDGES[panel])
@@ -153,6 +157,7 @@ def rotate_photo(mask: np.ndarray, H: Homography, deg: float, frame_deg: float):
 
 @pytest.mark.parametrize("view", VIEWS)
 def test_rotated_photo(tees, session_client, view):
+    """REQ-GEO-01: rotated photo."""
     d, truth = tees["tee3"]
     mask = session_client.segment(d / f"{view}.jpg", "sleeve" if view == "sleeve" else "t-shirt")
     for deg, frame_deg in ((7.0, -3.0), (-5.0, 4.0)):
@@ -166,6 +171,7 @@ def test_rotated_photo(tees, session_client, view):
 
 
 def test_body_half_upside_down(tees, session_client):
+    """REQ-GEO-02: body half upside down."""
     d, truth = tees["tee1"]
     mask = session_client.segment(d / "front.jpg", "t-shirt")
     rmask, H = rotate_photo(mask, truth_homography(truth, "front"), 180.0, 0.0)
@@ -232,9 +238,11 @@ def test_req_geo_01_reviewer_repro_whole_garment_sidecar(tees):
     d, truth = tees["tee1"]
     raw = cv2.imread(str(d / "front.masks" / "t-shirt.png"), cv2.IMREAD_GRAYSCALE) > 127
     front = extract(raw, truth_homography(truth, "front"), "front")
+    back_raw = cv2.imread(str(d / "back.masks" / "t-shirt.png"), cv2.IMREAD_GRAYSCALE) > 127
+    back = extract(back_raw, truth_homography(truth, "back"), "back")
     sleeve_mask = cv2.imread(str(d / "sleeve.masks" / "sleeve.png"), cv2.IMREAD_GRAYSCALE) > 127
     sleeve = extract(sleeve_mask, truth_homography(truth, "sleeve"), "sleeve")
-    got = measure_tee(*front, *sleeve)
+    got = measure_tee(*front, *back, *sleeve)
     for k in ("chest_width", "body_length", "shoulder_width", "armhole_depth"):
         assert got[k] == pytest.approx(truth["measurements"][k], abs=2.0), k
 

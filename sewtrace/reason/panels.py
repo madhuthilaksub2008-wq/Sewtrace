@@ -335,8 +335,8 @@ def _fold_below(fold: np.ndarray, cut_y: float) -> np.ndarray:
 
 
 def _measure(spec: PanelSpec) -> dict[str, float]:
-    front, sleeve = spec.panel("front"), spec.panel("sleeve")
-    return measure_tee(front.outline(), front.edges, sleeve.outline(), sleeve.edges)
+    front, back, sleeve = spec.panel("front"), spec.panel("back"), spec.panel("sleeve")
+    return measure_tee(front.outline(), front.edges, back.outline(), back.edges, sleeve.outline(), sleeve.edges)
 
 
 def _errors(exc: ValidationError) -> str:

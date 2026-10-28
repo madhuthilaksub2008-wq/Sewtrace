@@ -13,7 +13,7 @@ paper points nearest the (hidden) armhole are left out.
   <tee_dir>/<name>.masks/body.png     ground truth only: the tee body without sleeves
   <tee_dir>/<name>.json               paper params, outlines, expected gap
 
-    python -m sewtrace.mock.proof data/raw/tee1 --scale 1.02
+    python -m sewtrace.mock.proof data/synth/tee1 --scale 1.02
 """
 
 from __future__ import annotations
