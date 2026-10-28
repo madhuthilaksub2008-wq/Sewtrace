@@ -18,14 +18,13 @@ import numpy as np
 from shapely.geometry import LineString, Polygon
 
 from sewtrace.api.client import MetaClient
+from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
 from sewtrace.reason.seams import check_seams, edge_length
 from sewtrace.types import TEE_EDGES, TEE_PANELS, Edge, Outline, Panel, PanelSpec, PhotoSet
 
 log = logging.getLogger(__name__)
 
-SEAM_ALLOWANCE_MM = 10.0
-NECKBAND_ALLOWANCE_MM = 6.0
 PROMPT_STEP_MM = 5.0
 SIMPLIFY_MM = 0.3
 EDGE_GAP_MM = 2.0
@@ -205,7 +204,7 @@ def estimate_tokens(text: str) -> int:
 
 def _body_panel(name: str, outline: Outline, edges: list[Edge]) -> Panel:
     return Panel(name=name, cut=CUTS[name], on_fold=True, outline_mm=list(outline.points),
-                 edges=list(edges), seam_allowance_mm=SEAM_ALLOWANCE_MM, grain="vertical")
+                 edges=list(edges), seam_allowance_mm=get_config().pattern.seam_allowance_mm, grain="vertical")
 
 
 def _assemble(panels: list[Panel]) -> PanelSpec:
@@ -234,7 +233,7 @@ def _neckband(neckline_mm: float) -> Panel:
     """Same rule as mock.fixtures.truth_spec: rectangle, 85% of the full neckline."""
     length = NECKBAND_RATIO * neckline_mm
     return Panel(
-        name="neckband", cut="1", seam_allowance_mm=NECKBAND_ALLOWANCE_MM, grain="horizontal",
+        name="neckband", cut="1", seam_allowance_mm=get_config().pattern.neckband_allowance_mm, grain="horizontal",
         outline_mm=[(0, 0), (length, 0), (length, NECKBAND_WIDTH_MM), (0, NECKBAND_WIDTH_MM)],
         notches=[(length / 2, 0.0)],
         length_rule=f"{int(NECKBAND_RATIO * 100)}% of neckline",

@@ -30,5 +30,8 @@ sewtrace = "sewtrace.cli:main"
 [tool.setuptools.packages.find]
 include = ["sewtrace*"]
 
+[tool.setuptools.package-data]
+sewtrace = ["config.toml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

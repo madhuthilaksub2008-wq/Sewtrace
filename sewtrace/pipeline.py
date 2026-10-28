@@ -49,10 +49,12 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     client = client or MetaClient()
     calls_before = client.calls
     photos = photo_set(garment_dir)
+    prompts = client.config.sam.prompts
 
-    front, front_edges = trace(client, photos.front, "body")
-    back, back_edges = trace(client, photos.back, "body")
-    sleeve, sleeve_edges = trace(client, photos.sleeve, "sleeve", sleeve=True)
+    # Body-only prompt is temporary until the whole-garment mask (fix item 3).
+    front, front_edges = trace(client, photos.front, prompts.mock_body)
+    back, back_edges = trace(client, photos.back, prompts.mock_body)
+    sleeve, sleeve_edges = trace(client, photos.sleeve, prompts.sleeve, sleeve=True)
     measurements = measure_tee(front, front_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)

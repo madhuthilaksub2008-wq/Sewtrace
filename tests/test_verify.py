@@ -27,7 +27,7 @@ def proofs(tmp_path_factory) -> tuple[Path, dict[str, dict]]:
 
 @pytest.fixture
 def client(tmp_path) -> MetaClient:
-    return MetaClient(Settings(api_key="", api_base_url="", mock=True, reasoning_model="spark", cache_dir=tmp_path))
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path))
 
 
 def _verify(proofs, client, name: str) -> tuple[ProofResult, dict]:

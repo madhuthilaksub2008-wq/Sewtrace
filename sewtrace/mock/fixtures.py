@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from sewtrace.config import get_config
 from sewtrace.types import Edge, Panel, PanelSpec, Seam
 
 NECKBAND_RATIO = 0.85
@@ -36,7 +37,7 @@ def truth_spec(tee_dir: str | Path) -> PanelSpec:
     neck = sum(_len(panels[i].edge_points("neck")) for i in (0, 1)) * 2  # both halves
     length = NECKBAND_RATIO * neck
     panels.append(Panel(
-        name="neckband", cut="1", seam_allowance_mm=6.0, grain="horizontal",
+        name="neckband", cut="1", seam_allowance_mm=get_config().pattern.neckband_allowance_mm, grain="horizontal",
         outline_mm=[(0, 0), (length, 0), (length, NECKBAND_WIDTH_MM), (0, NECKBAND_WIDTH_MM)],
         length_rule=f"{int(NECKBAND_RATIO * 100)}% of neckline",
     ))
@@ -44,12 +45,15 @@ def truth_spec(tee_dir: str | Path) -> PanelSpec:
 
 
 def default_tee_seams() -> list[Seam]:
+    """Seam pairs of SPEC 7.6.1 with the tolerances from config."""
+    c = get_config().seam
+    ease = {"min_diff_mm": c.cap_ease_min_mm, "max_diff_mm": c.cap_ease_max_mm}
     return [
-        Seam(a="front.shoulder", b="back.shoulder"),
-        Seam(a="front.side", b="back.side"),
-        # Half sleeve cap sews to one armhole; knit cap ease 0 to 12 mm (pending decision).
-        Seam(a="front.armhole", b="sleeve.cap", min_diff_mm=0.0, max_diff_mm=12.0),
-        Seam(a="back.armhole", b="sleeve.cap", min_diff_mm=0.0, max_diff_mm=12.0),
+        Seam(a="front.shoulder", b="back.shoulder", min_diff_mm=-c.shoulder_tol_mm, max_diff_mm=c.shoulder_tol_mm),
+        Seam(a="front.side", b="back.side", min_diff_mm=-c.side_tol_mm, max_diff_mm=c.side_tol_mm),
+        # Half sleeve cap sews to one armhole.
+        Seam(a="front.armhole", b="sleeve.cap", **ease),
+        Seam(a="back.armhole", b="sleeve.cap", **ease),
     ]
 
 

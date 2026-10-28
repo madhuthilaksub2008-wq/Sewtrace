@@ -1,7 +1,7 @@
 """T20: sewability check and adjust loop.
 
-Owner: Madhu. Joined seams must match within SEAM_TOLERANCE_MM (or the seam's
-own range, e.g. sleeve cap ease).
+Owner: Madhu. Joined seams must match within the seam's own range from config
+(SPEC 7.6.1), e.g. sleeve cap ease.
 
 The model only chooses which edge to change and its target length; the
 reshaping itself is deterministic (`set_edge_length`): the edge's end vertex
@@ -60,8 +60,9 @@ def check_seams(spec: PanelSpec) -> list[Seam]:
     ]
 
 
-def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int = 3) -> tuple[PanelSpec, list[dict]]:
+def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = None) -> tuple[PanelSpec, list[dict]]:
     """Model fixes failing seams; deterministic fallback after max_calls. Returns spec + log."""
+    max_calls = client.config.seam.max_adjust_calls if max_calls is None else max_calls
     history: list[dict] = []
     calls, source, applied = 0, "initial", []
     while True:

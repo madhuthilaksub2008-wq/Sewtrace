@@ -15,6 +15,8 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel, Field
 
+from sewtrace.config import get_config
+
 Point = tuple[float, float]
 
 # The six ground-truth measurements (proof metric, parent page section 4).
@@ -63,7 +65,7 @@ class Panel(BaseModel):
     cut: str  # e.g. "1 on fold", "2"
     outline_mm: list[Point]  # stitch line (no seam allowance), half panel if on fold
     edges: list[Edge] = Field(default_factory=list)
-    seam_allowance_mm: float = 10.0
+    seam_allowance_mm: float = Field(default_factory=lambda: get_config().pattern.seam_allowance_mm)
     grain: Literal["vertical", "horizontal"] = "vertical"
     notches: list[Point] = Field(default_factory=list)
     on_fold: bool = False
@@ -88,10 +90,9 @@ class Seam(BaseModel):
     b: str
     len_a_mm: float = 0.0
     len_b_mm: float = 0.0
-    # Allowed b - a, in mm. Default is "must match within 3 mm".
-    # Sleeve cap vs armhole carries ease, so it gets a positive range.
-    min_diff_mm: float = -3.0
-    max_diff_mm: float = 3.0
+    # Allowed b - a, in mm. Required: default_tee_seams() fills them from config.
+    min_diff_mm: float
+    max_diff_mm: float
 
     @property
     def diff_mm(self) -> float:

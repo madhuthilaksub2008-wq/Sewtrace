@@ -12,7 +12,7 @@ from sewtrace.types import MEASUREMENT_KEYS
 def test_photos_to_pattern_end_to_end(tmp_path):
     tee = tmp_path / "tee3"
     synth.make_tee(synth.TEES[2], tee, seed=2)
-    client = MetaClient(Settings(api_key="", api_base_url="", mock=True, reasoning_model="spark", cache_dir=tmp_path / "cache"))
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
 
     result = run(tee, tmp_path / "out", client)
 

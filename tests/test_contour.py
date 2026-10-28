@@ -36,7 +36,7 @@ def session_client(tmp_path_factory) -> MetaClient:
     if "client" not in _SESSION:
         cache = tmp_path_factory.mktemp("cache")
         _SESSION["client"] = MetaClient(
-            Settings(api_key="", api_base_url="", mock=True, reasoning_model="spark", cache_dir=cache)
+            Settings(api_key="", mock=True, cache_dir=cache)
         )
     return _SESSION["client"]
 

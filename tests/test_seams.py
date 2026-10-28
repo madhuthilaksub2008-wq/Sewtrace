@@ -4,12 +4,14 @@ import numpy as np
 import pytest
 
 from sewtrace.api.client import MetaClient
-from sewtrace.config import MAX_ADJUST_CALLS, Settings
+from sewtrace.config import Settings, get_config
 from sewtrace.mock import synth
 from sewtrace.mock.fixtures import truth_spec
 from sewtrace.reason import seams
 from sewtrace.reason.seams import adjust_loop, check_seams, edge_length, set_edge_length
 from sewtrace.types import Panel, PanelSpec
+
+MAX_ADJUST_CALLS = get_config().seam.max_adjust_calls
 
 
 @pytest.fixture(scope="session")
@@ -24,7 +26,7 @@ def tees(tmp_path_factory) -> list[Path]:
 
 @pytest.fixture
 def client(tmp_path) -> MetaClient:
-    return MetaClient(Settings(api_key="", api_base_url="", mock=True, reasoning_model="spark", cache_dir=tmp_path))
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path))
 
 
 def _replace(spec: PanelSpec, panel: Panel) -> PanelSpec:

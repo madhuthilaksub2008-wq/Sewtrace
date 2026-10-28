@@ -15,10 +15,9 @@ import shapely
 from pydantic import BaseModel
 
 from sewtrace.api.client import MetaClient
+from sewtrace.config import get_config
 from sewtrace.types import Point
 from sewtrace.vision.marker import Homography
-
-GAP_TOLERANCE_MM = 3.0
 
 
 class ProofResult(BaseModel):
@@ -28,7 +27,7 @@ class ProofResult(BaseModel):
     max_mm: float
     p95_mm: float
     frac_within_tol: float
-    tol_mm: float = GAP_TOLERANCE_MM
+    tol_mm: float
     points_mm: list[Point]
     distances_mm: list[float]
 
@@ -50,7 +49,8 @@ def edge_gaps(paper_mm: np.ndarray, body_mm: np.ndarray, step_mm: float = 2.0) -
     return shapely.get_coordinates(pts), np.asarray(dist, float)
 
 
-def gap_result(points: np.ndarray, distances: np.ndarray, tol_mm: float = GAP_TOLERANCE_MM) -> ProofResult:
+def gap_result(points: np.ndarray, distances: np.ndarray, tol_mm: float | None = None) -> ProofResult:
+    tol_mm = get_config().proof.gap_tolerance_mm if tol_mm is None else tol_mm
     return ProofResult(
         mean_mm=float(distances.mean()),
         max_mm=float(distances.max()),
@@ -66,12 +66,14 @@ def verify_proof(
     photo: str | Path,
     client: MetaClient,
     homography: Homography,
-    tol_mm: float = GAP_TOLERANCE_MM,
+    tol_mm: float | None = None,
     step_mm: float = 2.0,
 ) -> ProofResult:
     """Gap between the paper edge and the tee body edge on a proof photo."""
-    paper = mask_outline_mm(client.segment(photo, "paper"), homography)
-    body = mask_outline_mm(client.segment(photo, "body"), homography)
+    prompts = client.config.sam.prompts
+    paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
+    # Body-only prompt is temporary until the whole-garment mask (fix item 3).
+    body = mask_outline_mm(client.segment(photo, prompts.mock_body), homography)
     points, distances = edge_gaps(paper, body, step_mm)
     return gap_result(points, distances, tol_mm)
 
