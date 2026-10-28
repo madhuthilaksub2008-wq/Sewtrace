@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 from reportlab.lib.colors import Color, black
+from reportlab.lib.utils import simpleSplit
 from reportlab.pdfgen.canvas import Canvas
 
 from sewtrace.output.layout import (
@@ -178,8 +179,12 @@ def _cover(c: Canvas, spec: PanelSpec, sheet: Sheet, size: str | None) -> None:
         extra = f", {p.length_rule}" if p.length_rule else ""
         c.drawString(mm(15), H - mm(top + 7 + 5 * i),
                      f"{p.name.capitalize()}: {cut_label(p)}, {p.seam_allowance_mm:g} mm allowance{extra}")
+    y = top + 7.0
     for i, step in enumerate(spec.sewing_order):
-        c.drawString(mm(110), H - mm(top + 7 + 5 * i), f"{i + 1}. {step}")
+        # Long steps wrap inside the right column (85 mm wide).
+        for j, line in enumerate(simpleSplit(f"{i + 1}. {step}", "Helvetica", 9, mm(85))):
+            c.drawString(mm(110 if j == 0 else 114), H - mm(y), line)
+            y += 4.2
 
 
 def _alignment_mark(pg: _Page, x: float, y: float) -> None:

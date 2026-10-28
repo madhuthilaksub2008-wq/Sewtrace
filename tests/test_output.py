@@ -153,3 +153,34 @@ def test_preview_png(specs, tmp_path):
     sheet = L.layout(specs[0])
     assert img.shape[1] == pytest.approx(sheet.width, abs=2)
     assert (img < 100).any()  # some ink
+
+
+def _page_text(pdf: bytes) -> str:
+    """reportlab writes the page streams uncompressed, so strings can be searched."""
+    return pdf.decode("latin-1")
+
+
+@pytest.mark.parametrize("i", TEES)
+def test_req_out_06_one_sewing_step_per_seam(specs, tmp_path, i):
+    """REQ-OUT-06: every seam in spec.seams is its own step; neckband and hems are steps too."""
+    spec = specs[i]
+    steps = spec.sewing_order
+    assert len(steps) == len(spec.seams) + 2  # + neckband + hems
+    for seam in spec.seams:
+        words = [w for ref in (seam.a, seam.b) for part in ref.removesuffix(":mirror").split("+")
+                 for w in part.split(".")]
+        assert sum(all(w in step for w in words) for step in steps) >= 1, seam
+    assert "neckband" in steps[1] and "hem" in steps[-1]
+    shoulder = next(k for k, s in enumerate(steps) if "shoulder" in s)
+    assert shoulder < 1 and steps[-1].startswith("Turn up")
+    # In spec.json and on the PDF cover page.
+    assert spec.model_dump(mode="json")["sewing_order"] == steps
+    text = _page_text(render_pdf(spec, tmp_path / "p.pdf").read_bytes())
+    assert "Sewing order" in text and "front shoulder to back shoulder" in text
+    assert "neckband" in text
+
+
+def test_req_out_06_sewing_order_follows_seams(specs):
+    spec = specs[0]
+    fewer = spec.model_copy(update={"seams": spec.seams[:2]})
+    assert len(fewer.sewing_order) == 2 + 2

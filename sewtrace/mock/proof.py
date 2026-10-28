@@ -1,14 +1,17 @@
-"""T24 stand-in: the proof photo, a printed-and-cut paper FRONT laid on the tee.
+"""T24 stand-in: the proof photo, a paper HALF front laid on the tee (SPEC 9.4).
 
-The paper is the full (unfolded) front stitch outline from truth.json. Its error
-is controllable (scale about the panel centroid, rotation, offset), so the
-overlay check (vision/verify.py) can be tested against a known gap:
+The paper is the half front stitch outline from truth.json, cut on the stitch line, with
+its fold on the centre of the t-shirt (the right half of the tee, fold at the tee's
+x origin). The tee is whole, with sleeves. The paper error is controllable (scale about
+the half-panel centroid, rotation, offset), so the overlay check (vision/verify.py) can be
+tested against an exact gap computed on the comparable edges only: the fold edge and the
+paper points nearest the (hidden) armhole are left out.
 
-  <tee_dir>/proof.jpg                photo, marker in frame
-  <tee_dir>/proof.masks/paper.png    the paper sheet
-  <tee_dir>/proof.masks/t-shirt.png  whole tee with sleeves, as if seen through the paper
-  <tee_dir>/proof.masks/body.png     ground truth only: the tee body without sleeves
-  <tee_dir>/proof.json               paper params, outlines, expected gap
+  <tee_dir>/<name>.jpg                photo, marker in frame
+  <tee_dir>/<name>.masks/paper.png    the paper sheet
+  <tee_dir>/<name>.masks/t-shirt.png  whole tee with sleeves, as if seen through the paper
+  <tee_dir>/<name>.masks/body.png     ground truth only: the tee body without sleeves
+  <tee_dir>/<name>.json               paper params, outlines, expected gap
 
     python -m sewtrace.mock.proof data/raw/tee1 --scale 1.02
 """
@@ -22,32 +25,44 @@ from pathlib import Path
 import numpy as np
 import shapely
 
+from sewtrace.config import get_config
 from sewtrace.mock import synth
 
 PAPER_BGR = (238, 241, 243)
 
 
-def full_panel(half: np.ndarray, edges: dict[str, list[int]]) -> np.ndarray:
-    """Unfolded panel from a half: mirror without tracing the fold line twice."""
-    side = half[: edges["fold"][0] + 1]  # neck point (0, depth) round to the hem at x = 0
-    other = side[::-1][1:-1] * [-1, 1]
-    return np.vstack([side, other])
-
-
-def paper_outline(full: np.ndarray, scale: float = 1.0, rotation_deg: float = 0.0,
+def paper_outline(half: np.ndarray, scale: float = 1.0, rotation_deg: float = 0.0,
                   offset_mm: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:
-    """Full panel outline with a known cutting/placement error, about its centroid."""
-    c = np.asarray(shapely.Polygon(full).centroid.coords[0])
+    """Half panel outline with a known cutting/placement error, about its centroid."""
+    c = np.asarray(shapely.Polygon(half).centroid.coords[0])
     a = np.radians(rotation_deg)
     rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
-    return (full - c) @ rot.T * scale + c + np.asarray(offset_mm, float)
+    return (half - c) @ rot.T * scale + c + np.asarray(offset_mm, float)
 
 
-def expected_gaps(paper: np.ndarray, body: np.ndarray, step_mm: float = 2.0) -> np.ndarray:
-    """Exact distance from evenly spaced paper edge points to the body edge, mm."""
+def expected_gaps(
+    paper: np.ndarray,
+    body: np.ndarray,
+    fold: tuple[np.ndarray, np.ndarray],
+    armhole: np.ndarray,
+    centre_x_mm: float,
+    step_mm: float = 2.0,
+) -> np.ndarray:
+    """Exact distance from evenly spaced paper edge points to the body edge, mm.
+
+    Only comparable points count: not the fold edge, and not points whose nearest body
+    edge is the armhole (hidden under the sleeve on a real tee). The body edge is the
+    half on the paper's side of the tee centre line (plus the config margin).
+    """
+    cfg = get_config().proof
     ring = shapely.LinearRing(paper)
     pts = shapely.line_interpolate_point(ring, np.arange(0, ring.length, step_mm))
-    return shapely.distance(pts, shapely.LinearRing(body))
+    side = shapely.box(centre_x_mm - cfg.centre_margin_mm, -1e5, 1e5, 1e5)
+    body_edge = shapely.intersection(shapely.LinearRing(body), side)
+    d_body = np.asarray(shapely.distance(pts, body_edge), float)
+    d_armhole = np.asarray(shapely.distance(pts, shapely.LineString(armhole)), float)
+    d_fold = np.asarray(shapely.distance(pts, shapely.LineString(list(fold))), float)
+    return d_body[(d_fold >= cfg.fold_exclude_mm) & (d_armhole > d_body)]
 
 
 def make_proof(
@@ -65,21 +80,26 @@ def make_proof(
     p = synth.TeeParams(**params)
     front = truth["photos"]["front"]
     origin = np.asarray(front["origin_mm"], float)
-    full = full_panel(np.asarray(front["half_outline_mm"], float), front["edges"])
-    body = full + origin
+    half = np.asarray(front["half_outline_mm"], float)
+    edges = front["edges"]
+    body = synth.mirror_full(half) + origin
     sleeves = [synth.flatlay_sleeve(p, s) + origin for s in (1, -1)]
-    paper = paper_outline(full, scale, rotation_deg, offset_mm) + origin
+    placed = paper_outline(half, scale, rotation_deg, offset_mm)
+    paper = placed + origin
+    fold = (paper[edges["fold"][0]], paper[0])  # hem corner to neck point; the last edge wraps to 0
 
     rng = np.random.default_rng(seed)
     photo, masks, H, marker_mm = synth.render_layers(
         {"body": [body], "sleeve": sleeves}, p.colour_bgr, rng, overlays={"paper": ([paper], PAPER_BGR)}
     )
     synth._save(tee_dir, name, photo, masks)
-    gaps = expected_gaps(paper, body)
+    armhole = half[edges["armhole"][0] : edges["armhole"][1] + 1] + origin
+    gaps = expected_gaps(paper, body, fold, armhole, origin[0])
     proof = {
         "paper": {"scale": scale, "rotation_deg": rotation_deg, "offset_mm": list(offset_mm)},
         "paper_outline_mm": paper.tolist(),
         "body_outline_mm": body.tolist(),
+        "fold_mm": [f.tolist() for f in fold],
         "world_mm_to_photo_px": H.tolist(),
         "marker_corners_mm": marker_mm.tolist(),
         "expected_gap_mean_mm": float(gaps.mean()),

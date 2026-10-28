@@ -128,6 +128,10 @@ class PatternConfig(_Strict):
 
 class ProofConfig(_Strict):
     gap_tolerance_mm: float = Field(gt=0)
+    fold_straight_tol_mm: float = Field(gt=0)
+    fold_min_inset_mm: float = Field(gt=0)
+    fold_exclude_mm: float = Field(gt=0)
+    centre_margin_mm: float = Field(ge=0)
 
 
 class MarkerConfig(_Strict):

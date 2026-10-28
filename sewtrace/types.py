@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Literal
 
 import numpy as np
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from sewtrace.config import get_config
 
@@ -115,9 +115,11 @@ class PanelSpec(BaseModel):
     garment: str = "kids_round_neck_tee"
     panels: list[Panel]
     seams: list[Seam] = Field(default_factory=list)
-    sewing_order: list[str] = Field(
-        default_factory=lambda: ["shoulders", "neckband", "sleeves", "side seams", "hems"]
-    )
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def sewing_order(self) -> list[str]:
+        """One step per seam, in sewing order (REQ-OUT-06). Always follows ``seams``."""
+        return sewing_steps(self)
 
     def panel(self, name: str) -> Panel:
         return next(p for p in self.panels if p.name == name)
@@ -129,3 +131,34 @@ class PhotoSet(BaseModel):
     front: str
     back: str
     sleeve: str
+
+
+# Sewing rank of a seam by the edge it joins: shoulders first (the neckband follows),
+# then the sleeve goes in, then the long side and underarm seams.
+_SEAM_RANK = (("shoulder", 0), ("armhole", 1), ("cap", 1), ("side", 2), ("underarm", 3))
+
+
+def _ref_label(ref: str) -> str:
+    """"front.armhole+back.armhole" -> "front armhole and back armhole"."""
+    parts = [r.removesuffix(":mirror").replace(".", " ") for r in ref.split("+")]
+    return " and ".join(parts)
+
+
+def _seam_rank(seam: Seam) -> int:
+    return next((rank for key, rank in _SEAM_RANK if key in seam.a or key in seam.b), len(_SEAM_RANK))
+
+
+def sewing_steps(spec: PanelSpec) -> list[str]:
+    """Sewing sequence as text. Each seam is its own step (the side seam and the sleeve
+    underarm are not merged), then the neckband after the shoulders and the hems last."""
+    steps: list[tuple[int, str]] = []
+    for seam in spec.seams:
+        if seam.a == seam.b.removesuffix(":mirror"):
+            text = f"Sew the {_ref_label(seam.a)} seam on both sides"
+        else:
+            text = f"Sew {_ref_label(seam.a)} to {_ref_label(seam.b)}"
+        steps.append((_seam_rank(seam), text))
+    if any(p.name == "neckband" for p in spec.panels):
+        steps.append((0, "Join the neckband ends, then sew the neckband to the neckline"))
+    steps.sort(key=lambda t: t[0])  # stable: the neckband follows the shoulder seams
+    return [text for _, text in steps] + ["Turn up and sew the body hem and the sleeve hems"]
