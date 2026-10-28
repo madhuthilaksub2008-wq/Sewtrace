@@ -37,6 +37,10 @@ class PhotoMissing(FileNotFoundError):
     """A capture photo is missing or is not an image (REQ-CAP-01)."""
 
 
+class PanelInferenceFailed(ValueError):
+    """The panels cannot be inferred from the measured outlines (REQ-RSN-03)."""
+
+
 class ContourFailed(ValueError):
     """The outline of a photo could not be split into panels (REQ-GEO-01). Names the photo."""
 
@@ -88,7 +92,12 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
-    spec = infer_panels(client, photos, draft, measurements)
+    try:
+        spec = infer_panels(client, photos, draft, measurements)
+    except ValueError as err:  # e.g. a draft neck curve with no depth to scale
+        raise PanelInferenceFailed(
+            f"panel inference: {err}. Take the front and back photos again with the whole neck in view."
+        ) from err
     spec, seam_log = adjust_loop(client, spec)
     spec = refresh_derived(spec)  # the cap may have changed: notches follow it
     try:

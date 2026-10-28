@@ -29,10 +29,10 @@ def main(argv: list[str] | None = None) -> None:
                         "the folder of 'sewtrace run <that folder>'); gives the expected neck gap")
     args = ap.parse_args(argv)
     from sewtrace.api.client import ApiError
-    from sewtrace.pipeline import ContourFailed
+    from sewtrace.pipeline import ContourFailed, PanelInferenceFailed
     try:
         _dispatch(args)
-    except (ApiError, ContourFailed, NotImplementedError) as err:
+    except (ApiError, ContourFailed, PanelInferenceFailed, NotImplementedError) as err:
         # Budget stop, offline cache miss, timeout, policy stop, rejected request, unwired real
         # endpoint: no traceback.
         _fail(f"{args.cmd}: {err}")

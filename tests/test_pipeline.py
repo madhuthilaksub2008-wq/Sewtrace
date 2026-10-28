@@ -33,9 +33,10 @@ def test_photos_to_pattern_end_to_end(tmp_path):
     assert again.model_calls == 0  # every call served from cache
 
 
-def test_req_rsn_03_04_front_neck_depth_is_near_truth_not_the_back_outline_depth(tmp_path, caplog):
-    """REQ-RSN-04, SPEC 10.1: the front outline follows the back neckline, yet the exported
-    front neck depth is the inferred one (mock model reads the synthetic truth), within 3 mm."""
+def test_req_rsn_05_correct_front_depth_is_accepted_first_try_in_the_pipeline(tmp_path, caplog):
+    """REQ-RSN-04, REQ-RSN-05, SPEC 10.1: the front outline follows the back neckline, yet the exported
+    front neck depth is the inferred one. Circular on the front depth: the mock reads the synthetic
+    truth.json, so the value is copied. It proves the deep neck passes the check first try."""
     from sewtrace.reason.reshape import neck_depth_mm
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)
@@ -45,7 +46,7 @@ def test_req_rsn_03_04_front_neck_depth_is_near_truth_not_the_back_outline_depth
     # The deeper front neck must pass the measured-value check on a real (noisy) outline, first try.
     assert not [r for r in caplog.records if "infer_panels" in r.getMessage()], caplog.text
     params = json.loads((tee / "truth.json").read_text())["params"]
-    assert neck_depth_mm(result.spec.panel("front")) == pytest.approx(params["front_neck_depth"], abs=3.0)
+    assert neck_depth_mm(result.spec.panel("front")) == pytest.approx(params["front_neck_depth"], abs=0.1)
     assert neck_depth_mm(result.spec.panel("back")) == pytest.approx(params["back_neck_depth"], abs=3.0)
 
 

@@ -48,8 +48,6 @@ DOUBLE_NOTCH_GAP_MM = 6.0
 CUTS = {"front": "1 on fold", "back": "1 on fold", "sleeve": "2 on fold"}
 # Edges that must come back exactly as measured. The body fold is compared without its neck end,
 # which moves with the neck depth (the fold meets the neck curve at the inferred depth).
-# Measurements whose value comes from a fit to the neck curve (vision/measure.py _neck_point).
-NECK_CURVE_MEASUREMENTS = ("neck_width", "body_length")
 MEASURED_EDGES = {
     "front": ("shoulder", "armhole", "side", "hem"),
     "back": ("shoulder", "armhole", "side", "hem"),
@@ -133,14 +131,12 @@ def infer_panels(
     """
     history = history if history is not None else []
     images = [photos.front, photos.back, photos.sleeve]
-    fallback = fallback_spec(draft)
-    mock_basis = _mock_basis(fallback, photos.front)
     base_prompt = build_prompt(draft, measurements)
     prompt = base_prompt
     for attempt in (1, 2):
         calls = client.calls
         try:
-            answer = client.reason(prompt, images, mock=lambda: _mock_answer(mock_basis),
+            answer = client.reason(prompt, images, mock=lambda: _mock_answer(_mock_basis(draft, photos.front)),
                                    schema=PanelInference.model_json_schema())
         except (BudgetExceeded, CacheMiss, PolicyViolation, ApiRequestRejected):
             raise  # stop the run: more calls are not allowed, not possible, or the request itself is wrong
@@ -163,6 +159,11 @@ def infer_panels(
             + ". Fix these and return the four fields again."
         )
     log.warning("infer_panels: falling back to the draft with the default front neck depth")
+    fallback = fallback_spec(draft)  # after the attempts: a degenerate draft must not stop a good answer
+    problems = validate_spec(fallback, draft)
+    if problems:
+        log.warning("infer_panels: the fallback spec is not valid (%s); using the draft", "; ".join(problems[:10]))
+        return draft
     return fallback
 
 
@@ -260,10 +261,8 @@ def measured_changes(draft: PanelSpec, spec: PanelSpec) -> list[str]:
 
     Compares the visible edges, the neck width, the cap end points, the fold, and the
     measurements. The neck depth and the cap shape between its end points may change.
-    The two measurements that read the neck curve (neck width, body length) are left out of
-    the last step: their fit follows the neck curve shape, which a new neck depth changes by
-    1 mm or more on a real outline. The neck point itself is compared above, in 2D, within
-    the same tolerance.
+    The last step re-measures both specs with the exact neck vertex of each (not the fit built
+    for photo outlines), so neck width and body length are held to the same tolerance.
     """
     tol = get_config().inference.measured_tol_mm
     problems = []
@@ -294,7 +293,7 @@ def measured_changes(draft: PanelSpec, spec: PanelSpec) -> list[str]:
         return problems
     before, after = _measure(draft), _measure(spec)
     return [f"measurement {k} changed by {after[k] - before[k]:+.1f} mm (limit {tol:g})"
-            for k in before if k not in NECK_CURVE_MEASUREMENTS and abs(after[k] - before[k]) > tol]
+            for k in before if abs(after[k] - before[k]) > tol]
 
 
 def estimate_tokens(text: str) -> int:
@@ -381,21 +380,21 @@ def _fold_below(fold: np.ndarray, cut_y: float) -> np.ndarray:
 
 def _measure(spec: PanelSpec) -> dict[str, float]:
     front, back, sleeve = spec.panel("front"), spec.panel("back"), spec.panel("sleeve")
-    return measure_tee(front.outline(), front.edges, back.outline(), back.edges, sleeve.outline(), sleeve.edges)
+    return measure_tee(front.outline(), front.edges, back.outline(), back.edges, sleeve.outline(), sleeve.edges,
+                       neck_point=front.edge_points("neck")[-1])
 
 
 def _errors(exc: ValidationError) -> str:
     return "; ".join(f"{'.'.join(str(x) for x in e['loc']) or 'answer'}: {e['msg']}" for e in exc.errors()[:10])
 
 
-def _mock_basis(fallback: PanelSpec, front_photo: str) -> PanelSpec:
+def _mock_basis(draft: PanelSpec, front_photo: str) -> PanelSpec:
     """Spec the mock reads its answer from: the fallback, with the true front neck depth when the
     photo is synthetic. A real photo never gets a truth value (there is none)."""
     depth = _synthetic_front_depth(Path(front_photo))
     if depth is None:
-        return fallback
-    return _assemble([with_neck_depth(fallback.panel("front"), depth), fallback.panel("back"),
-                      fallback.panel("sleeve")])
+        return fallback_spec(draft)
+    return _assemble([with_neck_depth(draft.panel("front"), depth), draft.panel("back"), draft.panel("sleeve")])
 
 
 def _synthetic_front_depth(front_photo: Path) -> float | None:

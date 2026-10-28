@@ -102,17 +102,22 @@ def measure_tee(
     back_edges: list[Edge],
     sleeve: Outline,
     sleeve_edges: list[Edge],
+    neck_point: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Keys = sewtrace.types.MEASUREMENT_KEYS, values in mm (SPEC 10.2, REQ-GEO-04).
 
     Chest, body length, neck width and armhole depth come from the front, the shoulder
-    from the back and the sleeve length from the sleeve fold, as SPEC 10.2 says."""
+    from the back and the sleeve length from the sleeve fold, as SPEC 10.2 says.
+
+    Pass `neck_point` (x, y in mm) when the outline is a spec, whose neck point is an exact
+    vertex. The fit in `_neck_point` is built for noisy photo outlines and would read a
+    different point on a spec whose neck curve was reshaped."""
     f = front.array()
     neck = _edge(f, front_edges, "neck")
     shoulder = _edge(f, front_edges, "shoulder")
     armhole = _edge(f, front_edges, "armhole")
     side = _edge(f, front_edges, "side")
-    neck_pt = _neck_point(neck, shoulder)
+    neck_pt = _neck_point(neck, shoulder) if neck_point is None else np.asarray(neck_point, dtype=float)
     shoulder_pt = _shoulder_point(f, front_edges)
     underarm = _corner(armhole, side, reach_in=4.0, reach_out=30.0)
     hem_y = float(np.median(_interior(_edge(f, front_edges, "hem"))[:, 1]))

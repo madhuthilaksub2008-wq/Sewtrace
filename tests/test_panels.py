@@ -199,6 +199,19 @@ def test_req_rsn_05_measured_edge_moved_is_caught(tees):
         draft, _replace(draft, sleeve.model_copy(update={"outline_mm": pts}))))
 
 
+def test_req_rsn_05_neck_point_shifted_0_3mm_in_x_is_caught(tees):
+    """REQ-RSN-05: 0.3 mm on the half panel is 0.6 mm of neck width, over the 0.5 mm limit. The 2D
+    check (0.5 mm per half) passes it, so the re-measure step must catch it."""
+    draft = draft_spec(*measured(tees[0]))
+    front = draft.panel("front")
+    end = next(e for e in front.edges if e.name == "neck").end  # the neck point, shared with the shoulder
+    pts = list(front.outline_mm)
+    pts[end] = (pts[end][0] + 0.3, pts[end][1])
+    shifted = _replace(draft, front.model_copy(update={"outline_mm": pts}))
+    problems = measured_changes(draft, shifted)
+    assert any("neck_width" in p for p in problems), problems
+
+
 def test_req_rsn_03_05_side_seam_moved_2mm_is_rejected_retried_then_fallback(tees, client, monkeypatch):
     """A response whose applied spec moves the side seam 2 mm is rejected, retried once, then the draft is used."""
     tee = tees[0]
@@ -338,14 +351,17 @@ def test_req_rsn_04_photographed_draft_has_front_depth_equal_to_back_depth(tees)
     assert neck_depth_mm(draft.panel("front")) == pytest.approx(neck_depth_mm(draft.panel("back")), abs=0.1)
 
 
-def test_req_rsn_03_04_mock_front_neck_depth_is_near_truth(tees, client):
-    """SPEC 10.1: on a synthetic tee the mock model gives the true front depth (within 3 mm)."""
+def test_req_rsn_05_correct_front_depth_is_accepted_first_try(tees, client):
+    """REQ-RSN-05, SPEC 10.1: a correct deep front neck passes the measured-value check on the first
+    attempt. Circular on the depth value: the mock reads the synthetic truth.json, so the depth
+    is only copied. What it proves is that the check accepts a deep neck on a noisy outline."""
     for tee in tees:
         draft = draft_spec(*measured_as_photographed(tee))
         history: list[dict] = []
         spec = infer_panels(client, photo_set(tee), draft, meas(tee), history=history)
         assert history[-1]["result"] == "accepted"
-        assert neck_depth_mm(spec.panel("front")) == pytest.approx(_params(tee)["front_neck_depth"], abs=3.0)
+        assert len(history) == 1
+        assert neck_depth_mm(spec.panel("front")) == pytest.approx(_params(tee)["front_neck_depth"], abs=0.1)
         assert neck_depth_mm(spec.panel("back")) == pytest.approx(_params(tee)["back_neck_depth"], abs=1.0)
 
 
@@ -428,3 +444,33 @@ def test_req_rsn_03_request_rejected_propagates_from_the_loop(tees, client):
     with pytest.raises(ApiRequestRejected):
         infer_panels(flaky, photo_set(tees[0]), draft, meas(tees[0]))
     assert flaky.reason_calls == 1
+
+
+def test_req_rsn_03_fallback_is_computed_after_the_attempts_and_validated(tees, client, monkeypatch):
+    """REQ-RSN-03: a degenerate draft neck does not stop a good answer, and an invalid
+    fallback gives the draft with a warning."""
+    tee = tees[0]
+    draft = draft_spec(*measured(tee))
+    monkeypatch.setattr(panels, "fallback_spec", lambda d: pytest.fail("fallback computed too early"))
+    spec = infer_panels(client, photo_set(tee), draft, meas(tee))  # accepted on attempt 1
+    assert spec.panel("front") is not None
+    monkeypatch.undo()
+
+    from sewtrace.api.client import ApiError
+    dead = _FailingClient(client, ApiError("a"), ApiError("b"))
+    monkeypatch.setattr(panels, "validate_spec", lambda s, d: ["front: outline self-intersects"])
+    assert infer_panels(dead, photo_set(tee), draft, meas(tee)) == draft
+
+
+def test_req_rsn_03_degenerate_draft_neck_is_a_clean_cli_error(tmp_path, monkeypatch, capsys):
+    """REQ-RSN-03: a ValueError from the fallback is reported by the CLI with the step name."""
+    from sewtrace import cli
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setattr(panels, "fallback_spec", lambda d: (_ for _ in ()).throw(ValueError("front: neck curve has no depth to scale")))
+    monkeypatch.setattr(panels, "apply_answer", lambda a, d: (None, ["forced"]))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", str(tee), "--out", str(tmp_path / "out")])
+    assert exc.value.code == 1
+    assert "panel inference" in capsys.readouterr().err
