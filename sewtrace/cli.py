@@ -25,7 +25,16 @@ def main(argv: list[str] | None = None) -> None:
     v.add_argument("photo")
     v.add_argument("--out", default=None, help="overlay image (default: <photo>.overlay.png)")
     args = ap.parse_args(argv)
+    from sewtrace.api.client import ApiError
+    from sewtrace.pipeline import ContourFailed
+    try:
+        _dispatch(args)
+    except (ApiError, ContourFailed, NotImplementedError) as err:
+        # Budget stop, offline cache miss, timeout, policy stop, unwired real endpoint: no traceback.
+        _fail(f"{args.cmd}: {err}")
 
+
+def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "synth":
         from sewtrace.mock import synth
         synth.main(["--out", args.out])
@@ -47,12 +56,15 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "verify":
         _verify(args.photo, args.out)
     elif args.cmd == "eval":
-        from sewtrace.eval import evaluate
+        from sewtrace.eval import evaluate, tee_failed
         try:
-            evaluate(args.raw_dir, args.out, args.runs)
+            rows = evaluate(args.raw_dir, args.out, args.runs)
         except (FileNotFoundError, ValueError) as err:
             _fail(err)
         print((Path(args.out) / "results.md").read_text())
+        failed = sum(tee_failed(r) for r in rows)
+        if failed:  # exit non-zero so a failing tee cannot pass unnoticed
+            _fail(f"eval: {failed} of {len(rows)} runs failed. See the error column above.")
 
 
 def _fail(message: object) -> NoReturn:

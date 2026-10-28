@@ -4,10 +4,13 @@
 
 [api]
 base_url = "https://api.meta.ai/v1"
-timeout_s = 120.0          # one request; reasoning calls are slow (REQ-API-07)
+timeout_s = 600.0          # one request (REQ-API-07). A non-streaming call can emit up to max_tokens=32000
+                           # reasoning tokens. Set this from the Day 1 measured latency (REQ-API-09).
 max_tries = 3              # tries per call on HTTP 429 or 5xx (REQ-API-06)
 backoff_s = 2.0            # wait before try n+1 is backoff_s * 2 ** (n - 1)
 budget_limit_usd = 140.0   # SPEC 8.3 "any day": stop all paid calls (REQ-API-04, C-01)
+ledger_path = "data/ledger.csv"  # relative to the repo root; outside cache/ so clearing the cache or
+                           # changing SEWTRACE_CACHE_DIR cannot reset the total (REQ-API-04, C-01)
 offline = false            # true, or SEWTRACE_OFFLINE=1: cache only, no mock, no network
 
 [models.sam]
@@ -96,6 +99,8 @@ centre_margin_mm = 10.0    # body edge this far past the fold line still counts 
 
 [marker]
 tolerance_mm = 1.0          # REQ-SCL-03: reject a photo whose marker error is more than this
+min_grid_found = 0.9       # REQ-SCL-03: reject a photo if fewer of the marker grid edge points are found
+error_percentile = 95      # marker error is this percentile of the grid residuals
 
 [ground_truth]
 repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third

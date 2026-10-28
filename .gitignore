@@ -9,3 +9,5 @@ data/synth/
 data/runs/
 out/
 .claude/worktrees/
+# Paid-call ledger: keeps the spend total. Back it up; do not delete it (REQ-API-04).
+data/ledger.csv

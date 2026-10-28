@@ -185,3 +185,35 @@ def test_req_cap_02_missing_or_partial_marker_names_the_photo(tees):
     image[y0 : (y0 + y1) // 2, x0:x1] = 245  # cover the top half of the marker
     with pytest.raises(MarkerNotFound, match=r"front photo f\.jpg"):
         photo_homography(image, "front photo f.jpg")
+
+
+def _fake_grid(monkeypatch, found: float):
+    """Grid points whose residuals are 0.00 to 1.00 mm, for a photo where px = mm."""
+    pts = np.c_[np.linspace(0, 1, 101), np.zeros(101)]
+    monkeypatch.setattr(marker, "_grid_edge_points",
+                        lambda *a, **k: (pts, np.zeros(101, int), np.zeros(101), found))
+    return np.float64([[0, 0], [100, 0], [100, 100], [0, 100]])
+
+
+def _marker_cfg(**update):
+    cfg = get_config()
+    return cfg.model_copy(update={"marker": cfg.marker.model_copy(update=update)})
+
+
+def test_req_api_05_marker_percentile_comes_from_config(monkeypatch):
+    """REQ-API-05, REQ-SCL-03: the percentile of the marker error is marker.error_percentile."""
+    corners = _fake_grid(monkeypatch, found=1.0)
+    gray = np.zeros((10, 10), np.uint8)
+    assert marker.marker_error_mm(gray, corners) == pytest.approx(0.95, abs=1e-6)
+    monkeypatch.setattr(marker, "get_config", lambda: _marker_cfg(error_percentile=50))
+    assert marker.marker_error_mm(gray, corners) == pytest.approx(0.5, abs=1e-6)
+
+
+def test_req_api_05_min_grid_found_comes_from_config(monkeypatch):
+    """REQ-API-05, REQ-SCL-03: the share of marker edges that must be found is marker.min_grid_found."""
+    corners = _fake_grid(monkeypatch, found=0.85)
+    gray = np.zeros((10, 10), np.uint8)
+    with pytest.raises(ValueError, match="85%"):
+        marker.marker_error_mm(gray, corners)
+    monkeypatch.setattr(marker, "get_config", lambda: _marker_cfg(min_grid_found=0.8))
+    marker.marker_error_mm(gray, corners)

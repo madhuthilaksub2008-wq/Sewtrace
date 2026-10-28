@@ -11,15 +11,21 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError, model_validator
 
-from sewtrace.api.client import MetaClient
+from sewtrace.api.client import MetaClient, SegmentationFailed
 from sewtrace.config import get_config
-from sewtrace.pipeline import run
+from sewtrace.pipeline import ContourFailed, PhotoMissing, run
+from sewtrace.reason.seams import SeamCheckFailed, seam_name
+from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
 from sewtrace.types import MEASUREMENT_KEYS
+
+
+log = logging.getLogger(__name__)
 
 
 class GroundTruthMissing(FileNotFoundError):
@@ -80,6 +86,35 @@ def ground_truth(garment_dir: Path, truth_dir: Path) -> dict[str, float]:
         raise ValueError(f"{tape}: {err}") from err
 
 
+# One bad tee must not stop the eval. BudgetExceeded and CacheMiss are not here: they abort.
+TEE_ERRORS = (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, ContourFailed)
+ROW_COLUMNS = ["garment", "run", *[f"err_{k}" for k in MEASUREMENT_KEYS], "mean_abs_err",
+               "seams_ok", "model_calls", "error"]
+
+
+def _error_text(err: Exception) -> str:
+    if isinstance(err, SeamCheckFailed):
+        return f"SeamCheckFailed: {', '.join(seam_name(s) for s in err.failed)}"
+    return f"{type(err).__name__}: {' '.join(str(err).split())}".replace("|", "/")
+
+
+def _row(garment: str, run_no: int, truth: dict[str, float], measurements: dict[str, float] | None,
+         seams_ok: bool, model_calls: int, error: str = "") -> dict:
+    row: dict = {"garment": garment, "run": run_no}
+    if measurements is None:
+        row.update({f"err_{k}": "" for k in MEASUREMENT_KEYS}, mean_abs_err="")
+    else:
+        errors = {k: measurements[k] - truth[k] for k in MEASUREMENT_KEYS}
+        row.update({f"err_{k}": round(v, 2) for k, v in errors.items()},
+                   mean_abs_err=round(sum(abs(v) for v in errors.values()) / len(errors), 2))
+    row.update(seams_ok=seams_ok, model_calls=model_calls, error=error)
+    return row
+
+
+def tee_failed(row: dict) -> bool:
+    return bool(row["error"]) or not row["seams_ok"]
+
+
 def evaluate(raw_dir: str | Path, out_dir: str | Path, runs: int = 1) -> list[dict]:
     raw_dir, out_dir = Path(raw_dir), Path(out_dir)
     client = MetaClient()
@@ -92,19 +127,20 @@ def evaluate(raw_dir: str | Path, out_dir: str | Path, runs: int = 1) -> list[di
     for garment in garments:
         truth = truths[garment.name]
         for i in range(runs):
-            result = run(garment, out_dir / garment.name / f"run{i + 1}", client)
-            errors = {k: result.measurements[k] - truth[k] for k in MEASUREMENT_KEYS}
-            rows.append({
-                "garment": garment.name,
-                "run": i + 1,
-                **{f"err_{k}": round(v, 2) for k, v in errors.items()},
-                "mean_abs_err": round(sum(abs(v) for v in errors.values()) / len(errors), 2),
-                "seams_ok": all(s.ok for s in result.spec.seams),
-                "model_calls": result.model_calls,
-            })
+            calls_before = client.calls
+            try:
+                result = run(garment, out_dir / garment.name / f"run{i + 1}", client)
+            except TEE_ERRORS as err:
+                log.error("eval: %s run %d failed: %s", garment.name, i + 1, err)
+                measured = err.measurements if isinstance(err, SeamCheckFailed) else None
+                rows.append(_row(garment.name, i + 1, truth, measured, False,
+                                 client.calls - calls_before, _error_text(err)))
+                continue
+            rows.append(_row(garment.name, i + 1, truth, result.measurements,
+                             all(s.ok for s in result.spec.seams), result.model_calls))
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "results.csv").open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w = csv.DictWriter(f, fieldnames=ROW_COLUMNS)
         w.writeheader()
         w.writerows(rows)
     (out_dir / "results.md").write_text(to_markdown(rows))
@@ -112,9 +148,12 @@ def evaluate(raw_dir: str | Path, out_dir: str | Path, runs: int = 1) -> list[di
 
 
 def to_markdown(rows: list[dict]) -> str:
-    cols = list(rows[0])
+    cols = ROW_COLUMNS
     lines = ["| " + " | ".join(cols) + " |", "|" + " --- |" * len(cols)]
     lines += ["| " + " | ".join(str(r[c]) for c in cols) + " |" for r in rows]
-    overall = sum(r["mean_abs_err"] for r in rows) / len(rows)
-    lines += ["", f"Mean absolute error over all runs: {overall:.2f} mm"]
+    measured = [r["mean_abs_err"] for r in rows if r["mean_abs_err"] != ""]
+    failed = sum(tee_failed(r) for r in rows)
+    overall = f"{sum(measured) / len(measured):.2f} mm" if measured else "n/a"
+    lines += ["", f"Mean absolute error over all runs: {overall}",
+              f"Failed runs: {failed} of {len(rows)}"]
     return "\n".join(lines) + "\n"

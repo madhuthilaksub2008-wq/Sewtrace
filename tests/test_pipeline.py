@@ -137,3 +137,47 @@ def test_req_cap_01_cli_missing_photo_prints_error_and_exits_nonzero(tmp_path, c
         cli.main(["run", str(tee), "--out", str(tmp_path / "out")])
     assert exit_.value.code == 1
     assert "front photo" in capsys.readouterr().err
+
+
+def test_req_geo_01_contour_failure_names_the_photo(tmp_path, monkeypatch):
+    """REQ-GEO-01: a joint-finder ValueError becomes ContourFailed with the view and path."""
+    from sewtrace.vision import contour
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+
+    def no_joints(outline):
+        raise ValueError("found no underarm corners")
+
+    monkeypatch.setattr(contour, "remove_sleeves", no_joints)
+    with pytest.raises(pipeline.ContourFailed, match=r"front photo .*front\.jpg: found no underarm corners"):
+        run(tee, tmp_path / "out", _client(tmp_path))
+
+
+@pytest.mark.parametrize("error, text", [
+    ("BudgetExceeded", "over the limit"),
+    ("CacheMiss", "offline mode: no cached answer for step X; run once online"),
+    ("ApiTimeout", "took more"),
+    ("NotImplementedError", "not wired"),
+    ("ContourFailed", "front photo f.jpg"),
+])
+def test_req_api_08_cli_prints_clean_error_not_traceback(tmp_path, monkeypatch, capsys, error, text):
+    """REQ-API-08: API, budget, offline and contour errors give `error: run: ...` and exit 1."""
+    from sewtrace.api import client as api
+    errors = {"BudgetExceeded": api.BudgetExceeded, "CacheMiss": api.CacheMiss, "ApiTimeout": api.ApiTimeout,
+              "NotImplementedError": NotImplementedError, "ContourFailed": pipeline.ContourFailed}
+
+    def boom(d, o):
+        raise errors[error](text)
+
+    monkeypatch.setattr(pipeline, "run", boom)
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["run", str(tmp_path), "--out", str(tmp_path / "o")])
+    assert exit_.value.code == 1
+    assert capsys.readouterr().err.startswith(f"error: run: {text}")
+
+
+def test_req_api_08_cache_miss_message_form(tmp_path):
+    from sewtrace.api.client import CacheMiss
+    client = MetaClient(Settings(api_key="", mock=False, cache_dir=tmp_path, offline=True))
+    with pytest.raises(CacheMiss, match=r"^offline mode: no cached answer for reasoning call .*; run once online"):
+        client.reason("p")

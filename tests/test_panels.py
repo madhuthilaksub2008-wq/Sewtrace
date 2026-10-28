@@ -271,3 +271,48 @@ def test_validate_catches_moved_sleeve_and_bad_edges(tees):
     assert any("index out of range" in p for p in problems)
     scaled = sleeve.model_copy(update={"outline_mm": [(x * 1.3, y) for x, y in sleeve.outline_mm]})
     assert any("moved" in p for p in validate_spec(_replace(draft, scaled), draft))
+
+
+class _FailingClient:
+    """Stand-in client whose reason() raises the queued errors, then answers like the mock."""
+
+    def __init__(self, client, *errors):
+        self.client, self.errors, self.reason_calls = client, list(errors), 0
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def reason(self, *a, **k):
+        self.reason_calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return self.client.reason(*a, **k)
+
+
+def test_req_rsn_06_failed_model_call_is_a_rejected_attempt_then_retry(tees, client):
+    """REQ-RSN-03, REQ-RSN-06: a truncated answer (ApiError) is retried, then the draft is the fallback."""
+    from sewtrace.api.client import ApiError
+    tee = tees[0]
+    draft = draft_spec(*measured(tee))
+    flaky = _FailingClient(client, ApiError("cut off at max_tokens"))
+    history: list = []
+    spec = infer_panels(flaky, photo_set(tee), draft, meas(tee), history=history)
+    assert flaky.reason_calls == 2 and history[0]["result"] == "retry" and history[1]["result"] == "accepted"
+    assert "cut off" in history[0]["problems"][0] and spec != draft
+
+    dead = _FailingClient(client, ApiError("cut off"), ApiError("not JSON"))
+    history = []
+    assert infer_panels(dead, photo_set(tee), draft, meas(tee), history=history) is draft
+    assert [h["result"] for h in history] == ["retry", "fallback"]
+
+
+def test_req_rsn_03_budget_cache_and_policy_errors_propagate(tees, client):
+    """REQ-API-04, REQ-API-08: stop errors are not rejected attempts."""
+    from sewtrace.api.client import BudgetExceeded, CacheMiss, PolicyViolation
+    tee = tees[0]
+    draft = draft_spec(*measured(tee))
+    for err in (BudgetExceeded("over"), CacheMiss("miss"), PolicyViolation("real photo")):
+        flaky = _FailingClient(client, err)
+        with pytest.raises(type(err)):
+            infer_panels(flaky, photo_set(tee), draft, meas(tee))
+        assert flaky.reason_calls == 1

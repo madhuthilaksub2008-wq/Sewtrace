@@ -24,7 +24,7 @@ import shapely
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shapely.geometry import LineString, Polygon
 
-from sewtrace.api.client import MetaClient
+from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation
 from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
 from sewtrace.reason.reshape import (
@@ -126,9 +126,16 @@ def infer_panels(
     prompt = base_prompt
     for attempt in (1, 2):
         calls = client.calls
-        answer = client.reason(prompt, images, mock=lambda: _mock_answer(draft),
-                               schema=PanelInference.model_json_schema())
-        spec, problems = apply_answer(answer, draft)
+        try:
+            answer = client.reason(prompt, images, mock=lambda: _mock_answer(draft),
+                                   schema=PanelInference.model_json_schema())
+        except (BudgetExceeded, CacheMiss, PolicyViolation):
+            raise  # stop the run: more calls are not allowed or not possible
+        except ApiError as exc:  # truncated at max_tokens, not JSON, timeout, HTTP failure (REQ-RSN-06)
+            log.warning("infer_panels attempt %d: the model call failed: %s", attempt, exc)
+            answer, spec, problems = None, None, [f"the model call failed: {exc}"]
+        else:
+            spec, problems = apply_answer(answer, draft)
         record = {"attempt": attempt, "new_call": client.calls > calls, "problems": problems,
                   "answer": answer}
         history.append(record)

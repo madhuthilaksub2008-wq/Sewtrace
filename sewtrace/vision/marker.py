@@ -21,10 +21,6 @@ import numpy as np
 from sewtrace.config import MARKER_DICT, MARKER_ID, MARKER_SIZE_MM, get_config
 
 
-# marker_error_mm needs at least this fraction of the grid edge points to be found.
-MIN_GRID_FOUND = 0.9
-
-
 @dataclass
 class Homography:
     H: np.ndarray  # 3x3, photo px -> mm
@@ -203,17 +199,18 @@ def refine_grid(
 def marker_error_mm(
     gray: np.ndarray, corners: np.ndarray, marker_id: int = MARKER_ID, marker_size_mm: float = MARKER_SIZE_MM
 ) -> float:
-    """Marker error in mm after refinement (REQ-SCL-03): the 95th percentile of the distance
+    """Marker error in mm after refinement (REQ-SCL-03): the marker.error_percentile of the distance
     between the marker's cell edges, mapped to mm by the corner homography, and their ideal
     grid lines. The corners fix the outer square, so the inner grid is an independent check
     that the photo is flat and square on to the marker. The four sides are 100 mm by construction."""
     pts, axis, value, found = _grid_edge_points(gray, corners, marker_id, marker_size_mm)
-    if found < MIN_GRID_FOUND:
+    cfg = get_config().marker
+    if found < cfg.min_grid_found:
         # Points far from their grid line are not found at all: do not let them hide a bad marker.
         raise ValueError(f"only {100 * found:.0f}% of the marker edges are where the corners put them")
     mm = homography_from_marker(corners, marker_size_mm).px_to_mm(pts)
     resid = np.abs(mm[np.arange(len(mm)), axis] - value)
-    return float(np.percentile(resid, 95))
+    return float(np.percentile(resid, cfg.error_percentile))
 
 
 def _edge_points(img: np.ndarray, p: np.ndarray, toward_light: np.ndarray, w: float = 3.0) -> np.ndarray:

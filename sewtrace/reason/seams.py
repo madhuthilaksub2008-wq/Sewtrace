@@ -22,7 +22,7 @@ from functools import partial
 import numpy as np
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from sewtrace.api.client import MetaClient
+from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation
 from sewtrace.config import get_config
 from sewtrace.reason.reshape import SleeveCap, cap_width_mm, fit_cap, scale_cap_to_length, with_sleeve_cap
 from sewtrace.types import Panel, PanelSpec, Seam
@@ -50,6 +50,7 @@ class SeamCheckFailed(Exception):
     def __init__(self, failed: list[Seam], seam_log: list[dict] | None = None) -> None:
         self.failed = failed
         self.seam_log = seam_log or []
+        self.measurements: dict[str, float] | None = None  # set by pipeline.run for eval
         rows = "; ".join(
             f"{seam_name(s)}: {s.len_a_mm:.1f} mm vs {s.len_b_mm:.1f} mm, difference {s.diff_mm:+.1f} mm "
             f"(allowed {s.min_diff_mm:+.1f} to {s.max_diff_mm:+.1f} mm)"
@@ -99,6 +100,8 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             "applied": applied,
             "diffs": {seam_name(s): round(s.diff_mm, 2) for s in seams},
             "failing": [seam_name(s) for s in failing],
+            # Same edge on both sides: the diff is 0 by construction and proves nothing.
+            "equal_by_construction": [seam_name(s) for s in seams if s.a == s.b.removesuffix(":mirror")],
         })
         if not failing or source == "fallback":
             break
@@ -109,9 +112,16 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             break
         if calls < max_calls:
             prompt = build_adjust_prompt(spec, fixable)
-            answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA)
-            calls += 1
-            spec, applied = apply_adjustment(spec, answer)
+            calls += 1  # a failed call still counts toward the limit of REQ-SEW-02
+            try:
+                answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA)
+            except (BudgetExceeded, CacheMiss, PolicyViolation):
+                raise
+            except ApiError as exc:  # no usable answer: same as an answer that is skipped
+                log.warning("adjust_loop: model call %d failed, answer skipped: %s", calls, exc)
+                applied = []
+            else:
+                spec, applied = apply_adjustment(spec, answer)
             source = "model"
         else:
             spec, applied = fallback_fix(spec)

@@ -13,7 +13,7 @@ from sewtrace.api.client import MetaClient
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
-from sewtrace.reason.seams import adjust_loop, require_seams_ok
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok
 from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
@@ -37,6 +37,10 @@ class PhotoMissing(FileNotFoundError):
     """A capture photo is missing or is not an image (REQ-CAP-01)."""
 
 
+class ContourFailed(ValueError):
+    """The outline of a photo could not be split into panels (REQ-GEO-01). Names the photo."""
+
+
 def load_photo(view: str, path: str | Path) -> np.ndarray:
     """Read one capture photo; the error names the view and the path."""
     image = cv2.imread(str(path)) if Path(path).is_file() else None
@@ -54,12 +58,19 @@ def photo_scale(view: str, path: str | Path) -> Homography:
 
 def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
     """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt."""
-    outline = contour.smooth_outline(contour.mask_to_outline(client.segment(photo, prompt), h))
-    if sleeve:
-        half = contour.sleeve_half(outline)
-        return half, contour.label_sleeve_edges(half)
-    half = contour.body_half(contour.remove_sleeves(outline))
-    return half, contour.label_body_edges(half)
+    mask = client.segment(photo, prompt)
+    view = Path(photo).stem
+    try:
+        outline = contour.smooth_outline(contour.mask_to_outline(mask, h))
+        if sleeve:
+            half = contour.sleeve_half(outline)
+            return half, contour.label_sleeve_edges(half)
+        half = contour.body_half(contour.remove_sleeves(outline))
+        return half, contour.label_body_edges(half)
+    except ValueError as err:
+        raise ContourFailed(
+            f"{view} photo {photo}: {err}. Take the photo again with the whole t-shirt flat and in view."
+        ) from err
 
 
 def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None) -> RunResult:
@@ -80,7 +91,11 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     spec = infer_panels(client, photos, draft, measurements)
     spec, seam_log = adjust_loop(client, spec)
     spec = refresh_derived(spec)  # the cap may have changed: notches follow it
-    require_seams_ok(spec, seam_log)  # REQ-SEW-04: before any file is written
+    try:
+        require_seams_ok(spec, seam_log)  # REQ-SEW-04: before any file is written
+    except SeamCheckFailed as err:
+        err.measurements = measurements  # lets eval report what was measured
+        raise
 
     out_dir.mkdir(parents=True, exist_ok=True)
     files = {

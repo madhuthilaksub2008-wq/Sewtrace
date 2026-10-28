@@ -34,6 +34,7 @@ class ApiConfig(_Strict):
     max_tries: int = Field(ge=1)
     backoff_s: float = Field(ge=0)
     budget_limit_usd: float = Field(gt=0)
+    ledger_path: Path
     offline: bool = False
 
 
@@ -136,6 +137,8 @@ class ProofConfig(_Strict):
 
 class MarkerConfig(_Strict):
     tolerance_mm: float = Field(gt=0)
+    min_grid_found: float = Field(gt=0, le=1)
+    error_percentile: float = Field(gt=0, le=100)
 
 
 class GroundTruthConfig(_Strict):
@@ -172,6 +175,12 @@ def get_config() -> AppConfig:
     return load_config()
 
 
+def resolve_ledger_path(config: AppConfig) -> Path:
+    """The ledger lives under the repo root, never under SEWTRACE_CACHE_DIR (REQ-API-04).
+    No env override: an override is one more way to start a second ledger at $0."""
+    return ROOT / config.api.ledger_path
+
+
 def _load_dotenv(path: Path) -> None:
     if not path.exists():
         return
@@ -189,6 +198,7 @@ class Settings:
     mock: bool
     cache_dir: Path
     offline: bool = False
+    ledger_path: Path | None = None  # None: api.ledger_path in config, under the repo root
     config: AppConfig = field(default_factory=get_config)
 
     @classmethod
@@ -210,5 +220,6 @@ class Settings:
             mock=mock,
             cache_dir=Path(os.environ.get("SEWTRACE_CACHE_DIR", ROOT / "cache")),
             offline=offline,
+            ledger_path=resolve_ledger_path(config),
             config=config,
         )

@@ -70,3 +70,55 @@ def test_req_geo_04_eval_stops_before_any_run_when_truth_is_missing(tmp_path, mo
     monkeypatch.setattr(ev, "run", lambda *a, **k: pytest.fail("pipeline ran"))
     with pytest.raises(GroundTruthMissing, match="tee1"):
         evaluate(raw, tmp_path / "out")
+
+
+def test_req_sew_04_eval_records_failed_tee_and_continues(tmp_path, monkeypatch):
+    """REQ-SEW-04: one tee that fails its seam check gets a failed row; the others still run."""
+    from sewtrace import eval as eval_mod
+    from sewtrace.pipeline import ContourFailed
+    from sewtrace.reason.seams import SeamCheckFailed
+    from sewtrace.api.client import MetaClient
+    from sewtrace.config import Settings
+    raw = tmp_path / "synth"
+    for i in range(3):
+        synth.make_tee(synth.TEES[i], raw / synth.TEES[i].name, seed=i)
+    real_run = eval_mod.run
+    bad = {"tee2": None, "tee3": ContourFailed("front photo x.jpg: found no underarm corners")}
+
+    def flaky(garment, out, client):
+        err = bad.get(garment.name)
+        if garment.name == "tee2":
+            result = real_run(garment, out, client)
+            seam = result.spec.seams[0]
+            failure = SeamCheckFailed([seam])
+            failure.measurements = result.measurements
+            raise failure
+        if err:
+            raise err
+        return real_run(garment, out, client)
+
+    monkeypatch.setattr(eval_mod, "run", flaky)
+    monkeypatch.setattr(eval_mod, "MetaClient",
+                        lambda: MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache")))
+    rows = evaluate(raw, tmp_path / "out")
+    assert [r["garment"] for r in rows] == ["tee1", "tee2", "tee3"]
+    assert [eval_mod.tee_failed(r) for r in rows] == [False, True, True]
+    assert rows[1]["error"].startswith("SeamCheckFailed:") and rows[1]["mean_abs_err"] != ""
+    assert rows[2]["error"].startswith("ContourFailed:") and rows[2]["mean_abs_err"] == ""
+    md = (tmp_path / "out" / "results.md").read_text()
+    assert "Failed runs: 2 of 3" in md
+    assert (tmp_path / "out" / "results.csv").exists()
+
+
+def test_req_api_04_eval_aborts_on_budget_and_cache_miss(tmp_path, monkeypatch):
+    """REQ-API-04, REQ-API-08: stop errors are never turned into a failed row."""
+    from sewtrace import eval as eval_mod
+    from sewtrace.api.client import BudgetExceeded, CacheMiss
+    raw = tmp_path / "synth"
+    synth.make_tee(synth.TEES[0], raw / "tee1", seed=0)
+    for err in (BudgetExceeded("over"), CacheMiss("miss")):
+        def boom(*a, _e=err, **k):
+            raise _e
+        monkeypatch.setattr(eval_mod, "run", boom)
+        with pytest.raises(type(err)):
+            evaluate(raw, tmp_path / "out")

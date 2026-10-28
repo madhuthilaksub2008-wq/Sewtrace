@@ -249,3 +249,39 @@ def test_req_sew_04_require_seams_ok_names_pair_and_diff(tees):
     text = str(err.value)
     assert "front.shoulder~back.shoulder" in text and "mm" in text
     assert "front.shoulder~back.shoulder" in [seams.seam_name(s) for s in err.value.failed]
+
+
+class _FailingClient:
+    def __init__(self, client, error):
+        self.client, self.error, self.reason_calls = client, error, 0
+
+    def __getattr__(self, name):
+        return getattr(self.client, name)
+
+    def reason(self, *a, **k):
+        self.reason_calls += 1
+        raise self.error
+
+
+def test_req_sew_03_failed_model_call_is_a_skipped_answer_then_code_fix(tees, client):
+    """REQ-SEW-02/03, REQ-RSN-06: ApiError counts as a used call; after 3 the code fix runs."""
+    from sewtrace.api.client import ApiError
+    spec = _longer_front_armhole(truth_spec(tees[0]))
+    flaky = _FailingClient(client, ApiError("cut off at max_tokens"))
+    out, log = adjust_loop(flaky, spec)
+    assert flaky.reason_calls == MAX_ADJUST_CALLS
+    assert log[-1]["source"] == "fallback" and all(s.ok for s in check_seams(out))
+
+
+def test_req_sew_03_budget_cache_policy_errors_propagate(tees, client):
+    from sewtrace.api.client import BudgetExceeded, CacheMiss, PolicyViolation
+    spec = _longer_front_armhole(truth_spec(tees[0]))
+    for err in (BudgetExceeded("over"), CacheMiss("miss"), PolicyViolation("no")):
+        with pytest.raises(type(err)):
+            adjust_loop(_FailingClient(client, err), spec)
+
+
+def test_seam_log_marks_underarm_pair_equal_by_construction(tees, client):
+    """The sleeve underarm is compared with its own mirror image: always 0, so the log says so."""
+    _, log = adjust_loop(client, truth_spec(tees[0]))
+    assert log[0]["equal_by_construction"] == ["sleeve.underarm~sleeve.underarm:mirror"]

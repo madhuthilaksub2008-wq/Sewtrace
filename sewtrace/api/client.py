@@ -7,6 +7,11 @@ never served as a real one. Every paid call goes through ``_paid``: budget
 check, retry on HTTP 429 and 5xx, timeout, then one ledger row (REQ-API-03,
 04, 06, 07). Model IDs, prices and limits come from config.toml (REQ-API-05).
 
+The ledger is data/ledger.csv (``api.ledger_path``), outside the cache folder, so
+clearing the cache or changing SEWTRACE_CACHE_DIR cannot reset the total. Real
+answers are cached as ``real-<key>.*``. A paid call is refused when the ledger
+file is missing while the cache holds such a file (REQ-API-04, C-01).
+
 Mock mode (no API key, or SEWTRACE_MOCK=1):
   * segment() returns the ground-truth region mask written next to a synthetic
     photo (``<photo>.masks/<prompt>.png``), lightly jittered to look like a
@@ -36,9 +41,9 @@ import cv2
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from sewtrace.config import ModelConfig, Settings
+from sewtrace.config import ModelConfig, Settings, resolve_ledger_path
 
-LEDGER_COLUMNS = ["time", "model", "input_tokens", "cached_tokens", "output_tokens", "images", "cost_usd"]
+LEDGER_COLUMNS = ["time", "model", "input_tokens", "cached_tokens", "output_tokens", "images", "cost_usd", "estimated"]
 CHARS_PER_TOKEN = 4  # rough token count for the pre-call estimate only
 
 # (url, headers, json body, timeout_s) -> parsed JSON response. Raises HttpError
@@ -54,8 +59,16 @@ class ApiTimeout(ApiError):
     """The call did not finish within ``api.timeout_s``."""
 
 
+class ApiTransportError(ApiError):
+    """The connection broke after the request may have been sent, so the call may be billed."""
+
+
 class BudgetExceeded(ApiError):
     """The next paid call would take the ledger over ``api.budget_limit_usd``."""
+
+
+class PolicyViolation(ApiError):
+    """The call would break a data rule (real photo to the contributor endpoint). Never retried."""
 
 
 class CacheMiss(ApiError):
@@ -110,7 +123,11 @@ def urllib_transport(url: str, headers: dict[str, str], body: dict[str, Any], ti
     except urllib.error.URLError as e:
         if isinstance(e.reason, socket.timeout):
             raise TimeoutError(str(e)) from e
-        raise ApiError(f"network error: {e.reason}") from e
+        if isinstance(e.reason, ConnectionError) and not isinstance(e.reason, ConnectionRefusedError):
+            raise ApiTransportError(f"connection lost: {e.reason}") from e
+        raise ApiError(f"network error: {e.reason}") from e  # DNS or refused: never sent
+    except ConnectionError as e:  # reset while reading the answer: the server got the request
+        raise ApiTransportError(f"connection lost: {e}") from e
 
 
 class MetaClient:
@@ -124,7 +141,7 @@ class MetaClient:
         self.config = self.settings.config
         self.cache_dir = self.settings.cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.ledger_path = self.cache_dir / "ledger.csv"
+        self.ledger_path = self.settings.ledger_path or resolve_ledger_path(self.config)
         self.calls = 0  # real or mocked calls that missed the cache
         self._transport = transport
         self._sleep = sleep
@@ -141,7 +158,7 @@ class MetaClient:
         image_path = Path(image_path)
         model = self.config.models.sam
         key = self._key("sam", model.id, prompt, [image_path], {})
-        cached, cached_score = self.cache_dir / f"{key}.png", self.cache_dir / f"{key}.score.json"
+        cached, cached_score = self._cache_file(key, ".png"), self._cache_file(key, ".score.json")
         if cached.exists() and cached_score.exists():
             best = SamResult(
                 mask=cv2.imread(str(cached), cv2.IMREAD_GRAYSCALE) > 127,
@@ -183,8 +200,9 @@ class MetaClient:
             "schema_sha256": _sha256_json(schema) if schema is not None else None,
         }
         paths = [Path(p) for p in image_paths]
+        self._require_synthetic_for_contributor(paths)
         key = self._key("reason", model.id, prompt, paths, params)
-        cached = self.cache_dir / f"{key}.json"
+        cached = self._cache_file(key, ".json")
         if cached.exists():
             return json.loads(cached.read_text())
         self._require_online(f"reasoning call to {model.id}")
@@ -251,11 +269,25 @@ class MetaClient:
         except json.JSONDecodeError as e:
             raise ApiError(f"{model.id} answer is not valid JSON: {e}") from e
 
+    def _require_synthetic_for_contributor(self, paths: Sequence[Path]) -> None:
+        """SPEC 4.3 item 5: the contributor endpoint trains on the data it gets, so a real
+        photo must never reach it. A photo counts as synthetic only if its folder holds the
+        truth.json that ``sewtrace synth`` writes (it has ``"synthetic": true``)."""
+        if self.config.reasoning.model != "spark_contributor":
+            return
+        for path in paths:
+            if not _is_synthetic_photo(path):
+                raise PolicyViolation(
+                    f"{path} is not a synthetic photo, and {self.config.reasoning_model.id} trains on "
+                    "its data. Set reasoning.model to spark or wonder in config.toml for real photos."
+                )
+
     def _paid(self, model: ModelConfig, path: str, body: dict[str, Any], estimate: Usage) -> dict[str, Any]:
         """The one wrapper for every paid call: budget check, retry, timeout, ledger."""
         api = self.config.api
         if not self.settings.api_key:
             raise ApiError("META_API_KEY is not set. Set it in the environment, or use mock mode.")
+        self._require_ledger()
         total, projected = self.ledger_total_usd(), cost_usd(model, estimate)
         if total + projected > api.budget_limit_usd:
             raise BudgetExceeded(
@@ -270,7 +302,15 @@ class MetaClient:
                 response = self._transport(url, headers, body, api.timeout_s)
                 break
             except TimeoutError as e:
-                raise ApiTimeout(f"{model.id} call took more than {api.timeout_s:g} s") from e
+                # The server probably kept working and bills it: log the worst case (REQ-API-04).
+                self._append_ledger(model, estimate, estimated=True)
+                raise ApiTimeout(
+                    f"{model.id} call took more than {api.timeout_s:g} s. "
+                    "The ledger holds the worst-case cost of this call."
+                ) from e
+            except ApiTransportError:
+                self._append_ledger(model, estimate, estimated=True)
+                raise
             except HttpError as e:
                 if not (e.status == 429 or e.status >= 500):
                     raise ApiError(f"{model.id} call failed: {e}") from e
@@ -281,20 +321,38 @@ class MetaClient:
         self._append_ledger(model, _usage_from(response, estimate))
         return response
 
-    def _append_ledger(self, model: ModelConfig, usage: Usage) -> None:
+    def _require_ledger(self) -> None:
+        """Rule: no ledger file but a real answer in the cache means the ledger was lost,
+        and the total would restart at $0. Refuse the paid call (REQ-API-04, C-01)."""
+        if self.ledger_path.exists():
+            return
+        if any(self.cache_dir.glob("real-*")):
+            raise ApiError(
+                f"The ledger {self.ledger_path} is missing, but {self.cache_dir} holds real answers, so "
+                "money was spent before. No call was made. Restore the ledger file from a backup. "
+                "If you are sure nothing was spent, create it with the header line: "
+                + ",".join(LEDGER_COLUMNS)
+            )
+
+    def _append_ledger(self, model: ModelConfig, usage: Usage, estimated: bool = False) -> None:
         new = not self.ledger_path.exists()
+        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         with self.ledger_path.open("a", newline="") as f:
             w = csv.writer(f)
             if new:
                 w.writerow(LEDGER_COLUMNS)
             w.writerow([int(time.time()), model.id, usage.input_tokens, usage.cached_tokens,
-                        usage.output_tokens, usage.images, f"{cost_usd(model, usage):.6f}"])
+                        usage.output_tokens, usage.images, f"{cost_usd(model, usage):.6f}", int(estimated)])
 
     # ---- helpers ----------------------------------------------------------
 
     def _require_online(self, what: str) -> None:
         if self.settings.offline:
-            raise CacheMiss(f"Offline mode: no cached answer for {what}. Run once online to fill the cache.")
+            raise CacheMiss(f"offline mode: no cached answer for {what}; run once online to fill the cache.")
+
+    def _cache_file(self, key: str, suffix: str) -> Path:
+        """Real answers are named ``real-<key>`` so the ledger guard can tell them from mock ones."""
+        return self.cache_dir / f"{'' if self.settings.mock else 'real-'}{key}{suffix}"
 
     def _key(self, kind: str, model: str, prompt: str, images: Sequence[Path], params: dict[str, Any]) -> str:
         """SHA-256 of mode, model, prompt, image bytes and every request parameter (REQ-API-02)."""
@@ -306,6 +364,14 @@ class MetaClient:
             "images": [hashlib.sha256(p.read_bytes()).hexdigest() for p in images],
             "params": params,
         })
+
+
+def _is_synthetic_photo(path: Path) -> bool:
+    truth = path.parent / "truth.json"
+    try:
+        return json.loads(truth.read_text()).get("synthetic") is True
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _sha256_json(value: Any) -> str:

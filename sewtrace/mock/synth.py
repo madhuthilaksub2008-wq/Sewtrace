@@ -294,7 +294,7 @@ def render_layers(
 def make_tee(p: TeeParams, out: Path, seed: int) -> dict:
     rng = np.random.default_rng(seed)
     out.mkdir(parents=True, exist_ok=True)
-    truth: dict = {"params": asdict(p), "measurements": measurements(p), "photos": {}}
+    truth: dict = {"synthetic": True, "params": asdict(p), "measurements": measurements(p), "photos": {}}
 
     for view in ("front", "back"):
         half, edges = body_half(p, back=(view == "back"))

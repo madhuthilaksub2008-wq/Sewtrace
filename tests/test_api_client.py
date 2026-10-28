@@ -60,6 +60,7 @@ def _config(**api) -> AppConfig:
 def _client(tmp_path, transport, *, mock=False, offline=False, config=None, key=KEY):
     sleeps: list[float] = []
     settings = Settings(api_key=key, mock=mock, cache_dir=tmp_path, offline=offline,
+                        ledger_path=tmp_path / "ledger" / "ledger.csv",  # never the real data/ledger.csv
                         config=config or load_config())
     return MetaClient(settings, transport=transport, sleep=sleeps.append), sleeps
 
@@ -224,7 +225,7 @@ def test_req_api_07_slow_call_times_out_with_configured_timeout(tmp_path):
     client, _ = _client(tmp_path, slow, config=_config(timeout_s=1.5))
     with pytest.raises(ApiTimeout, match="1.5"):
         client.reason("p")
-    assert not client.ledger_path.exists()
+    assert [r["estimated"] for r in _rows(client)] == ["1"]  # billed at the worst case, see below
 
 
 def test_req_api_07_every_call_gets_the_timeout(tmp_path):
@@ -424,3 +425,118 @@ def test_req_seg_03_mock_masks_score_one(tmp_path, photo):
     cv2.imwrite(str(photo), img)
     results = _mock_segment(photo, "t-shirt", "t-shirt")
     assert len(results) == 1 and results[0].score == 1.0
+
+
+# ---- ledger outside the cache (REQ-API-04, C-01) ---------------------------------
+
+def test_req_api_04_default_ledger_is_outside_cache_and_cache_dir_env(monkeypatch, tmp_path):
+    """REQ-API-04: the ledger path comes from config, under the repo root, and ignores SEWTRACE_CACHE_DIR."""
+    from sewtrace.config import ROOT
+    monkeypatch.setenv("SEWTRACE_CACHE_DIR", str(tmp_path / "other_cache"))
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    s = Settings.load()
+    assert s.ledger_path == ROOT / load_config().api.ledger_path == ROOT / "data" / "ledger.csv"
+    assert s.ledger_path.parent != s.cache_dir
+    assert MetaClient(s).ledger_path == s.ledger_path
+
+
+def test_req_api_04_new_cache_dir_keeps_the_total(tmp_path):
+    """REQ-API-04: a different cache folder with the same ledger still counts the spend."""
+    first, _ = _client(tmp_path / "a", FakeTransport(_answer()))
+    first.reason("p")
+    spent = first.ledger_total_usd()
+    settings = Settings(api_key=KEY, mock=False, cache_dir=tmp_path / "b", ledger_path=first.ledger_path,
+                        config=load_config())
+    assert MetaClient(settings).ledger_total_usd() == pytest.approx(spent) and spent > 0
+
+
+def test_req_api_04_missing_ledger_with_real_cache_refuses_paid_call(tmp_path):
+    """REQ-API-04, C-01: no ledger file but a real cached answer means the ledger was lost."""
+    first, _ = _client(tmp_path, FakeTransport(_answer()))
+    first.reason("p")
+    first.ledger_path.unlink()
+    transport = FakeTransport(_answer())
+    client, _ = _client(tmp_path, transport)
+    with pytest.raises(ApiError, match="ledger .* is missing"):
+        client.reason("other prompt")
+    assert transport.calls == []
+    assert client.reason("p") == {"ok": 1}  # a cached answer costs nothing, so it still works
+
+
+def test_req_api_04_missing_ledger_with_empty_or_mock_cache_is_allowed(tmp_path):
+    """REQ-API-04: a first real call (or one after mock runs only) creates the ledger."""
+    mock, _ = _client(tmp_path, FakeTransport(), mock=True)
+    mock.reason("p", mock=lambda: {"m": 1})
+    client, _ = _client(tmp_path, FakeTransport(_answer()))
+    client.reason("q")
+    assert client.ledger_path.exists()
+
+
+# ---- timeout bills the worst case (REQ-API-03, REQ-API-04, REQ-API-07) -----------
+
+def test_req_api_07_timeout_logs_worst_case_estimate(tmp_path):
+    """REQ-API-07, REQ-API-04: the server probably bills a timed out call; log the estimate."""
+    client, _ = _client(tmp_path, FakeTransport(TimeoutError("slow")))
+    with pytest.raises(ApiTimeout):
+        client.reason("p")
+    [row] = _rows(client)
+    cfg = client.config
+    assert int(row["output_tokens"]) == cfg.reasoning.max_tokens and row["estimated"] == "1"
+    assert float(row["cost_usd"]) == pytest.approx(
+        cfg.reasoning.max_tokens * cfg.reasoning_model.output_per_m_usd / 1e6, rel=0.01)
+
+
+def test_req_api_07_lost_connection_logs_estimate_but_dns_failure_does_not(tmp_path):
+    """REQ-API-04: a reset after sending is billed at the estimate; a call never sent is not."""
+    from sewtrace.api.client import ApiTransportError
+    client, _ = _client(tmp_path, FakeTransport(ApiTransportError("reset")))
+    with pytest.raises(ApiTransportError):
+        client.reason("p")
+    assert _rows(client)[0]["estimated"] == "1"
+    other, _ = _client(tmp_path / "x", FakeTransport(ApiError("dns")))
+    with pytest.raises(ApiError):
+        other.reason("p")
+    assert not other.ledger_path.exists()
+
+
+def test_req_api_07_real_responses_are_not_flagged_estimated(tmp_path):
+    client, _ = _client(tmp_path, FakeTransport(_answer()))
+    client.reason("p")
+    assert _rows(client)[0]["estimated"] == "0"
+
+
+def test_req_api_07_timeout_is_600_s_and_effort_unchanged():
+    cfg = load_config()
+    assert cfg.api.timeout_s == 600.0
+    assert cfg.reasoning.effort == "high" and cfg.reasoning.max_tokens == 32000
+
+
+# ---- contributor endpoint: synthetic photos only (SPEC 4.3 item 5) ---------------
+
+def _contributor_config():
+    cfg = load_config()
+    return cfg.model_copy(update={"reasoning": cfg.reasoning.model_copy(update={"model": "spark_contributor"})})
+
+
+def test_spec_4_3_contributor_refuses_real_photo(tmp_path, photo):
+    """SPEC 4.3 item 5: a photo with no synthetic truth.json never goes to the contributor model."""
+    from sewtrace.api.client import PolicyViolation
+    transport = FakeTransport(_answer())
+    client, _ = _client(tmp_path, transport, config=_contributor_config())
+    with pytest.raises(PolicyViolation, match="not a synthetic photo"):
+        client.reason("p", [photo])
+    assert transport.calls == []
+    (photo.parent / "truth.json").write_text(json.dumps({"measurements": {}}))  # no synthetic flag
+    with pytest.raises(PolicyViolation):
+        client.reason("p", [photo])
+
+
+def test_spec_4_3_contributor_accepts_synthetic_photos_and_text_only(tmp_path, photo):
+    from sewtrace.mock import synth
+    tee = tmp_path / "tee"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    transport = FakeTransport(_answer())
+    client, _ = _client(tmp_path / "c", transport, config=_contributor_config())
+    assert client.reason("p", [tee / "front.jpg"]) == {"ok": 1}
+    assert transport.calls[0][2]["model"] == "muse-spark-1.3-contributor"
+    assert client.reason("text only") == {"ok": 1}  # no images: nothing to protect
