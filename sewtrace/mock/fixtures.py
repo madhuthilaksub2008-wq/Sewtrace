@@ -51,9 +51,11 @@ def default_tee_seams() -> list[Seam]:
     return [
         Seam(a="front.shoulder", b="back.shoulder", min_diff_mm=-c.shoulder_tol_mm, max_diff_mm=c.shoulder_tol_mm),
         Seam(a="front.side", b="back.side", min_diff_mm=-c.side_tol_mm, max_diff_mm=c.side_tol_mm),
-        # Half sleeve cap sews to one armhole.
-        Seam(a="front.armhole", b="sleeve.cap", **ease),
-        Seam(a="back.armhole", b="sleeve.cap", **ease),
+        # Whole cap (both halves of the on-fold sleeve) against one full armhole.
+        Seam(a="front.armhole+back.armhole", b="sleeve.cap", b_count=2, **ease),
+        # Both sides of the sleeve; the right side is measured on the mirrored half.
+        Seam(a="sleeve.underarm", b="sleeve.underarm:mirror",
+             min_diff_mm=-c.underarm_tol_mm, max_diff_mm=c.underarm_tol_mm),
     ]
 
 

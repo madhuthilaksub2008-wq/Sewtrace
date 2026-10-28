@@ -48,17 +48,17 @@ class TeeParams:
     hem_flare: float
     sleeve_length: float
     sleeve_hem_half: float
-    cap_ease: float        # extra sleeve cap length per half, mm
+    cap_ease: float        # extra sleeve cap length per half, mm; 2x = whole-cap ease (SPEC 7.6.1)
     colour_bgr: tuple[int, int, int]
 
 
 # Five kids tees across sizes (roughly age 4 to 12), flat-lay mm.
 TEES = [
-    TeeParams("tee1", 160, 380, 140, 62, 58, 20, 140, 12, 4, 110, 70, 6, (40, 40, 200)),
-    TeeParams("tee2", 170, 420, 148, 65, 62, 21, 150, 13, 4, 120, 74, 6, (30, 200, 230)),
-    TeeParams("tee3", 180, 460, 156, 68, 66, 22, 160, 14, 5, 130, 78, 6, (190, 110, 30)),
-    TeeParams("tee4", 195, 500, 168, 72, 70, 23, 170, 15, 5, 140, 82, 6, (30, 140, 240)),
-    TeeParams("tee5", 210, 540, 180, 76, 74, 24, 180, 16, 6, 150, 86, 6, (160, 60, 160)),
+    TeeParams("tee1", 160, 380, 140, 62, 58, 20, 140, 12, 4, 110, 70, 4, (40, 40, 200)),
+    TeeParams("tee2", 170, 420, 148, 65, 62, 21, 150, 13, 4, 120, 74, 4, (30, 200, 230)),
+    TeeParams("tee3", 180, 460, 156, 68, 66, 22, 160, 14, 5, 130, 78, 4, (190, 110, 30)),
+    TeeParams("tee4", 195, 500, 168, 72, 70, 23, 170, 15, 5, 140, 82, 4, (30, 140, 240)),
+    TeeParams("tee5", 210, 540, 180, 76, 74, 24, 180, 16, 6, 150, 86, 4, (160, 60, 160)),
 ]
 
 

@@ -84,10 +84,16 @@ class Panel(BaseModel):
 
 
 class Seam(BaseModel):
-    """Two edges that get sewn together. Refs are "panel.edge"."""
+    """Two edges that get sewn together. Refs are "panel.edge".
+
+    `a` may sum edges ("front.armhole+back.armhole"). `b_count` is how many times
+    the half-panel edge `b` occurs in the whole garment (2 for an on-fold sleeve cap).
+    A ":mirror" suffix measures the edge on the mirrored half instead.
+    """
 
     a: str
     b: str
+    b_count: int = Field(default=1, ge=1)
     len_a_mm: float = 0.0
     len_b_mm: float = 0.0
     # Allowed b - a, in mm. Required: default_tee_seams() fills them from config.

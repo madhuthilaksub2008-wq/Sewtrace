@@ -80,6 +80,7 @@ def draft_spec(
 def build_prompt(spec: PanelSpec, measurements: dict[str, float]) -> str:
     draft = {"panels": _geometry(spec)["panels"]}
     meas = {k: round(v, 1) for k, v in measurements.items()}
+    seam = get_config().seam
     return "\n".join([
         "You are an expert pattern maker. The three photos show one kids' round-neck t-shirt laid",
         "flat: front view, back view, and one sleeve folded flat. A segmentation model measured the",
@@ -93,7 +94,8 @@ def build_prompt(spec: PanelSpec, measurements: dict[str, float]) -> str:
         "1. Neck depth: the front neck is usually deeper than the back (kids: back 15-25 mm). The",
         "   back neck is hidden in the front photo; use the back photo. Edit each neck curve.",
         "2. Sleeve cap: the folded sleeve hides the cap shape. Keep a smooth convex cap from (0,0)",
-        "   whose length is 0 to 12 mm longer than the armhole (ease).",
+        f"   whose whole length (2 x the half cap) is {seam.cap_ease_min_mm:g} to {seam.cap_ease_max_mm:g} mm",
+        "   longer than the front armhole plus the back armhole (ease).",
         "3. Grain: knit tees normally have vertical grain (parallel to the fold) on all three.",
         "Rules: keep every point within 10 mm of the draft unless a photo clearly disagrees; keep",
         "edge names, order and the fold on x = 0; shoulder and side lengths must match front to back;",

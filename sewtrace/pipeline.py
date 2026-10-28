@@ -12,7 +12,7 @@ from sewtrace.api.client import MetaClient
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels
-from sewtrace.reason.seams import adjust_loop
+from sewtrace.reason.seams import adjust_loop, require_seams_ok
 from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import photo_homography
@@ -45,7 +45,6 @@ def trace(client: MetaClient, photo: str, region: str, sleeve: bool = False) -> 
 
 def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None) -> RunResult:
     garment_dir, out_dir = Path(garment_dir), Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
     client = client or MetaClient()
     calls_before = client.calls
     photos = photo_set(garment_dir)
@@ -60,7 +59,9 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
     spec = infer_panels(client, photos, draft, measurements)
     spec, seam_log = adjust_loop(client, spec)
+    require_seams_ok(spec, seam_log)  # REQ-SEW-04: before any file is written
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     files = {
         "pdf": render_pdf(spec, out_dir / "pattern.pdf"),
         "svg": render_svg(spec, out_dir / "pattern.svg"),

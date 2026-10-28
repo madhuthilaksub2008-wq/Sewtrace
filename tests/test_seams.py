@@ -8,10 +8,11 @@ from sewtrace.config import Settings, get_config
 from sewtrace.mock import synth
 from sewtrace.mock.fixtures import truth_spec
 from sewtrace.reason import seams
-from sewtrace.reason.seams import adjust_loop, check_seams, edge_length, set_edge_length
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, check_seams, edge_length, set_edge_length
 from sewtrace.types import Panel, PanelSpec
 
 MAX_ADJUST_CALLS = get_config().seam.max_adjust_calls
+CAP = "front.armhole+back.armhole~sleeve.cap"
 
 
 @pytest.fixture(scope="session")
@@ -70,7 +71,7 @@ def test_truth_passes_all_seams(tees, client):
 def test_perturbed_loop_converges_with_fallback(tees, client):
     spec = perturb(truth_spec(tees[0]))
     failing = [seams.seam_name(s) for s in check_seams(spec) if not s.ok]
-    assert "front.side~back.side" in failing and "front.armhole~sleeve.cap" in failing
+    assert "front.side~back.side" in failing and CAP in failing
 
     out, log = adjust_loop(client, spec, max_calls=MAX_ADJUST_CALLS)
     for row in log:
@@ -82,7 +83,7 @@ def test_perturbed_loop_converges_with_fallback(tees, client):
     assert sources[0] == "initial" and sources[-1] == "fallback"
     assert sources.count("model") == MAX_ADJUST_CALLS
     # Each model iteration improved the worst seam it touched.
-    assert log[1]["diffs"]["front.armhole~sleeve.cap"] > log[0]["diffs"]["front.armhole~sleeve.cap"]
+    assert log[1]["diffs"][CAP] > log[0]["diffs"][CAP]
     # Geometry stays sane: fold corners untouched, polygons still simple.
     from shapely.geometry import Polygon
     for name in ("front", "back", "sleeve"):
@@ -126,3 +127,100 @@ def test_bad_model_answers_are_skipped(tees):
         {"oops": 1},
     ]})
     assert applied == [] and out == spec
+
+
+def _longer_front_armhole(spec: PanelSpec, extra_mm: float = 16.0) -> PanelSpec:
+    front = spec.panel("front")
+    return _replace(spec, set_edge_length(front, "armhole", edge_length(front, "armhole") + extra_mm))
+
+
+def test_req_sew_01_all_four_pairs_measured_with_whole_cap(tees, client):
+    """REQ-SEW-01: pairs of SPEC 7.6.1; cap is 2x half cap against front + back armhole."""
+    spec = truth_spec(tees[0])
+    by = {seams.seam_name(s): s for s in check_seams(spec)}
+    assert set(by) == {"front.shoulder~back.shoulder", "front.side~back.side", CAP,
+                       "sleeve.underarm~sleeve.underarm:mirror"}
+    arm = edge_length(spec.panel("front"), "armhole") + edge_length(spec.panel("back"), "armhole")
+    assert by[CAP].len_a_mm == pytest.approx(arm, abs=1e-6)
+    assert by[CAP].len_b_mm == pytest.approx(2 * edge_length(spec.panel("sleeve"), "cap"), abs=1e-6)
+    # Synthetic truth: 2 x 4 mm ease, inside 0..12 with margin.
+    assert by[CAP].diff_mm == pytest.approx(8.0, abs=0.5)
+    under = by["sleeve.underarm~sleeve.underarm:mirror"]
+    assert under.len_a_mm == pytest.approx(under.len_b_mm, abs=1e-6) and under.ok
+
+
+def test_req_sew_01_cap_range_is_for_the_whole_cap(tees):
+    """REQ-SEW-01: 8 mm per half (16 mm whole) fails; the old per-half rule would allow it."""
+    spec = truth_spec(tees[0])
+    sleeve = spec.panel("sleeve")
+    wide = set_edge_length(sleeve, "cap", edge_length(sleeve, "cap") + 4.0)
+    cap = next(s for s in check_seams(_replace(spec, wide)) if seams.seam_name(s) == CAP)
+    assert cap.diff_mm > get_config().seam.cap_ease_max_mm and not cap.ok
+
+
+def test_req_sew_02_sew_03_front_armhole_plus_16_is_fixed(tees, client):
+    """Reviewer repro: front armhole 16 mm longer ends with all seams ok, within 3 model calls."""
+    spec = _longer_front_armhole(truth_spec(tees[0]))
+    assert not all(s.ok for s in check_seams(spec))
+    out, log = adjust_loop(client, spec)
+    assert all(s.ok for s in check_seams(out))
+    assert client.calls <= MAX_ADJUST_CALLS
+    require_seams_ok(out, log)  # does not raise
+
+
+def _script_model(monkeypatch, misses_mm: list[float]) -> None:
+    """Model answers for back.shoulder: target = front shoulder + miss. A miss of 0 fixes it.
+
+    The misses differ per call so each prompt differs and nothing is served from cache.
+    """
+    answers = iter(misses_mm)
+
+    def scripted(spec_, failing):
+        front = edge_length(spec_.panel("front"), "shoulder")
+        return {"adjustments": [{"panel": "back", "edge": "shoulder",
+                                 "target_length_mm": front + next(answers)}]}
+
+    monkeypatch.setattr(seams, "_mock_adjust", scripted)
+
+
+def _back_shoulder_6mm_long(spec: PanelSpec) -> PanelSpec:
+    back = spec.panel("back")
+    return _replace(spec, set_edge_length(back, "shoulder", edge_length(back, "shoulder") + 6))
+
+
+def test_req_sew_02_mock_fails_twice_then_succeeds(tees, client, monkeypatch):
+    """REQ-SEW-02: two bad model answers, the third fixes it; no code fix needed."""
+    _script_model(monkeypatch, [4.0, 3.0, 0.0])
+    out, log = adjust_loop(client, _back_shoulder_6mm_long(truth_spec(tees[0])))
+    assert [r["source"] for r in log] == ["initial", "model", "model", "model"]
+    assert [bool(r["failing"]) for r in log] == [True, True, True, False]
+    assert client.calls == 3
+
+
+def test_req_sew_03_05_mock_always_fails_then_code_fix_and_log(tees, client, monkeypatch):
+    """REQ-SEW-03 and REQ-SEW-05: 3 useless calls, then the code fix; log has checks per iteration."""
+    _script_model(monkeypatch, [4.0, 3.0, 2.0])
+    out, log = adjust_loop(client, _back_shoulder_6mm_long(truth_spec(tees[0])))
+    assert client.calls == MAX_ADJUST_CALLS
+    assert [r["source"] for r in log] == ["initial", "model", "model", "model", "fallback"]
+    assert all({"iteration", "diffs", "failing"} <= set(r) for r in log)
+    assert log[-1]["failing"] == [] and log[-1]["applied"]
+    assert set(log[0]["diffs"]) == {seams.seam_name(s) for s in out.seams}
+    assert all(s.ok for s in check_seams(out))
+
+
+def test_req_sew_02_prompt_states_whole_cap_range_from_config(tees):
+    spec = _longer_front_armhole(truth_spec(tees[0]))
+    prompt = seams.build_adjust_prompt(spec, [s for s in check_seams(spec) if not s.ok])
+    cfg = get_config().seam
+    assert "2 x the half cap" in prompt and f"{cfg.cap_ease_max_mm:g} mm longer" in prompt
+    assert f"{CAP.split('~')[0]}" in prompt
+
+
+def test_req_sew_04_require_seams_ok_names_pair_and_diff(tees):
+    spec = _longer_front_armhole(truth_spec(tees[0]))
+    with pytest.raises(SeamCheckFailed) as err:
+        require_seams_ok(spec)
+    text = str(err.value)
+    assert "front.side~back.side" in text and CAP in text and "mm" in text
+    assert [seams.seam_name(s) for s in err.value.failed] == ["front.side~back.side", CAP]

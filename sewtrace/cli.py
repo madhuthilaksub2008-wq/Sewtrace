@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
@@ -26,7 +27,12 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "run":
         from sewtrace.pipeline import run
         out = args.out or Path("out") / Path(args.garment_dir).name
-        result = run(args.garment_dir, out)
+        from sewtrace.reason.seams import SeamCheckFailed
+        try:
+            result = run(args.garment_dir, out)
+        except SeamCheckFailed as err:
+            print(f"error: {err}", file=sys.stderr)
+            sys.exit(1)
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
