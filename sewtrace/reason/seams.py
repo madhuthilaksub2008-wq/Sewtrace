@@ -28,7 +28,9 @@ from functools import partial
 import numpy as np
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation
+from sewtrace.api.client import (
+    ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation,
+)
 from sewtrace.config import get_config
 from sewtrace.reason.reshape import SleeveCap, cap_width_mm, fit_cap, scale_cap_to_length, with_sleeve_cap
 from sewtrace.types import Panel, PanelSpec, Seam
@@ -122,16 +124,18 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             source = "pair_fix"
             continue
         fixable = [s for s in failing if s.b == CAP_REF]
-        if not fixable:
+        if len(fixable) < len(failing):
+            # A pair of measured edges is out of tolerance and nothing may change it. A cap fix
+            # cannot make the pattern pass, so spend no model call; the caller raises (REQ-SEW-04).
             log.warning("adjust_loop: %s fail between measured edges; nothing may change them",
-                        [seam_name(s) for s in failing])
+                        [seam_name(s) for s in failing if s not in fixable])
             break
         if calls < max_calls:
             prompt = build_adjust_prompt(spec, fixable)
             calls += 1  # a failed call still counts toward the limit of REQ-SEW-02
             try:
                 answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA)
-            except (BudgetExceeded, CacheMiss, PolicyViolation):
+            except (BudgetExceeded, CacheMiss, PolicyViolation, ApiRequestRejected):
                 raise
             except ApiError as exc:  # no usable answer: same as an answer that is skipped
                 log.warning("adjust_loop: model call %d failed, answer skipped: %s", calls, exc)

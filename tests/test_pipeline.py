@@ -33,6 +33,22 @@ def test_photos_to_pattern_end_to_end(tmp_path):
     assert again.model_calls == 0  # every call served from cache
 
 
+def test_req_rsn_03_04_front_neck_depth_is_near_truth_not_the_back_outline_depth(tmp_path, caplog):
+    """REQ-RSN-04, SPEC 10.1: the front outline follows the back neckline, yet the exported
+    front neck depth is the inferred one (mock model reads the synthetic truth), within 3 mm."""
+    from sewtrace.reason.reshape import neck_depth_mm
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+    with caplog.at_level("WARNING", logger="sewtrace.reason.panels"):
+        result = run(tee, tmp_path / "out", client)
+    # The deeper front neck must pass the measured-value check on a real (noisy) outline, first try.
+    assert not [r for r in caplog.records if "infer_panels" in r.getMessage()], caplog.text
+    params = json.loads((tee / "truth.json").read_text())["params"]
+    assert neck_depth_mm(result.spec.panel("front")) == pytest.approx(params["front_neck_depth"], abs=3.0)
+    assert neck_depth_mm(result.spec.panel("back")) == pytest.approx(params["back_neck_depth"], abs=3.0)
+
+
 def _unfixable(monkeypatch):
     """The back shoulder is 6 mm too long. Two measured edges disagree, so nothing may fix it."""
     real = pipeline.adjust_loop
@@ -89,6 +105,29 @@ def test_req_sew_03_small_side_mismatch_is_fixed_and_exported(tmp_path, monkeypa
     for k in MEASUREMENT_KEYS:
         assert result.measurements[k] == pytest.approx(truth[k], abs=2.0), k
     assert json.loads(result.files["measurements"].read_text()) == result.measurements
+
+
+def test_req_sew_03_cli_prints_one_line_per_edge_changed_by_the_pair_fix(tmp_path, monkeypatch, capsys):
+    """REQ-SEW-03: a changed measured edge is shown with from_mm and to_mm next to the seam result."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    monkeypatch.setenv("SEWTRACE_OFFLINE", "0")
+    real = pipeline.adjust_loop
+
+    def skewed(client, spec):
+        back = spec.panel("back")
+        longer = set_edge_length(back, "side", seams.edge_length(back, "side") + 2.0)
+        return real(client, spec.model_copy(update={"panels": [longer if p.name == "back" else p for p in spec.panels]}))
+
+    monkeypatch.setattr(pipeline, "adjust_loop", skewed)
+    real_run = pipeline.run
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+    monkeypatch.setattr(pipeline, "run", lambda d, o: real_run(d, o, client))
+    cli.main(["run", str(tee), "--out", str(tmp_path / "out")])
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("seam fix:")]
+    assert len(lines) == 2  # front.side and back.side
+    assert all("mm ->" in ln and "front.side~back.side" in ln for ln in lines)
+    assert any(ln.startswith("seam fix: back.side ") for ln in lines)
 
 
 def test_req_sew_04_cli_prints_failure_and_exits_nonzero(tmp_path, monkeypatch, capsys):
@@ -188,12 +227,14 @@ def test_req_geo_01_contour_failure_names_the_photo(tmp_path, monkeypatch):
     ("ApiTimeout", "took more"),
     ("NotImplementedError", "not wired"),
     ("ContourFailed", "front photo f.jpg"),
+    ("ApiRequestRejected", "rejected: HTTP 400"),
 ])
 def test_req_api_08_cli_prints_clean_error_not_traceback(tmp_path, monkeypatch, capsys, error, text):
     """REQ-API-08: API, budget, offline and contour errors give `error: run: ...` and exit 1."""
     from sewtrace.api import client as api
     errors = {"BudgetExceeded": api.BudgetExceeded, "CacheMiss": api.CacheMiss, "ApiTimeout": api.ApiTimeout,
-              "NotImplementedError": NotImplementedError, "ContourFailed": pipeline.ContourFailed}
+              "NotImplementedError": NotImplementedError, "ContourFailed": pipeline.ContourFailed,
+              "ApiRequestRejected": api.ApiRequestRejected}
 
     def boom(d, o):
         raise errors[error](text)

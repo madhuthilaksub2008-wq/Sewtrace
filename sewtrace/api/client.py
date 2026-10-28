@@ -41,7 +41,7 @@ import cv2
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from sewtrace.config import ModelConfig, Settings, resolve_ledger_path
+from sewtrace.config import ROOT, ModelConfig, Settings, resolve_ledger_path
 
 LEDGER_COLUMNS = ["time", "model", "input_tokens", "cached_tokens", "output_tokens", "images", "cost_usd", "estimated"]
 CHARS_PER_TOKEN = 4  # rough token count for the pre-call estimate only
@@ -53,6 +53,12 @@ Transport = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any
 
 class ApiError(RuntimeError):
     """A Meta API call failed after the allowed tries."""
+
+
+class ApiRequestRejected(ApiError):
+    """The server refused the request itself: any HTTP status except 429 and 5xx (400 bad parameter,
+    401 or 403 bad key, 404 wrong model ID, 422 bad schema). A retry or a fallback cannot help,
+    so callers stop the run."""
 
 
 class ApiTimeout(ApiError):
@@ -312,27 +318,38 @@ class MetaClient:
                 self._append_ledger(model, estimate, estimated=True)
                 raise
             except HttpError as e:
-                if not (e.status == 429 or e.status >= 500):
-                    raise ApiError(f"{model.id} call failed: {e}") from e
-                if attempt == api.max_tries:
-                    raise ApiError(f"{model.id} call failed after {attempt} tries: {e}") from e
-                self._sleep(api.backoff_s * 2 ** (attempt - 1))
+                if e.status == 429 or e.status >= 500:
+                    if attempt == api.max_tries:
+                        raise ApiError(f"{model.id} call failed after {attempt} tries: {e}") from e
+                    self._sleep(api.backoff_s * 2 ** (attempt - 1))
+                    continue
+                raise ApiRequestRejected(
+                    f"{model.id} call was rejected: {e}. Check the model ID, the request parameters and "
+                    "META_API_KEY in config.toml and the environment. Nothing was retried.") from e
         assert response is not None
         self._append_ledger(model, _usage_from(response, estimate))
         return response
 
     def _require_ledger(self) -> None:
         """Rule: no ledger file but a real answer in the cache means the ledger was lost,
-        and the total would restart at $0. Refuse the paid call (REQ-API-04, C-01)."""
+        and the total would restart at $0. Refuse the paid call (REQ-API-04, C-01).
+
+        The repo cache folder is checked too when the ledger is the default one, so a changed
+        SEWTRACE_CACHE_DIR cannot hide the real answers. A ledger path set by a test is not
+        tied to the repo cache."""
         if self.ledger_path.exists():
             return
-        if any(self.cache_dir.glob("real-*")):
-            raise ApiError(
-                f"The ledger {self.ledger_path} is missing, but {self.cache_dir} holds real answers, so "
-                "money was spent before. No call was made. Restore the ledger file from a backup. "
-                "If you are sure nothing was spent, create it with the header line: "
-                + ",".join(LEDGER_COLUMNS)
-            )
+        folders = [self.cache_dir]
+        if self.ledger_path == resolve_ledger_path(self.config):
+            folders.append(ROOT / "cache")
+        for folder in folders:
+            if any(folder.glob("real-*")):
+                raise ApiError(
+                    f"The ledger {self.ledger_path} is missing, but {folder} holds real answers, so "
+                    "money was spent before. No call was made. Restore the ledger file from a backup. "
+                    "If you are sure nothing was spent, create it with the header line: "
+                    + ",".join(LEDGER_COLUMNS)
+                )
 
     def _append_ledger(self, model: ModelConfig, usage: Usage, estimated: bool = False) -> None:
         new = not self.ledger_path.exists()

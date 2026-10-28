@@ -122,3 +122,30 @@ def test_req_geo_04_synthetic_truth_is_independent_of_measure_code():
     assert truth["sleeve_length"] == pytest.approx(p.sleeve_length, abs=1e-6)
     assert truth["neck_width"] == pytest.approx(2 * p.neck_half, abs=1e-6)
     assert truth["armhole_depth"] == pytest.approx(p.armhole_depth, abs=1e-6)
+
+
+@pytest.mark.parametrize("name", TEE_NAMES)
+def test_neck_point_search_is_not_clamped_at_the_window_edge(halves, tees, name):
+    """The shoulder-line search starts at the neck end of the shoulder, so the neck point lies inside the
+    window (it was clamped at the window edge on all 5 tees) and no corner fallback is needed."""
+    from sewtrace.config import get_config
+    from sewtrace.vision.measure import _edge, _neck_point, _neck_point_fit
+    front, edges = halves[name, "front"]
+    f = front.array()
+    neck, shoulder = _edge(f, edges, "neck"), _edge(f, edges, "shoulder")
+    fit = _neck_point_fit(neck, shoulder)
+    assert fit is not None  # None would mean the minimum sat at the window edge
+    assert np.allclose(_neck_point(neck, shoulder), fit)
+    assert np.linalg.norm(fit - shoulder[0]) < 0.5 * get_config().measure.neck_search_mm
+    truth_half = tees[name][1]["measurements"]["neck_width"] / 2
+    assert fit[0] == pytest.approx(truth_half, abs=1.0)
+
+
+def test_neck_point_falls_back_to_the_corner_when_the_window_misses_it():
+    """If the curve meets the shoulder line outside the window, the tangent corner is used."""
+    from sewtrace.vision.measure import _neck_point, _neck_point_fit
+    shoulder = np.c_[np.linspace(60.0, 200.0, 60), np.linspace(0.0, 12.0, 60)]
+    far = np.c_[np.full(30, 120.0) + np.linspace(0, 0.5, 30), np.linspace(40.0, 0.0, 30)[::-1]]  # x near 120, far away
+    neck = far[::-1]
+    assert _neck_point_fit(neck, shoulder) is None
+    assert np.isfinite(_neck_point(neck, shoulder)).all()

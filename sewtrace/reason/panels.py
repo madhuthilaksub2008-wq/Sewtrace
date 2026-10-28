@@ -5,18 +5,23 @@ front neck depth, back neck depth, sleeve cap shape and grain line. It answers
 with the `PanelInference` model below, sent as structured output (REQ-RSN-02).
 Code applies those few numbers to the deterministic draft (`reshape`) and checks
 that no measured edge moved more than the config tolerance (REQ-RSN-05). A bad
-answer gets one retry, then the draft is used as is (REQ-RSN-03).
+answer gets one retry, then the fallback is used (REQ-RSN-03): the measured draft with the
+front neck depth set to back depth plus a config offset. The front outline of a flat-lay
+photo follows the back neckline, so the front neck depth of the draft is not a measurement.
 
 Neck width is measured, so it is never in the answer. The armhole is hidden under
 the sleeve in a flat-lay photo, but SPEC does not list it as model output. It stays
 the code default (config [contour.armhole]); only the cap shape can adapt to it.
-In mock mode the "model" answer is read off the draft.
+In mock mode the "model" answer is read off the fallback spec. For a synthetic photo (its
+folder holds a truth.json with "synthetic": true) the front neck depth comes from that file,
+so the mock behaves like a good model.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -24,7 +29,9 @@ import shapely
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shapely.geometry import LineString, Polygon
 
-from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation
+from sewtrace.api.client import (
+    ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation,
+)
 from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
 from sewtrace.reason.reshape import (
@@ -41,6 +48,8 @@ DOUBLE_NOTCH_GAP_MM = 6.0
 CUTS = {"front": "1 on fold", "back": "1 on fold", "sleeve": "2 on fold"}
 # Edges that must come back exactly as measured. The body fold is compared without its neck end,
 # which moves with the neck depth (the fold meets the neck curve at the inferred depth).
+# Measurements whose value comes from a fit to the neck curve (vision/measure.py _neck_point).
+NECK_CURVE_MEASUREMENTS = ("neck_width", "body_length")
 MEASURED_EDGES = {
     "front": ("shoulder", "armhole", "side", "hem"),
     "back": ("shoulder", "armhole", "side", "hem"),
@@ -92,9 +101,9 @@ def build_prompt(spec: PanelSpec, measurements: dict[str, float]) -> str:
         "change it, and you do not return it.",
         "Infer ONLY these four fields. They are the whole answer:",
         f"1. front_neck_depth_mm: front neck depth, {inf.front_neck_depth_min_mm:g} to "
-        f"{inf.front_neck_depth_max_mm:g} mm. Draft: {neck_depth_mm(spec.panel('front')):.1f}, which is not a "
-        "measurement: the front outline shows the back neckline through the neck opening. Read the "
-        "front neck edge in the front photo.",
+        f"{inf.front_neck_depth_max_mm:g} mm, and at least {inf.front_minus_back_min_mm:g} mm deeper than "
+        "back_neck_depth_mm. The front outline shows the back neckline through the neck opening, so "
+        "no draft value is given. Read the front neck edge in the front photo.",
         f"2. back_neck_depth_mm: back neck depth, {inf.back_neck_depth_min_mm:g} to "
         f"{inf.back_neck_depth_max_mm:g} mm. Kids' back necks are shallow (about 15 to 25 mm). "
         f"Use the back photo. Draft: "
@@ -124,16 +133,18 @@ def infer_panels(
     """
     history = history if history is not None else []
     images = [photos.front, photos.back, photos.sleeve]
+    fallback = fallback_spec(draft)
+    mock_basis = _mock_basis(fallback, photos.front)
     base_prompt = build_prompt(draft, measurements)
     prompt = base_prompt
     for attempt in (1, 2):
         calls = client.calls
         try:
-            answer = client.reason(prompt, images, mock=lambda: _mock_answer(draft),
+            answer = client.reason(prompt, images, mock=lambda: _mock_answer(mock_basis),
                                    schema=PanelInference.model_json_schema())
-        except (BudgetExceeded, CacheMiss, PolicyViolation):
-            raise  # stop the run: more calls are not allowed or not possible
-        except ApiError as exc:  # truncated at max_tokens, not JSON, timeout, HTTP failure (REQ-RSN-06)
+        except (BudgetExceeded, CacheMiss, PolicyViolation, ApiRequestRejected):
+            raise  # stop the run: more calls are not allowed, not possible, or the request itself is wrong
+        except ApiError as exc:  # truncated at max_tokens, not JSON, timeout, HTTP 429/5xx after retries (REQ-RSN-06)
             log.warning("infer_panels attempt %d: the model call failed: %s", attempt, exc)
             answer, spec, problems = None, None, [f"the model call failed: {exc}"]
         else:
@@ -151,8 +162,24 @@ def infer_panels(
             "\nYour previous answer was rejected for: " + "; ".join(problems[:10])
             + ". Fix these and return the four fields again."
         )
-    log.warning("infer_panels: falling back to the measured draft")
-    return draft
+    log.warning("infer_panels: falling back to the draft with the default front neck depth")
+    return fallback
+
+
+def default_front_depth_mm(back_depth_mm: float) -> float:
+    """Front neck depth when the model gives none: back depth plus a config offset, kept in range."""
+    cfg = get_config().inference
+    depth = back_depth_mm + cfg.fallback_front_minus_back_mm
+    return min(max(depth, cfg.front_neck_depth_min_mm), cfg.front_neck_depth_max_mm)
+
+
+def fallback_spec(draft: PanelSpec) -> PanelSpec:
+    """The draft with the front neck depth replaced by the default (REQ-RSN-03).
+
+    Only the front neck is edited: it is the one value the draft gets wrong, because the front
+    outline follows the back neckline. Every measured edge is untouched."""
+    front = with_neck_depth(draft.panel("front"), default_front_depth_mm(neck_depth_mm(draft.panel("back"))))
+    return _assemble([front, draft.panel("back"), draft.panel("sleeve")])
 
 
 def apply_answer(answer: dict, draft: PanelSpec) -> tuple[PanelSpec | None, list[str]]:
@@ -172,6 +199,11 @@ def inference_problems(inference: PanelInference, draft: PanelSpec) -> list[str]
     """Values outside the ranges from config or outside the sleeve geometry."""
     cfg = get_config().inference
     problems = []
+    gap = inference.front_neck_depth_mm - inference.back_neck_depth_mm
+    if gap < cfg.front_minus_back_min_mm:
+        problems.append(
+            f"front_neck_depth_mm {inference.front_neck_depth_mm:g} must be at least "
+            f"{cfg.front_minus_back_min_mm:g} mm deeper than back_neck_depth_mm {inference.back_neck_depth_mm:g}")
     for name, depth in (("front", inference.front_neck_depth_mm), ("back", inference.back_neck_depth_mm)):
         lo, hi = getattr(cfg, f"{name}_neck_depth_min_mm"), getattr(cfg, f"{name}_neck_depth_max_mm")
         if not lo <= depth <= hi:
@@ -226,8 +258,12 @@ def validate_spec(spec: PanelSpec, draft: PanelSpec) -> list[str]:
 def measured_changes(draft: PanelSpec, spec: PanelSpec) -> list[str]:
     """Measured values that differ from the draft by more than the config tolerance (REQ-RSN-05).
 
-    Compares the visible edges, the neck width, the cap end points, the fold, and the six
+    Compares the visible edges, the neck width, the cap end points, the fold, and the
     measurements. The neck depth and the cap shape between its end points may change.
+    The two measurements that read the neck curve (neck width, body length) are left out of
+    the last step: their fit follows the neck curve shape, which a new neck depth changes by
+    1 mm or more on a real outline. The neck point itself is compared above, in 2D, within
+    the same tolerance.
     """
     tol = get_config().inference.measured_tol_mm
     problems = []
@@ -258,7 +294,7 @@ def measured_changes(draft: PanelSpec, spec: PanelSpec) -> list[str]:
         return problems
     before, after = _measure(draft), _measure(spec)
     return [f"measurement {k} changed by {after[k] - before[k]:+.1f} mm (limit {tol:g})"
-            for k in before if abs(after[k] - before[k]) > tol]
+            for k in before if k not in NECK_CURVE_MEASUREMENTS and abs(after[k] - before[k]) > tol]
 
 
 def estimate_tokens(text: str) -> int:
@@ -352,8 +388,29 @@ def _errors(exc: ValidationError) -> str:
     return "; ".join(f"{'.'.join(str(x) for x in e['loc']) or 'answer'}: {e['msg']}" for e in exc.errors()[:10])
 
 
+def _mock_basis(fallback: PanelSpec, front_photo: str) -> PanelSpec:
+    """Spec the mock reads its answer from: the fallback, with the true front neck depth when the
+    photo is synthetic. A real photo never gets a truth value (there is none)."""
+    depth = _synthetic_front_depth(Path(front_photo))
+    if depth is None:
+        return fallback
+    return _assemble([with_neck_depth(fallback.panel("front"), depth), fallback.panel("back"),
+                      fallback.panel("sleeve")])
+
+
+def _synthetic_front_depth(front_photo: Path) -> float | None:
+    """front_neck_depth from truth.json next to a synthetic photo, else None."""
+    try:
+        truth = json.loads((front_photo.parent / "truth.json").read_text())
+        if truth.get("synthetic") is not True:
+            return None
+        return float(truth["params"]["front_neck_depth"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _mock_answer(draft: PanelSpec) -> dict:
-    """Deterministic stand-in built through the same pydantic model: values read off the draft."""
+    """Deterministic stand-in built through the same pydantic model: values read off the given spec."""
     return PanelInference(
         front_neck_depth_mm=round(neck_depth_mm(draft.panel("front")), 1),
         back_neck_depth_mm=round(neck_depth_mm(draft.panel("back")), 1),

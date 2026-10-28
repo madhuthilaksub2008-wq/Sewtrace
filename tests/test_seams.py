@@ -10,7 +10,7 @@ from sewtrace.mock import synth
 from sewtrace.mock.fixtures import truth_spec
 from sewtrace.reason import seams
 from sewtrace.reason.reshape import cap_width_mm, fit_cap, scale_cap_to_length
-from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, check_seams, edge_length
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, check_seams, edge_length, seam_name
 from perturb import bulge_edge, set_edge_length
 from sewtrace.types import Panel, PanelSpec, Seam
 
@@ -261,11 +261,22 @@ def test_req_sew_03_pair_over_limit_is_not_edited_and_raises(tees, client):
 
 
 def test_req_sew_03_pair_fix_then_cap_loop_still_converges(tees, client):
-    """The shoulder fix changes the armhole a little; a failing cap is still fixed after it."""
+    """The side pair fix (side 2 mm long) does not touch the cap seam; a failing cap is still fixed after it."""
     spec = _longer_front_armhole(_side_2mm_long(truth_spec(tees[0])))
     out, log = adjust_loop(client, spec)
     assert log[1]["source"] == "pair_fix" and log[-1]["failing"] == []
     require_seams_ok(out, log)
+
+
+def test_req_sew_03_unfixable_measured_pair_spends_no_model_call_on_the_cap(tees, client):
+    """REQ-SEW-02, REQ-SEW-04: back shoulder 6 mm long (over the limit) AND a failing cap: stop at once."""
+    spec = _longer_front_armhole(_back_shoulder_6mm_long(truth_spec(tees[0])))
+    failing = {seam_name(s) for s in check_seams(spec) if not s.ok}
+    assert failing == {"front.shoulder~back.shoulder", CAP}
+    out, log = adjust_loop(client, spec)
+    assert client.calls == 0 and [r["source"] for r in log] == ["initial"]
+    with pytest.raises(SeamCheckFailed, match=r"front\.shoulder~back\.shoulder"):
+        require_seams_ok(out, log)
 
 
 def test_req_sew_03_cap_that_cannot_reach_range_fails_loudly(tees, client):
@@ -356,6 +367,18 @@ def test_req_sew_03_budget_cache_policy_errors_propagate(tees, client):
     for err in (BudgetExceeded("over"), CacheMiss("miss"), PolicyViolation("no")):
         with pytest.raises(type(err)):
             adjust_loop(_FailingClient(client, err), spec)
+
+
+def test_req_rsn_03_rejected_request_stops_the_seam_loop(tees, tmp_path):
+    """REQ-API-06: a mocked HTTP 400 is not a skipped answer: it propagates after one call."""
+    from sewtrace.api.client import ApiRequestRejected, HttpError
+    from test_api_client import FakeTransport
+    transport = FakeTransport(HttpError(400, "unknown parameter"))
+    real = MetaClient(Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", config=get_config(),
+                               ledger_path=tmp_path / "ledger.csv"), transport=transport, sleep=lambda s: None)
+    with pytest.raises(ApiRequestRejected):
+        adjust_loop(real, _longer_front_armhole(truth_spec(tees[0])))
+    assert len(transport.calls) == 1
 
 
 def test_seam_log_marks_underarm_pair_equal_by_construction(tees, client):

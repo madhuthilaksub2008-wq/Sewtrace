@@ -73,6 +73,14 @@ front_neck_depth_min_mm = 15.0   # accepted range for the inferred depths (neck 
 front_neck_depth_max_mm = 120.0
 back_neck_depth_min_mm = 5.0
 back_neck_depth_max_mm = 60.0
+# The front outline in a flat-lay photo follows the BACK neckline (the back panel shows through
+# the neck opening), so the front neck depth is not measured. NEEDS USER CONFIRMATION (both values):
+# an answer is rejected when front depth < back depth + front_minus_back_min_mm. The fallback (no
+# usable model answer, REQ-RSN-03) uses back depth + fallback_front_minus_back_mm. The five
+# synthetic tees differ by 38 to 50 mm. 10 mm only rejects a front that is plainly not deeper;
+# 40 mm is the middle of that spread and well inside the accepted front range.
+front_minus_back_min_mm = 10.0
+fallback_front_minus_back_mm = 40.0
 
 [seam]                     # SPEC 7.6.1, mm
 shoulder_tol_mm = 1.0
@@ -95,6 +103,11 @@ chest_drop_mm = 25.0       # chest is measured this far below the underarm point
 
 [proof]
 gap_tolerance_mm = 3.0     # REQ-VER-03
+# Information check, not a gate: the measured neck gap should equal (front depth - back depth)
+# of the pattern. A difference above this is flagged. 5 mm is the gap tolerance plus the 2 mm
+# tape repeat limit of SPEC 10.3, since the neck gap is a mean over a curve the mask rounds.
+# NEEDS USER CONFIRMATION.
+neck_gap_tolerance_mm = 5.0
 # The paper is a half panel with its fold on the t-shirt centre (SPEC 9.4). The fold
 # edge is not a cut edge, so it is left out of the gap, and each paper point is
 # compared with the body edge on its own side of the fold only.
@@ -107,6 +120,10 @@ centre_margin_mm = 10.0    # body edge this far past the fold line still counts 
 tolerance_mm = 1.0          # REQ-SCL-03: reject a photo whose marker error is more than this
 min_grid_found = 0.9       # REQ-SCL-03: reject a photo if fewer of the marker grid edge points are found
 error_percentile = 95      # marker error is this percentile of the grid residuals
+
+[measure]
+neck_fit_mm = 12.0         # arc length from the neck point over which the neck curve is fitted
+neck_search_mm = 15.0      # how far from the neck end of the shoulder line the neck point is searched
 
 [ground_truth]
 repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third

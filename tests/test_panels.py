@@ -211,7 +211,7 @@ def test_req_rsn_03_05_side_seam_moved_2mm_is_rejected_retried_then_fallback(tee
     assert [h["result"] for h in history] == ["retry", "fallback"]
     assert any("back.side" in p for p in history[0]["problems"])
     assert client.calls == 2  # exactly one retry
-    assert spec == draft
+    assert spec == panels.fallback_spec(draft)
 
 
 def test_infer_panels_mock_valid_and_cached(tees, client):
@@ -242,7 +242,7 @@ def test_req_rsn_03_retries_then_falls_back(tees, client, monkeypatch):
     history = []
     spec = infer_panels(client, photo_set(tee), draft, {**meas(tee), "chest_width": 1.0}, history=history)
     assert [h["result"] for h in history] == ["retry", "fallback"]
-    assert spec == draft
+    assert spec == panels.fallback_spec(draft)
 
 
 def test_validate_catches_self_intersection_and_missing_panel(tees):
@@ -302,7 +302,7 @@ def test_req_rsn_06_failed_model_call_is_a_rejected_attempt_then_retry(tees, cli
 
     dead = _FailingClient(client, ApiError("cut off"), ApiError("not JSON"))
     history = []
-    assert infer_panels(dead, photo_set(tee), draft, meas(tee), history=history) is draft
+    assert infer_panels(dead, photo_set(tee), draft, meas(tee), history=history) == panels.fallback_spec(draft)
     assert [h["result"] for h in history] == ["retry", "fallback"]
 
 
@@ -316,3 +316,115 @@ def test_req_rsn_03_budget_cache_and_policy_errors_propagate(tees, client):
         with pytest.raises(type(err)):
             infer_panels(flaky, photo_set(tee), draft, meas(tee))
         assert flaky.reason_calls == 1
+
+
+# ---- front neck depth (REQ-RSN-03, REQ-RSN-04, SPEC 10.1) --------------------------------
+
+def measured_as_photographed(tee_dir: Path) -> list:
+    """Like measured(), but the front outline is the one the mask shows: the BACK neckline."""
+    args = measured(tee_dir)
+    photos = json.loads((tee_dir / "truth.json").read_text())["photos"]
+    args[0] = Outline(points=[tuple(p) for p in photos["front"]["visible_half_outline_mm"]])
+    return args
+
+
+def _params(tee_dir: Path) -> dict:
+    return json.loads((tee_dir / "truth.json").read_text())["params"]
+
+
+def test_req_rsn_04_photographed_draft_has_front_depth_equal_to_back_depth(tees):
+    """The premise: from the photo the draft front neck is as shallow as the back neck."""
+    draft = draft_spec(*measured_as_photographed(tees[0]))
+    assert neck_depth_mm(draft.panel("front")) == pytest.approx(neck_depth_mm(draft.panel("back")), abs=0.1)
+
+
+def test_req_rsn_03_04_mock_front_neck_depth_is_near_truth(tees, client):
+    """SPEC 10.1: on a synthetic tee the mock model gives the true front depth (within 3 mm)."""
+    for tee in tees:
+        draft = draft_spec(*measured_as_photographed(tee))
+        history: list[dict] = []
+        spec = infer_panels(client, photo_set(tee), draft, meas(tee), history=history)
+        assert history[-1]["result"] == "accepted"
+        assert neck_depth_mm(spec.panel("front")) == pytest.approx(_params(tee)["front_neck_depth"], abs=3.0)
+        assert neck_depth_mm(spec.panel("back")) == pytest.approx(_params(tee)["back_neck_depth"], abs=1.0)
+
+
+def test_req_rsn_03_mock_does_not_read_truth_of_a_non_synthetic_photo(tees, client, tmp_path):
+    """The truth is only for photos marked "synthetic": true. Otherwise the mock gives the default depth."""
+    import shutil
+    copy = tmp_path / "real_looking"
+    shutil.copytree(tees[0], copy)
+    truth = json.loads((copy / "truth.json").read_text())
+    (copy / "truth.json").write_text(json.dumps({**truth, "synthetic": False}))
+    draft = draft_spec(*measured_as_photographed(copy))
+    spec = infer_panels(client, photo_set(copy), draft, meas(copy))
+    expected = panels.default_front_depth_mm(neck_depth_mm(draft.panel("back")))
+    assert neck_depth_mm(spec.panel("front")) == pytest.approx(expected, abs=1e-6)
+    assert abs(expected - truth["params"]["front_neck_depth"]) > 1.0  # it did not copy the truth
+
+
+def test_req_rsn_03_fallback_front_neck_is_deeper_than_back(tees, client, monkeypatch):
+    """The fallback is not the draft: front depth = back depth + config offset, measured edges unchanged."""
+    cfg = get_config().inference
+    tee = tees[0]
+    draft = draft_spec(*measured_as_photographed(tee))
+    monkeypatch.setattr(panels, "_mock_answer", lambda d: {"notes": "garbage"})
+    history: list[dict] = []
+    spec = infer_panels(client, photo_set(tee), draft, meas(tee), history=history)
+    assert [h["result"] for h in history] == ["retry", "fallback"]
+    front, back = neck_depth_mm(spec.panel("front")), neck_depth_mm(spec.panel("back"))
+    assert front > back + cfg.front_minus_back_min_mm
+    assert front == pytest.approx(back + cfg.fallback_front_minus_back_mm, abs=1e-6)
+    assert front > neck_depth_mm(draft.panel("front")) + 10.0
+    assert validate_spec(spec, draft) == [] and all(s.ok for s in spec.seams)
+    assert spec == panels.fallback_spec(draft)
+
+
+def test_req_rsn_04_front_not_deeper_than_back_is_rejected(tees):
+    """An answer with front depth <= back depth (or less than front_minus_back_min_mm deeper) is rejected."""
+    cfg = get_config().inference
+    draft = draft_spec(*measured(tees[0]))
+    answer = panels._mock_answer(draft)
+    assert apply_answer(answer, draft)[1] == []
+    for front in (answer["back_neck_depth_mm"] + 5.0, answer["back_neck_depth_mm"],
+                  answer["back_neck_depth_mm"] + cfg.front_minus_back_min_mm - 0.1):
+        spec, problems = apply_answer({**answer, "front_neck_depth_mm": front}, draft)
+        assert spec is None and "deeper than back_neck_depth_mm" in problems[0], front
+    exact = answer["back_neck_depth_mm"] + cfg.front_minus_back_min_mm
+    assert apply_answer({**answer, "front_neck_depth_mm": exact}, draft)[0] is not None
+
+
+def test_req_rsn_04_prompt_gives_no_draft_value_for_the_front_neck(tees):
+    """The prompt must not anchor the model on the back neckline depth for the front neck."""
+    draft = draft_spec(*measured_as_photographed(tees[0]))
+    front_line = next(ln for ln in build_prompt(draft, meas(tees[0])).splitlines() if ln.startswith("1. "))
+    assert "Draft" not in front_line
+    assert f"{neck_depth_mm(draft.panel('front')):.1f}" not in front_line
+    assert f"{get_config().inference.front_minus_back_min_mm:g} mm deeper" in front_line
+
+
+def _real_client_with_400(tmp_path):
+    from sewtrace.api.client import HttpError
+    from test_api_client import FakeTransport
+    transport = FakeTransport(HttpError(400, "unknown parameter reasoning_effort"))
+    settings = Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "ledger.csv")
+    return MetaClient(settings, transport=transport, sleep=lambda s: None), transport
+
+
+def test_req_rsn_03_http_400_is_not_a_bad_answer(tees, tmp_path):
+    """REQ-RSN-03, REQ-API-06: a mocked 400 stops the run (ApiRequestRejected), with one call and no fallback."""
+    from sewtrace.api.client import ApiRequestRejected
+    client, transport = _real_client_with_400(tmp_path)
+    draft = draft_spec(*measured_as_photographed(tees[0]))
+    with pytest.raises(ApiRequestRejected, match="400"):
+        infer_panels(client, photo_set(tees[0]), draft, meas(tees[0]))
+    assert len(transport.calls) == 1
+
+
+def test_req_rsn_03_request_rejected_propagates_from_the_loop(tees, client):
+    from sewtrace.api.client import ApiRequestRejected
+    draft = draft_spec(*measured(tees[0]))
+    flaky = _FailingClient(client, ApiRequestRejected("HTTP 400"))
+    with pytest.raises(ApiRequestRejected):
+        infer_panels(flaky, photo_set(tees[0]), draft, meas(tees[0]))
+    assert flaky.reason_calls == 1

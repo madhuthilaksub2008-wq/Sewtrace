@@ -30,7 +30,7 @@ from scipy.spatial import cKDTree
 
 from sewtrace.api.client import MetaClient
 from sewtrace.config import get_config
-from sewtrace.types import Outline, Point
+from sewtrace.types import Outline, PanelSpec, Point
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography
 
@@ -51,10 +51,39 @@ class ProofResult(BaseModel):
     # front neck depth minus back neck depth, not a cutting error.
     neck_points_mm: list[Point] = []
     neck_distances_mm: list[float] = []
+    # What the neck gap should be for the pattern that was cut (from its spec), if known.
+    expected_neck_gap_mm: float | None = None
+    neck_gap_tol_mm: float | None = None
 
     @property
     def neck_mean_mm(self) -> float | None:
         return float(np.mean(self.neck_distances_mm)) if self.neck_distances_mm else None
+
+    @property
+    def neck_gap_difference_mm(self) -> float | None:
+        """Measured minus expected neck gap, or None when either is missing."""
+        if self.neck_mean_mm is None or self.expected_neck_gap_mm is None:
+            return None
+        return self.neck_mean_mm - self.expected_neck_gap_mm
+
+    @property
+    def neck_gap_flagged(self) -> bool:
+        """True when the measured neck gap differs from the expected one by more than
+        ``proof.neck_gap_tolerance_mm``: the neck depths on the paper are not those of the spec."""
+        diff = self.neck_gap_difference_mm
+        return diff is not None and self.neck_gap_tol_mm is not None and abs(diff) > self.neck_gap_tol_mm
+
+
+def expected_neck_gap_mm(spec: PanelSpec, step_mm: float = 2.0) -> float:
+    """Mean gap between the spec's front neck curve and its back neck curve, in mm.
+
+    On a front flat-lay the tee mask follows the back neckline while the paper is cut on the
+    front neckline, so this is the neck gap a correct proof shows. Both curves share the neck
+    point and the neck width, so no alignment is needed. Depends on both neck depths."""
+    front, back = (spec.panel(n).edge_points("neck") for n in ("front", "back"))
+    line = shapely.LineString(front)
+    samples = shapely.line_interpolate_point(line, np.arange(0, line.length, step_mm))
+    return float(np.mean(shapely.distance(samples, shapely.LineString(back))))
 
 
 def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
@@ -172,6 +201,7 @@ def gap_result(
     step_mm: float = 2.0,
     neck_points: np.ndarray | None = None,
     neck_distances: np.ndarray | None = None,
+    expected_neck: float | None = None,
 ) -> ProofResult:
     tol_mm = get_config().proof.gap_tolerance_mm if tol_mm is None else tol_mm
     return ProofResult(
@@ -186,6 +216,8 @@ def gap_result(
         step_mm=step_mm,
         neck_points_mm=[] if neck_points is None else [(float(x), float(y)) for x, y in neck_points],
         neck_distances_mm=[] if neck_distances is None else [float(d) for d in neck_distances],
+        expected_neck_gap_mm=expected_neck,
+        neck_gap_tol_mm=get_config().proof.neck_gap_tolerance_mm,
     )
 
 
@@ -195,8 +227,12 @@ def verify_proof(
     homography: Homography,
     tol_mm: float | None = None,
     step_mm: float = 2.0,
+    spec: PanelSpec | None = None,
 ) -> ProofResult:
-    """Gap between the paper edge (fold edge excluded) and the tee body edge on a proof photo."""
+    """Gap between the paper edge (fold edge excluded) and the tee body edge on a proof photo.
+
+    Pass the ``spec`` of the pattern that was cut to get the expected neck gap (from its front
+    and back neck depths) next to the measured one."""
     prompts = client.config.sam.prompts
     paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
     garment = mask_outline_mm(client.segment(photo, prompts.garment), homography)
@@ -204,7 +240,8 @@ def verify_proof(
     fold = find_fold_edge(paper, body.array())
     points, distances, neck_pts, neck_dist = edge_gaps_split(
         paper, body.array(), step_mm, hidden=armhole, fold=fold, neck=neck)
-    return gap_result(points, distances, tol_mm, fold, step_mm, neck_pts, neck_dist)
+    expected_neck = None if spec is None else expected_neck_gap_mm(spec, step_mm)
+    return gap_result(points, distances, tol_mm, fold, step_mm, neck_pts, neck_dist, expected_neck)
 
 
 def overlay_image(photo: str | Path, result: ProofResult, homography: Homography, out_path: str | Path) -> Path:

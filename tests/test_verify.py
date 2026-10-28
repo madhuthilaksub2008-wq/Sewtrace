@@ -217,3 +217,62 @@ def test_req_ver_01_cli_verify_marker_not_found_names_photo(tmp_path):
     with pytest.raises(SystemExit) as exc:
         cli.main(["verify", str(blank)])
     assert "blank.jpg" in str(exc.value.code) and "marker" in str(exc.value.code)
+
+
+# ---- expected neck gap from the spec (REQ-VER-02) ------------------------------------
+
+def _spec_with_front_depth(tee_dir: Path, depth_mm: float):
+    from sewtrace.mock.fixtures import truth_spec
+    from sewtrace.reason.reshape import with_neck_depth
+    spec = truth_spec(tee_dir)
+    front = with_neck_depth(spec.panel("front"), depth_mm)
+    return spec.model_copy(update={"panels": [front if p.name == "front" else p for p in spec.panels]})
+
+
+def test_req_ver_02_expected_neck_gap_matches_the_synthetic_truth(proofs, client):
+    """The expected neck gap from the spec's two neck curves matches the measured one (flag off)
+    for the right spec, and the gap flag is on for a spec whose front neck is as shallow as the back."""
+    from sewtrace.mock.fixtures import truth_spec
+    from sewtrace.vision.verify import expected_neck_gap_mm
+    tee_dir, truth = proofs
+    spec = truth_spec(tee_dir)
+    assert expected_neck_gap_mm(spec) == pytest.approx(truth["perfect"]["expected_neck_gap_mean_mm"], abs=2.0)
+    tol = get_config().proof.neck_gap_tolerance_mm
+    for name in ("perfect", "scaled"):
+        photo = tee_dir / f"{name}.jpg"
+        r = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))), spec=spec)
+        print(f"{name}: neck gap measured {r.neck_mean_mm:.1f}, expected {r.expected_neck_gap_mm:.1f} mm")
+        assert abs(r.neck_gap_difference_mm) < tol and not r.neck_gap_flagged
+    shallow = _spec_with_front_depth(tee_dir, 22.0)  # the bug of SPEC 10.1: front depth about the back depth
+    photo = tee_dir / "perfect.jpg"
+    r = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))), spec=shallow)
+    assert r.neck_gap_flagged and abs(r.neck_gap_difference_mm) > tol
+    r = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))))
+    assert r.expected_neck_gap_mm is None and not r.neck_gap_flagged  # no spec: nothing to compare
+
+
+def test_req_ver_02_cli_verify_prints_expected_neck_gap_and_flags_a_difference(proofs, tmp_path, monkeypatch, capsys):
+    from sewtrace import cli
+    from sewtrace.mock.fixtures import truth_spec
+
+    tee_dir, _ = proofs
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setenv("SEWTRACE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)  # no out/<folder>/spec.json to find
+    cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png")])
+    assert "expected: unknown" in capsys.readouterr().out
+    good, bad = tmp_path / "good.json", tmp_path / "bad.json"
+    good.write_text(truth_spec(tee_dir).model_dump_json())
+    bad.write_text(_spec_with_front_depth(tee_dir, 22.0).model_dump_json())
+    cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png"), "--spec", str(good)])
+    text = capsys.readouterr().out
+    assert "neck gap expected from the spec" in text and "WARNING" not in text
+    cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png"), "--spec", str(bad)])
+    assert "WARNING: the neck gap differs from the spec" in capsys.readouterr().out
+    # Default lookup: out/<photo folder name>/spec.json, the folder of `sewtrace run`.
+    found = tmp_path / "out" / tee_dir.name
+    found.mkdir(parents=True)
+    (found / "spec.json").write_text(good.read_text())
+    cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png")])
+    assert "neck gap expected from the spec" in capsys.readouterr().out

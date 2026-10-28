@@ -97,12 +97,16 @@ class InferenceConfig(_Strict):
     front_neck_depth_max_mm: float = Field(gt=0)
     back_neck_depth_min_mm: float = Field(gt=0)
     back_neck_depth_max_mm: float = Field(gt=0)
+    front_minus_back_min_mm: float = Field(gt=0)
+    fallback_front_minus_back_mm: float = Field(gt=0)
 
     @model_validator(mode="after")
     def _ranges(self) -> InferenceConfig:
         if (self.front_neck_depth_min_mm > self.front_neck_depth_max_mm
                 or self.back_neck_depth_min_mm > self.back_neck_depth_max_mm):
             raise ValueError("a neck depth minimum is more than its maximum")
+        if self.fallback_front_minus_back_mm < self.front_minus_back_min_mm:
+            raise ValueError("fallback_front_minus_back_mm is less than front_minus_back_min_mm")
         return self
 
 
@@ -134,6 +138,12 @@ class ProofConfig(_Strict):
     fold_min_inset_mm: float = Field(gt=0)
     fold_exclude_mm: float = Field(gt=0)
     centre_margin_mm: float = Field(ge=0)
+    neck_gap_tolerance_mm: float = Field(gt=0)
+
+
+class MeasureConfig(_Strict):
+    neck_fit_mm: float = Field(gt=0)
+    neck_search_mm: float = Field(gt=0)
 
 
 class MarkerConfig(_Strict):
@@ -156,6 +166,7 @@ class AppConfig(_Strict):
     seam: SeamConfig
     pattern: PatternConfig
     proof: ProofConfig
+    measure: MeasureConfig
     marker: MarkerConfig
     ground_truth: GroundTruthConfig
 

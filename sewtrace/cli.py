@@ -24,13 +24,17 @@ def main(argv: list[str] | None = None) -> None:
     v = sub.add_parser("verify", help="proof photo (paper on t-shirt) -> edge gap and overlay")
     v.add_argument("photo")
     v.add_argument("--out", default=None, help="overlay image (default: <photo>.overlay.png)")
+    v.add_argument("--spec", default=None,
+                   help="spec.json of the cut pattern (default: out/<photo folder name>/spec.json, "
+                        "the folder of 'sewtrace run <that folder>'); gives the expected neck gap")
     args = ap.parse_args(argv)
     from sewtrace.api.client import ApiError
     from sewtrace.pipeline import ContourFailed
     try:
         _dispatch(args)
     except (ApiError, ContourFailed, NotImplementedError) as err:
-        # Budget stop, offline cache miss, timeout, policy stop, unwired real endpoint: no traceback.
+        # Budget stop, offline cache miss, timeout, policy stop, rejected request, unwired real
+        # endpoint: no traceback.
         _fail(f"{args.cmd}: {err}")
 
 
@@ -51,10 +55,16 @@ def _dispatch(args: argparse.Namespace) -> None:
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
+        for row in result.seam_log:
+            if row["source"] != "pair_fix":
+                continue
+            for change in row["applied"]:  # a measured edge was changed by the pair fix (REQ-SEW-03)
+                print(f"seam fix: {change['panel']}.{change['edge']} {change['from_mm']:.2f} mm -> "
+                      f"{change['to_mm']:.2f} mm (pair {change['pair']})")
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
     elif args.cmd == "verify":
-        _verify(args.photo, args.out)
+        _verify(args.photo, args.out, args.spec)
     elif args.cmd == "eval":
         from sewtrace.eval import evaluate, tee_failed
         try:
@@ -72,10 +82,20 @@ def _fail(message: object) -> NoReturn:
     sys.exit(1)
 
 
-def _verify(photo: str, out: str | None) -> None:
+def _find_spec(photo: Path, spec_arg: str | None) -> Path | None:
+    """The spec of the cut pattern: --spec, else the default output folder of ``run`` for the
+    photo's folder. None when there is none (the neck gap then has no expected value)."""
+    if spec_arg:
+        return Path(spec_arg)
+    guess = Path("out") / photo.resolve().parent.name / "spec.json"
+    return guess if guess.is_file() else None
+
+
+def _verify(photo: str, out: str | None, spec_arg: str | None = None) -> None:
     """SPEC 9.4 step 5. Masks come from MetaClient (mock or cache by the usual rules)."""
     import cv2
 
+    from sewtrace.types import PanelSpec
     from sewtrace.api.client import MetaClient, SegmentationFailed
     from sewtrace.vision.marker import MarkerNotFound, MarkerRejected, photo_homography
     from sewtrace.vision.verify import overlay_image, verify_proof
@@ -88,8 +108,15 @@ def _verify(photo: str, out: str | None) -> None:
         homography = photo_homography(image, f"proof photo {photo}")
     except (MarkerNotFound, MarkerRejected) as err:
         sys.exit(f"error: {err}")
+    spec = None
+    spec_path = _find_spec(path, spec_arg)
+    if spec_path is not None:
+        try:
+            spec = PanelSpec.model_validate_json(spec_path.read_text())
+        except (OSError, ValueError) as err:  # pydantic ValidationError is a ValueError
+            sys.exit(f"error: spec {spec_path} cannot be read: {err}. Run 'sewtrace run' again or fix --spec.")
     try:
-        result = verify_proof(path, MetaClient(), homography)
+        result = verify_proof(path, MetaClient(), homography, spec=spec)
     except (ValueError, SegmentationFailed) as err:
         sys.exit(f"error: {photo}: {err}")
     out_path = overlay_image(path, result, homography, out or path.with_suffix(".overlay.png"))
@@ -98,7 +125,16 @@ def _verify(photo: str, out: str | None) -> None:
     if result.neck_mean_mm is not None:
         print(f"neck (information, not in the mean): {len(result.neck_distances_mm)} points, "
               f"mean gap {result.neck_mean_mm:.1f} mm. The photo shows the back neckline "
-              "through the neck opening, so this is about front depth minus back depth.")
+              "through the neck opening, so it depends on front depth minus back depth.")
+        if result.expected_neck_gap_mm is None:
+            print("neck gap expected: unknown (no spec.json found; pass --spec path)")
+        else:
+            diff = result.neck_gap_difference_mm
+            print(f"neck gap expected from the spec: {result.expected_neck_gap_mm:.1f} mm, "
+                  f"difference {diff:+.1f} mm")
+            if result.neck_gap_flagged:
+                print(f"WARNING: the neck gap differs from the spec by more than {result.neck_gap_tol_mm:g} mm. "
+                      "Check the neck depths of the cut paper against spec.json.")
     print(f"overlay {out_path}")
 
 

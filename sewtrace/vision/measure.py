@@ -54,25 +54,38 @@ def _corner(into: np.ndarray, out_of: np.ndarray, reach_in: float = 8.0, reach_o
     return c1 + t[0] * d1
 
 
-NECK_FIT_MM = 12.0  # arc length from the neck point over which the neck curve is fitted
-NECK_SEARCH_MM = 15.0  # how far along the shoulder line the neck point is searched
-
-
 def _neck_point(neck: np.ndarray, shoulder: np.ndarray) -> np.ndarray:
     """Neck point: where the neck curve meets the shoulder line.
 
     A straight tangent is biased on a tight neck curve (a back neckline seen through the
     neck opening on a front photo has a radius of about 7 mm at the neck point), so the
     neck curve is fitted as x = f(y), a parabola, and intersected with the shoulder line.
-    Falls back to the tangent corner when the fit is not possible."""
-    run = _near_end(neck, 1.0, NECK_FIT_MM)
-    c, d = _fit_line(_near_end(shoulder[::-1], 1.0, 30.0))
-    if len(run) < 4 or np.ptp(run[:, 1]) < 1.0:
+    Falls back to the tangent corner when the fit is not possible or the best intersection
+    lies at the edge of the search window (then the window did not bracket it)."""
+    point = _neck_point_fit(neck, shoulder)
+    if point is None:
         return _corner(neck, shoulder, reach_in=4.0, reach_out=30.0)
+    return point
+
+
+def _neck_point_fit(neck: np.ndarray, shoulder: np.ndarray) -> np.ndarray | None:
+    """Parabola fit of the neck curve against the shoulder line; None if it is not usable.
+
+    The search runs +/- ``measure.neck_search_mm`` along the shoulder line from the neck end of
+    the shoulder edge (the line is fitted over its first 30 mm, so its centroid is about 15 mm
+    away from the neck point and is not a good centre)."""
+    cfg = get_config().measure
+    run = _near_end(neck, 1.0, cfg.neck_fit_mm)
+    if len(run) < 4 or np.ptp(run[:, 1]) < 1.0:
+        return None
+    c, d = _fit_line(_near_end(shoulder[::-1], 1.0, 30.0))
+    start = c + float((shoulder[0] - c) @ d) * d  # neck end of the shoulder edge, on the fitted line
     fit = np.polyfit(run[:, 1], run[:, 0], 2)
-    t = np.linspace(-NECK_SEARCH_MM, NECK_SEARCH_MM, 6001)
-    line = c + t[:, None] * d
+    t = np.linspace(-cfg.neck_search_mm, cfg.neck_search_mm, 6001)
+    line = start + t[:, None] * d
     t_best = int(np.argmin(np.abs(np.polyval(fit, line[:, 1]) - line[:, 0])))
+    if t_best in (0, len(t) - 1):
+        return None
     return np.array([np.polyval(fit, line[t_best, 1]), line[t_best, 1]])
 
 

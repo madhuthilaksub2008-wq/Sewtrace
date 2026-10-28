@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from sewtrace.api.client import (
     ApiError,
+    ApiRequestRejected,
     ApiTimeout,
     BudgetExceeded,
     CacheMiss,
@@ -205,12 +206,22 @@ def test_req_api_06_three_5xx_then_failure(tmp_path):
     assert not client.ledger_path.exists()
 
 
-def test_req_api_06_other_4xx_is_not_retried(tmp_path):
-    transport = FakeTransport(HttpError(400, "bad effort"))
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_req_api_06_other_4xx_is_rejected_not_retried(tmp_path, status):
+    """REQ-API-06, REQ-RSN-03: a refused request is ApiRequestRejected, so callers stop instead of falling back."""
+    transport = FakeTransport(HttpError(status, "bad effort"))
     client, sleeps = _client(tmp_path, transport)
-    with pytest.raises(ApiError, match="400"):
+    with pytest.raises(ApiRequestRejected, match=str(status)):
         client.reason("p")
     assert len(transport.calls) == 1 and sleeps == []
+    assert not client.ledger_path.exists()
+
+
+def test_req_api_06_429_and_5xx_stay_plain_api_errors(tmp_path):
+    client, _ = _client(tmp_path, FakeTransport(HttpError(429)))
+    with pytest.raises(ApiError) as exc:
+        client.reason("p")
+    assert not isinstance(exc.value, ApiRequestRejected)
 
 
 # ---- timeout (REQ-API-07) --------------------------------------------------------
@@ -470,6 +481,28 @@ def test_req_api_04_missing_ledger_with_empty_or_mock_cache_is_allowed(tmp_path)
     client, _ = _client(tmp_path, FakeTransport(_answer()))
     client.reason("q")
     assert client.ledger_path.exists()
+
+
+def test_req_api_04_missing_ledger_with_real_answers_in_repo_cache_refuses_paid_call(tmp_path, monkeypatch):
+    """REQ-API-04, C-01: a different SEWTRACE_CACHE_DIR must not hide real answers in ROOT/cache."""
+    import sewtrace.api.client as client_module
+    import sewtrace.config as config_module
+
+    repo = tmp_path / "repo"
+    (repo / "cache").mkdir(parents=True)
+    (repo / "cache" / "real-abc.json").write_text("{}")
+    monkeypatch.setattr(config_module, "ROOT", repo)
+    monkeypatch.setattr(client_module, "ROOT", repo)
+    transport = FakeTransport(_answer())
+    settings = Settings(api_key=KEY, mock=False, cache_dir=tmp_path / "other_cache")  # default ledger path
+    client = MetaClient(settings, transport=transport, sleep=lambda s: None)
+    assert client.ledger_path == repo / "data" / "ledger.csv"
+    with pytest.raises(ApiError, match="ledger .* is missing"):
+        client.reason("p")
+    assert transport.calls == []
+    # A ledger path chosen by a test is not tied to the repo cache.
+    own = Settings(api_key=KEY, mock=False, cache_dir=tmp_path / "c2", ledger_path=tmp_path / "l" / "ledger.csv")
+    assert MetaClient(own, transport=FakeTransport(_answer()), sleep=lambda s: None).reason("p") == {"ok": 1}
 
 
 # ---- timeout bills the worst case (REQ-API-03, REQ-API-04, REQ-API-07) -----------
