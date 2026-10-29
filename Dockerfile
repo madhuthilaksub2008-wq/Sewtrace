@@ -17,6 +17,8 @@ WORKDIR /app
 # ledger folder (the ledger path is fixed by config.toml, not by an environment variable).
 COPY pyproject.toml README.md ./
 COPY sewtrace ./sewtrace
+# Recorded demo bundles, with their cache files, so /demo works in the image (docs/DEMO.md).
+COPY demo ./demo
 RUN pip install -e . \
     && if [ "$INSTALL_REAL" = "1" ]; then pip install -e '.[real]'; fi \
     && mkdir -p data/cache \

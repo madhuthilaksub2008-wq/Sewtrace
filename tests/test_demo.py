@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import socket
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -353,3 +354,156 @@ def test_gps_exif_is_detected_so_a_bundle_is_not_published_with_a_location(tee, 
     without.write_bytes(_jpeg_with_exif([0x0112], order))
     assert demo.has_gps_exif(with_gps) and not demo.has_gps_exif(without)
     assert not demo.has_gps_exif(tee / "front.jpg")  # a plain JPEG
+
+
+# ---- review fixes: git tracking, GPS, eval data source, re-record churn -----------------------------
+
+def _gps_jpeg(source: Path) -> bytes:
+    """A valid JPEG with a GPS block: the EXIF segment goes right after SOI."""
+    data = source.read_bytes()
+    return data[:2] + _jpeg_with_exif([0x8825])[2:-2] + data[2:]
+
+
+def _mock_client(tmp_path) -> MetaClient:
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "l.csv"))
+
+
+def test_c07_gps_photo_is_refused_before_any_call_and_names_the_photo(tee, tmp_path):
+    """C-07: a photo with a GPS block stops the recording before the spend prompt and before the pipeline."""
+    import shutil
+    folder = tmp_path / "tee1"
+    shutil.copytree(tee, folder)
+    (folder / "back.jpg").write_bytes(_gps_jpeg(folder / "back.jpg"))
+    client = _mock_client(tmp_path)
+    with pytest.raises(demo.DemoError, match=r"back\.jpg.*GPS"):
+        demo.record(folder, "g1", client=client, demo_dir=tmp_path / "demo", eval_csv=None)
+    assert client.calls == 0 and not (tmp_path / "demo").exists()
+
+    def transport(*args, **kwargs):
+        raise AssertionError("a paid call was made")
+
+    real = MetaClient(Settings(api_key=SECRET, mock=False, cache_dir=tmp_path / "c2", ledger_path=tmp_path / "l2.csv"),
+                      transport=transport, stream_transport=transport)
+    with pytest.raises(demo.DemoError, match="GPS"):  # REAL mode: no --yes-spend prompt is reached
+        demo.record(folder, "g2", client=real, demo_dir=tmp_path / "demo")
+    assert real.calls == 0
+
+
+def test_c07_proof_photo_with_gps_is_refused_and_allow_gps_proceeds(tee, tmp_path):
+    import shutil
+    folder = tmp_path / "tee1"
+    shutil.copytree(tee, folder)
+    (folder / "proof.jpg").write_bytes(_gps_jpeg(folder / "proof.jpg"))
+    with pytest.raises(demo.DemoError, match=r"proof\.jpg"):
+        demo.record(folder, "g1", client=_mock_client(tmp_path), demo_dir=tmp_path / "demo", eval_csv=None)
+    (folder / "front.jpg").write_bytes(_gps_jpeg(folder / "front.jpg"))
+    out = demo.record(folder, "g1", client=_mock_client(tmp_path), demo_dir=tmp_path / "demo", eval_csv=None,
+                      allow_gps=True)
+    assert (out / "manifest.json").is_file()
+
+
+def _write_eval_csv(path: Path, synthetic: str | None) -> Path:
+    cols = ["garment", "run", *[f"err_{k}" for k in demo.MEASUREMENT_KEYS], "mean_abs_err", "seams_ok", "model_calls"]
+    row = ["tee1", "1", "0.1", "-0.2", "0.3", "0.0", "0.5", "-0.1", "0.2", "True", "0"]
+    if synthetic is not None:
+        cols.append("synthetic")
+        row.append(synthetic)
+    path.write_text(",".join(cols + ["error"]) + "\n" + ",".join(row + [""]) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(("flag", "source"), [("True", "synthetic"), ("False", "real"), (None, "unknown")])
+def test_sec_10_1_eval_table_names_its_data_source(tmp_path, flag, source):
+    assert demo.read_eval(_write_eval_csv(tmp_path / "r.csv", flag)).data_source == source
+
+
+def test_sec_10_1_eval_rows_carry_the_synthetic_flag(tee, tmp_path):
+    from sewtrace import eval as eval_mod
+    assert eval_mod.is_synthetic(tee)
+    real = tmp_path / "tee9"
+    real.mkdir()
+    assert not eval_mod.is_synthetic(real)
+    assert "synthetic" in eval_mod.ROW_COLUMNS
+
+
+def test_sec_10_1_truth_json_fallback_is_marked_synthetic(recorded):
+    table = demo.load_bundle("tee1", recorded["root"]).eval
+    assert table.data_source == "synthetic"
+
+
+def test_sec_10_1_real_recording_refuses_a_synthetic_table_before_any_call(tee, tmp_path):
+    def transport(*args, **kwargs):
+        raise AssertionError("a paid call was made")
+
+    real = MetaClient(Settings(api_key=SECRET, mock=False, cache_dir=tmp_path / "c", ledger_path=tmp_path / "l.csv"),
+                      transport=transport, stream_transport=transport)
+    csv_file = _write_eval_csv(tmp_path / "r.csv", "True")
+    with pytest.raises(demo.DemoError, match="allow-synthetic-eval"):
+        demo.record(tee, "real1", client=real, demo_dir=tmp_path / "demo", yes_spend=True, eval_csv=csv_file)
+    assert real.calls == 0 and not (tmp_path / "demo").exists()
+
+
+def test_sec_10_1_real_card_table_rules(tmp_path):
+    synthetic = demo.read_eval(_write_eval_csv(tmp_path / "s.csv", "True"))
+    unknown = demo.read_eval(_write_eval_csv(tmp_path / "u.csv", None))
+    real = demo.read_eval(_write_eval_csv(tmp_path / "r.csv", "False"))
+    assert demo._real_card_table(real, None, False) is real
+    for table in (synthetic, unknown):
+        with pytest.raises(demo.DemoError):
+            demo._real_card_table(table, tmp_path / "x.csv", False)
+        assert demo._real_card_table(table, None, True).data_source == "synthetic"
+
+
+def test_sec_10_1_end_card_shows_the_data_source(recorded):
+    html = (Path(demo.__file__).parent / "web" / "demo.html").read_text()
+    assert "Synthetic t-shirts (best case)" in html and "Real t-shirts" in html
+    assert demo.payload(demo.load_bundle("tee1", recorded["root"]))["eval"]["data_source"] == "synthetic"
+
+
+def test_second_recording_of_the_same_photos_changes_no_file(tee, tmp_path):
+    client = _mock_client(tmp_path)
+    root = tmp_path / "demo"
+    first = demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None)
+    seen = {p.relative_to(first): (p.stat().st_mtime_ns, p.read_bytes()) for p in first.rglob("*") if p.is_file()}
+    demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None, force=True)
+    again = {p.relative_to(first): (p.stat().st_mtime_ns, p.read_bytes()) for p in first.rglob("*") if p.is_file()}
+    assert again.keys() == seen.keys()
+    # The PDF and DXF hold a creation time and the manifest holds this run's call count: they differ by design.
+    volatile = {Path("pattern.pdf"), Path("pattern.dxf"), Path("manifest.json")}
+    assert [k for k in seen if k not in volatile and seen[k] != again[k]] == []  # same bytes, not rewritten
+    assert len(seen) - len(volatile) > 10
+    (first / "stale.txt").write_text("x")
+    demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None, force=True)
+    assert not (first / "stale.txt").exists()
+
+
+def test_manifest_created_is_the_newest_photo_time_not_the_clock(tee, tmp_path):
+    import datetime as dt
+    out = demo.record(tee, "a", client=_mock_client(tmp_path), demo_dir=tmp_path / "demo", eval_csv=None)
+    created = dt.datetime.fromisoformat(demo.load_bundle("a", tmp_path / "demo").manifest.created)
+    newest = max(p.stat().st_mtime for p in tee.glob("*.jpg"))
+    assert abs(created.timestamp() - newest) < 1.0
+    assert out.is_dir()
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    root = Path(demo.__file__).resolve().parent.parent
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        pytest.skip("git is not installed")
+
+
+def test_req_api_08_committed_bundle_has_every_manifest_file_tracked():
+    """REQ-API-08, C-02: a fresh clone must hold the whole bundle, cache files included."""
+    bundle = Path(demo.__file__).resolve().parent.parent / "demo" / "tee1"
+    if _git("rev-parse", "--is-inside-work-tree").returncode != 0 or not (bundle / "manifest.json").is_file():
+        pytest.skip("not a git checkout, or no committed demo bundle")
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    tracked = set(_git("ls-files", "demo/tee1").stdout.split())
+    wanted = {f"demo/tee1/{f}" for f in [*manifest["files"], "manifest.json"]}
+    assert wanted - tracked == set()
+    assert any(f.startswith("demo/tee1/cache/") for f in wanted)
+    cache_file = next(f for f in sorted(wanted) if f.startswith("demo/tee1/cache/"))
+    assert _git("check-ignore", "-q", cache_file).returncode == 1  # 1: not ignored
+    assert _git("check-ignore", "-q", "cache/anything.json").returncode == 0  # the root cache stays ignored

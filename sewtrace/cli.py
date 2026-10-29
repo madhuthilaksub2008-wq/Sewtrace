@@ -44,6 +44,10 @@ def main(argv: list[str] | None = None) -> None:
     rec.add_argument("--eval-csv", default="out/eval/results.csv",
                      help="eval results for the end card (default: out/eval/results.csv, if it exists)")
     rec.add_argument("--demo-dir", default="demo", help="folder of bundles (default: demo)")
+    rec.add_argument("--allow-gps", action="store_true",
+                     help="record photos that have GPS EXIF data (the bundle must never be committed)")
+    rec.add_argument("--allow-synthetic-eval", action="store_true",
+                     help="REAL mode: accept an eval table of synthetic tees; the end card says so")
     play = dsub.add_parser("play", help="serve a recorded bundle with no network and no model call")
     play.add_argument("name")
     play.add_argument("--check", action="store_true", help="only check that the bundle is complete")
@@ -128,7 +132,8 @@ def _demo(args: argparse.Namespace) -> None:
         from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
         try:
             folder = demo.record(args.garment_dir, args.name, yes_spend=args.yes_spend, force=args.force,
-                                 demo_dir=Path(args.demo_dir), eval_csv=Path(args.eval_csv))
+                                 demo_dir=Path(args.demo_dir), eval_csv=Path(args.eval_csv),
+                                 allow_gps=args.allow_gps, allow_synthetic_eval=args.allow_synthetic_eval)
         except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed) as err:
             _fail(err)
         print(f"demo bundle written to {folder}")

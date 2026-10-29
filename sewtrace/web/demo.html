@@ -303,6 +303,11 @@ function buildEnd() {
   txt(g, 90, 205, 46, C.ink, "Error in mm against the ground truth", {"font-weight": 700});
   S.endRows = [];
   const E = D.eval;
+  if (E) {
+    const src = {synthetic: ["Synthetic t-shirts (best case)", C.amber], real: ["Real t-shirts", C.green],
+                 mixed: ["Synthetic and real t-shirts", C.amber]}[E.data_source] || ["Source of the t-shirts unknown", C.amber];
+    txt(g, 1830, 205, 34, src[1], src[0], {"text-anchor": "end", "font-weight": 700});
+  }
   if (!E) { txt(g, 90, 320, 38, C.amber, "No eval results are in this recording. Run: sewtrace eval, then record the demo again."); return; }
   const cols = D.measurement_keys, x0 = 90, cw = 190, first = 300;
   txt(g, x0, 290, 28, C.dim, "tee", {});

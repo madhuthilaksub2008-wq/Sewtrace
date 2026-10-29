@@ -89,7 +89,7 @@ def ground_truth(garment_dir: Path, truth_dir: Path) -> dict[str, float]:
 # One bad tee must not stop the eval. BudgetExceeded and CacheMiss are not here: they abort.
 TEE_ERRORS = (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, ContourFailed)
 ROW_COLUMNS = ["garment", "run", *[f"err_{k}" for k in MEASUREMENT_KEYS], "mean_abs_err",
-               "seams_ok", "model_calls", "error"]
+               "seams_ok", "model_calls", "synthetic", "error"]
 
 
 def _error_text(err: Exception) -> str:
@@ -98,8 +98,14 @@ def _error_text(err: Exception) -> str:
     return f"{type(err).__name__}: {' '.join(str(err).split())}".replace("|", "/")
 
 
+def is_synthetic(garment_dir: Path) -> bool:
+    """True for a tee drawn by the synth command: its truth.json says so. A tape measure tee is real."""
+    truth = garment_dir / "truth.json"
+    return truth.is_file() and json.loads(truth.read_text()).get("synthetic") is True
+
+
 def _row(garment: str, run_no: int, truth: dict[str, float], measurements: dict[str, float] | None,
-         seams_ok: bool, model_calls: int, error: str = "") -> dict:
+         seams_ok: bool, model_calls: int, error: str = "", *, synthetic: bool) -> dict:
     row: dict = {"garment": garment, "run": run_no}
     if measurements is None:
         row.update({f"err_{k}": "" for k in MEASUREMENT_KEYS}, mean_abs_err="")
@@ -107,7 +113,7 @@ def _row(garment: str, run_no: int, truth: dict[str, float], measurements: dict[
         errors = {k: measurements[k] - truth[k] for k in MEASUREMENT_KEYS}
         row.update({f"err_{k}": round(v, 2) for k, v in errors.items()},
                    mean_abs_err=round(sum(abs(v) for v in errors.values()) / len(errors), 2))
-    row.update(seams_ok=seams_ok, model_calls=model_calls, error=error)
+    row.update(seams_ok=seams_ok, model_calls=model_calls, synthetic=synthetic, error=error)
     return row
 
 
@@ -126,6 +132,7 @@ def evaluate(raw_dir: str | Path, out_dir: str | Path, runs: int = 1) -> list[di
     rows = []
     for garment in garments:
         truth = truths[garment.name]
+        synthetic = is_synthetic(garment)
         for i in range(runs):
             calls_before = client.calls
             try:
@@ -134,10 +141,10 @@ def evaluate(raw_dir: str | Path, out_dir: str | Path, runs: int = 1) -> list[di
                 log.error("eval: %s run %d failed: %s", garment.name, i + 1, err)
                 measured = err.measurements if isinstance(err, SeamCheckFailed) else None
                 rows.append(_row(garment.name, i + 1, truth, measured, False,
-                                 client.calls - calls_before, _error_text(err)))
+                                 client.calls - calls_before, _error_text(err), synthetic=synthetic))
                 continue
             rows.append(_row(garment.name, i + 1, truth, result.measurements,
-                             all(s.ok for s in result.spec.seams), result.model_calls))
+                             all(s.ok for s in result.spec.seams), result.model_calls, synthetic=synthetic))
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "results.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=ROW_COLUMNS)

@@ -1,5 +1,6 @@
 {
  "source": "results.csv",
+ "data_source": "synthetic",
  "rows": [
   {
    "garment": "tee1",
@@ -14,7 +15,8 @@
    },
    "mean_abs_err_mm": 0.35,
    "seams_ok": true,
-   "error": ""
+   "error": "",
+   "synthetic": true
   },
   {
    "garment": "tee2",
@@ -29,7 +31,8 @@
    },
    "mean_abs_err_mm": 0.45,
    "seams_ok": true,
-   "error": ""
+   "error": "",
+   "synthetic": true
   },
   {
    "garment": "tee3",
@@ -44,7 +47,8 @@
    },
    "mean_abs_err_mm": 0.31,
    "seams_ok": true,
-   "error": ""
+   "error": "",
+   "synthetic": true
   },
   {
    "garment": "tee4",
@@ -59,7 +63,8 @@
    },
    "mean_abs_err_mm": 0.24,
    "seams_ok": true,
-   "error": ""
+   "error": "",
+   "synthetic": true
   },
   {
    "garment": "tee5",
@@ -74,7 +79,8 @@
    },
    "mean_abs_err_mm": 0.42,
    "seams_ok": true,
-   "error": ""
+   "error": "",
+   "synthetic": true
   }
  ],
  "mean_abs_err_mm": 0.354

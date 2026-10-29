@@ -45,6 +45,7 @@ log = logging.getLogger(__name__)
 
 NOTCH_FRAC = 0.4  # armhole notch, fraction of armhole length up from the underarm
 DOUBLE_NOTCH_GAP_MM = 6.0
+INFER_ATTEMPTS = 2  # model calls in infer_panels before the deterministic fallback (REQ-RSN-03)
 CUTS = {"front": "1 on fold", "back": "1 on fold", "sleeve": "2 on fold"}
 # Edges that must come back exactly as measured. The body fold is compared without its neck end,
 # which moves with the neck depth (the fold meets the neck curve at the inferred depth).
@@ -133,7 +134,7 @@ def infer_panels(
     images = [photos.front, photos.back, photos.sleeve]
     base_prompt = build_prompt(draft, measurements)
     prompt = base_prompt
-    for attempt in (1, 2):
+    for attempt in range(1, INFER_ATTEMPTS + 1):
         calls = client.calls
         try:
             answer = client.reason(prompt, images, mock=lambda: _mock_answer(_mock_basis(draft, photos.front)),
@@ -152,7 +153,7 @@ def infer_panels(
             record["result"] = "accepted"
             log.info("infer_panels: model answer accepted on attempt %d", attempt)
             return spec
-        record["result"] = "retry" if attempt == 1 else "fallback"
+        record["result"] = "retry" if attempt < INFER_ATTEMPTS else "fallback"
         log.warning("infer_panels attempt %d rejected: %s", attempt, problems)
         prompt = base_prompt + (
             "\nYour previous answer was rejected for: " + "; ".join(problems[:10])

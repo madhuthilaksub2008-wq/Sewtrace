@@ -28,23 +28,31 @@ A bundle never holds the API key or the ledger. A test checks this.
 
 Before you commit a real bundle:
 
-1. Read the output of `sewtrace demo record`. A line that starts with `WARNING` and names GPS data means that a photo has a location. Do not commit that bundle. Turn off location tags in the camera app and take the photo again.
+1. Know that `sewtrace demo record` stops if a photo has GPS data in its EXIF header. It stops before any call and names the photo. Turn off location tags in the camera app and take the photo again. Use `--allow-gps` only for a bundle that you will never commit.
 2. Make sure that no person or face is in a photo.
 3. Run `du -sh demo/<name>`. Keep the bundle under 25 MB. If it is larger, take the photos at a lower resolution and record again.
 
-The ledger `data/ledger.csv` and the folder `cache/` stay out of git, as before. Copy the bundle to a USB stick as a second backup.
+The ledger `data/ledger.csv` and the folder `cache/` in the repository root stay out of git. The folder `demo/<name>/cache/` is part of the bundle and goes into git. A test checks this. Copy the bundle to a USB stick as a second backup.
 
 ## Record the demo before Nov 3
 
-1. Check the budget. Read the ledger total. Stop if it is near a checkpoint in SPEC 8.3.
-2. Run the eval, so that the end card has its error table. This uses the synthetic tees and costs nothing in mock mode: `python -m sewtrace.cli eval`.
-3. Put the proof photo in the garment folder as `proof.jpg`.
-4. Record in mock mode first. This is free: `python -m sewtrace.cli demo record data/synth/tee1`.
-5. Open the page and watch the whole demo: `python -m sewtrace.cli demo play tee1`.
-6. For real photos, ask the project owner to approve the cost. Then run the command with the worst-case cost shown: `python -m sewtrace.cli demo record data/raw/tee1 --name real1 --yes-spend`.
-7. Run it once. If a call fails, read the error before you run it again. The cache keeps every answer that was paid for, so a second run does not pay twice.
-8. Use `--force` to replace a bundle of the same name. Without it, the command stops.
-9. Commit the bundle if the checks above pass.
+1. Check the budget.
+2. Read the ledger total. Stop if it is near a checkpoint in SPEC 8.3.
+3. Make the error table for the end card. The card names its data source.
+4. For a synthetic bundle, run the synthetic eval. It costs nothing in mock mode: `python -m sewtrace.cli eval`. The card says "Synthetic t-shirts (best case)".
+5. For a real bundle, run the eval on the real tees with their tape measure files in `data/ground_truth/`: `python -m sewtrace.cli eval data/raw`. This makes paid calls in REAL mode, so get approval first. The card says "Real t-shirts".
+6. Know that a REAL recording stops, before any call, if the table holds only synthetic tees. Add `--allow-synthetic-eval` to show the synthetic table anyway. The card then says that the tees are synthetic.
+7. Put the proof photo in the garment folder as `proof.jpg`.
+8. Record in mock mode first. This is free: `python -m sewtrace.cli demo record data/synth/tee1`.
+9. Open the page: `python -m sewtrace.cli demo play tee1`.
+10. Watch the whole demo.
+11. For real photos, ask the project owner to approve the cost.
+12. Run the command with the worst-case cost shown: `python -m sewtrace.cli demo record data/raw/tee1 --name real1 --yes-spend`.
+13. Run it once. If a call fails, read the error before you run it again.
+14. Know that the cache keeps every answer that was paid for. A second run does not pay twice.
+15. Use `--force` to replace a bundle of the same name. Without it, the command stops.
+16. Know that a second recording of the same photos does not change a file that has the same content.
+17. Commit the bundle if the checks above pass.
 
 ## Play the demo at the finals
 
@@ -76,7 +84,7 @@ Add `?autoplay=1` to the address to start at once. Add `&clean=1` to hide the co
 3. Panels lift: each panel moves from its place on the photo to its place on the pattern sheet.
 4. Seam check: each seam pair shows red or green. The page follows `seam_log.json` check by check and shows the number of model calls. When the first check passes, the pairs go from grey to green.
 5. Proof: the edge of the paper panel turns green where the edge gap is under the tolerance. The page shows the mean gap.
-6. End card: the error table of the last eval.
+6. End card: the error table of the last eval, with its data source (synthetic or real t-shirts).
 
 The page shows the whole run in about 60 seconds at 1x speed. Use 0.5x to fit a longer voice-over.
 
@@ -94,13 +102,16 @@ Add `SEWTRACE_MOCK=1` for a bundle that `manifest.json` lists as `mock`. The run
 
 Do this the day before, and again on the finals laptop.
 
-1. Pull the repository. Check that `demo/<name>/manifest.json` exists.
-2. Run `python -m sewtrace.cli demo play <name> --check`. It must print one line and no error.
-3. Turn off Wi-Fi and unplug the network cable.
-4. Unset the key: `unset META_API_KEY`.
-5. Run `SEWTRACE_OFFLINE=1 python -m sewtrace.cli demo play <name>`.
-6. Open the page. Play all six steps. Look for a broken image or a blank frame.
-7. Run the pipeline replay from the section above. Check that it prints the six measurements.
-8. Set the screen to 1920 x 1080. Press H to hide the controls. Check that the text is readable.
-9. Keep a screen recording of the full demo as the last backup.
-10. Turn the network on again only after the test is done.
+1. Pull the repository.
+2. Check that `demo/<name>/manifest.json` exists.
+3. Run `python -m sewtrace.cli demo play <name> --check`. It must print one line and no error.
+4. Turn off Wi-Fi and unplug the network cable.
+5. Unset the key: `unset META_API_KEY`.
+6. Run `SEWTRACE_OFFLINE=1 python -m sewtrace.cli demo play <name>`.
+7. Open the page and play all six steps.
+8. Look for a broken image or a blank frame.
+9. Run the pipeline replay from the section above. Check that it prints the six measurements.
+10. Set the screen to 1920 x 1080.
+11. Press H to hide the controls. Check that the text is readable.
+12. Keep a screen recording of the full demo as the last backup.
+13. Turn the network on again only after the test is done.

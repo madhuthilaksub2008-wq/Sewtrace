@@ -153,7 +153,7 @@ known geometry with the marker and camera tilt; SAM and the model are mocked):
 | T24/T25 proof photo + overlay gap | done on synthetic proof photos |
 | T26.1 eval `sewtrace eval` | done: mean error 0.36 mm, all seams pass |
 | T8/T9 real SAM and Muse calls | **next**: needs API access (Day 1 tests) |
-| T23/T29/T30 web UI, wow sequence, offline mode | not started |
+| T23/T29/T30 web UI, wow sequence, offline mode | done, mock-tested (demo bundles replay offline) |
 | Real captures and tape-measure ground truth | waiting on tees and marker |
 
 The synthetic numbers are a best case. Real SAM edges, fabric that isn't

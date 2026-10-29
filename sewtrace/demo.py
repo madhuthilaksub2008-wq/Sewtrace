@@ -31,6 +31,8 @@ from sewtrace import pipeline
 from sewtrace.api.client import ApiError, MetaClient, SegmentationFailed, Usage, cost_usd
 from sewtrace.config import ROOT, get_config
 from sewtrace.output.layout import layout, panel_art, render_preview
+from sewtrace.eval import is_synthetic
+from sewtrace.reason.panels import INFER_ATTEMPTS
 from sewtrace.reason.seams import seam_name
 from sewtrace.types import MEASUREMENT_KEYS, Panel, PanelSpec, Point
 from sewtrace.vision import contour
@@ -43,7 +45,6 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 VIEWS = ("front", "back", "sleeve")
 PANEL_VIEW = {"front": "front", "back": "back", "sleeve": "sleeve"}  # the neckband has no photo
 SERVED_FILES = ("front.jpg", "back.jpg", "sleeve.jpg", "proof.jpg", "proof_overlay.jpg", "preview.png")
-INFER_ATTEMPTS = 2  # the loop in reason.panels.infer_panels
 PROMPT_TOKEN_ALLOWANCE = 3000  # text of one panel call, an upper bound for the worst-case price
 OUTLINE_EPS_PX = 1.0  # display only: simplifies the drawn mask outline
 FIT_CAP_MM = 20.0  # a panel point farther than this from the outline is an outlier in the placement fit
@@ -123,10 +124,15 @@ class EvalRow(BaseModel):
     mean_abs_err_mm: float | None
     seams_ok: bool
     error: str = ""
+    synthetic: bool | None = None  # None: an eval file from before the flag existed
+
+
+DataSource = Literal["synthetic", "real", "mixed", "unknown"]
 
 
 class EvalTable(BaseModel):
     source: str
+    data_source: DataSource = "unknown"  # the end card names it: synthetic tees are the best case (SPEC 10.1)
     rows: list[EvalRow]
     mean_abs_err_mm: float | None
 
@@ -298,6 +304,15 @@ def _record_proof(client: MetaClient, proof: Path, spec: PanelSpec, out: Path) -
     return show, paper, garment
 
 
+def data_source_of(rows: list[EvalRow]) -> DataSource:
+    flags = {r.synthetic for r in rows}
+    if flags == {True}:
+        return "synthetic"
+    if flags == {False}:
+        return "real"
+    return "mixed" if flags == {True, False} else "unknown"
+
+
 def read_eval(eval_csv: Path | None) -> EvalTable | None:
     """The last eval table (SPEC 15, demo): out/eval/results.csv, else this tee's truth.json."""
     keys = [f"err_{k}" for k in MEASUREMENT_KEYS]
@@ -308,8 +323,10 @@ def read_eval(eval_csv: Path | None) -> EvalTable | None:
             garment=r["garment"], run=int(r["run"]),
             errors_mm={k[4:]: (float(r[k]) if r[k] != "" else None) for k in keys},
             mean_abs_err_mm=float(r["mean_abs_err"]) if r["mean_abs_err"] != "" else None,
-            seams_ok=r["seams_ok"] == "True", error=r["error"]) for r in raw]
-        return EvalTable(source=eval_csv.name, rows=rows, mean_abs_err_mm=_mean([r.mean_abs_err_mm for r in rows]))
+            seams_ok=r["seams_ok"] == "True", error=r["error"],
+            synthetic=None if r.get("synthetic", "") == "" else r["synthetic"] == "True") for r in raw]
+        return EvalTable(source=eval_csv.name, rows=rows, data_source=data_source_of(rows),
+                         mean_abs_err_mm=_mean([r.mean_abs_err_mm for r in rows]))
     return None
 
 
@@ -325,20 +342,27 @@ def _truth_row(garment_dir: Path, measurements: dict[str, float], seams_ok: bool
     truth = json.loads(truth_file.read_text())["measurements"]
     errors = {k: measurements[k] - truth[k] for k in MEASUREMENT_KEYS}
     mean = sum(abs(v) for v in errors.values()) / len(errors)
-    row = EvalRow(garment=garment_dir.name, run=1, errors_mm=errors, mean_abs_err_mm=mean, seams_ok=seams_ok)
-    return EvalTable(source="truth.json of this tee", rows=[row], mean_abs_err_mm=mean)
+    row = EvalRow(garment=garment_dir.name, run=1, errors_mm=errors, mean_abs_err_mm=mean, seams_ok=seams_ok,
+                  synthetic=is_synthetic(garment_dir))
+    return EvalTable(source="truth.json of this tee", rows=[row], data_source=data_source_of([row]),
+                     mean_abs_err_mm=mean)
 
 
 def record(
     garment_dir: str | Path, name: str | None = None, *, client: MetaClient | None = None,
     demo_dir: Path = DEMO_DIR, yes_spend: bool = False, force: bool = False, eval_csv: Path | None = EVAL_CSV,
+    allow_gps: bool = False, allow_synthetic_eval: bool = False,
 ) -> Path:
     """Run the pipeline once and write ``demo_dir/<name>/``. Returns the bundle folder.
 
     In REAL mode this makes paid calls through MetaClient (guard, ledger and cache apply), so it
-    prints the worst-case cost and refuses without ``yes_spend``."""
+    prints the worst-case cost and refuses without ``yes_spend``. Both checks on the inputs run
+    before any spend: a photo with a GPS block (C-07) and, in REAL mode, an eval table that does
+    not come from real t-shirts (SPEC 10.1)."""
     garment_dir = Path(garment_dir)
     name = check_name(name or garment_dir.name)
+    if not allow_gps:
+        _refuse_gps(garment_dir)
     client = client or MetaClient()
     with_proof = (garment_dir / "proof.jpg").is_file()
     mode = _mode(client)
@@ -347,6 +371,9 @@ def record(
     print(f"Worst case if nothing is cached: ${worst:.4f}. Ledger limit ${client.config.api.budget_limit_usd:.2f}.")
     if mode == "real" and not yes_spend:
         raise ApiError("Nothing was called. REAL mode makes paid calls: add --yes-spend to record the demo.")
+    table = read_eval(eval_csv)
+    if mode == "real" and table is not None:
+        table = _real_card_table(table, eval_csv, allow_synthetic_eval)
     target, tmp = demo_dir / name, demo_dir / f".{name}.tmp"
     if target.exists() and not force:
         raise DemoError(f"demo '{name}' already exists. Use --force to replace it, or choose another --name.")
@@ -354,24 +381,65 @@ def record(
     shutil.rmtree(tmp, ignore_errors=True)  # a leftover of an earlier failed recording
     tmp.mkdir()
     try:
-        _write_bundle(client, garment_dir, name, tmp, mode, eval_csv)
-        if target.exists():
-            shutil.rmtree(target)
-        tmp.rename(target)
-    except BaseException:
+        _write_bundle(client, garment_dir, name, tmp, mode, table)
+        _install(tmp, target)
+    finally:
         shutil.rmtree(tmp, ignore_errors=True)
-        raise
     return target
 
 
-def _warn_gps(photo: Path | str) -> None:
-    if has_gps_exif(photo):
-        print(f"WARNING: {Path(photo).name} has GPS data in its EXIF header. Do not commit this bundle. "
-              "Turn off location tags in the camera app and take the photo again.")
+def _install(tmp: Path, target: Path) -> None:
+    """Move a finished bundle into place. A file with the same bytes is left alone, so a second
+    recording of the same input leaves no change in git."""
+    target.mkdir(exist_ok=True)
+    fresh = {p.relative_to(tmp) for p in tmp.rglob("*") if p.is_file()}
+    for old in sorted(target.rglob("*"), reverse=True):
+        rel = old.relative_to(target)
+        if old.is_file() and rel not in fresh:
+            old.unlink()
+        elif old.is_dir() and not any(old.iterdir()):
+            old.rmdir()
+    for rel in sorted(fresh):
+        src, dst = tmp / rel, target / rel
+        if dst.is_file() and dst.read_bytes() == src.read_bytes():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+
+
+def _refuse_gps(garment_dir: Path) -> None:
+    """C-07: the photos are copied byte for byte into a folder that is meant to be committed."""
+    photos = [Path(path) for _, path in pipeline.photo_set(garment_dir)] + [garment_dir / "proof.jpg"]
+    for photo in photos:
+        if photo.is_file() and has_gps_exif(photo):  # a missing photo is named later, by the pipeline
+            raise DemoError(
+                f"{photo.name} has GPS data in its EXIF header, and a bundle copies the photo as it is. "
+                "Turn off location tags in the camera app and take the photo again. "
+                "Add --allow-gps only if the bundle will never be committed.")
+
+
+def _real_card_table(table: EvalTable, eval_csv: Path | None, allow_synthetic: bool) -> EvalTable:
+    """A real bundle must not end on the synthetic best case (SPEC 10.1)."""
+    if table.data_source in ("real", "mixed"):
+        return table
+    if not allow_synthetic:
+        raise DemoError(
+            f"{eval_csv} holds only {table.data_source} t-shirts, and this recording is REAL. Nothing was called. "
+            "Run the eval on the real t-shirts (data/raw with data/ground_truth/<tee>.json), "
+            "or add --allow-synthetic-eval to show the synthetic table, labelled as such.")
+    return table.model_copy(update={"data_source": "synthetic"})
+
+
+def _newest_photo_time(garment_dir: Path) -> str:
+    """When the newest input photo was written. Not the clock, so a second recording of the same
+    photos gives the same manifest."""
+    paths = [Path(path) for _, path in pipeline.photo_set(garment_dir)] + [garment_dir / "proof.jpg"]
+    newest = max(p.stat().st_mtime for p in paths if p.is_file())
+    return dt.datetime.fromtimestamp(newest, dt.timezone.utc).isoformat(timespec="seconds")
 
 
 def _write_bundle(
-    client: MetaClient, garment_dir: Path, name: str, out: Path, mode: str, eval_csv: Path | None,
+    client: MetaClient, garment_dir: Path, name: str, out: Path, mode: str, csv_table: EvalTable | None,
 ) -> None:
     spent_before, calls_before = client.ledger_total_usd(), client.calls
     result = pipeline.run(garment_dir, out, client)  # writes pdf, svg, dxf, spec, measurements, seam_log
@@ -388,7 +456,6 @@ def _write_bundle(
         views[view] = _view_outline(mask, homographies[view], f"{view}.jpg", image)
         targets[view] = (_sleeve_target_mm if view == "sleeve" else _body_target_mm)(mask, homographies[view])
         shutil.copyfile(path, out / f"{view}.jpg")
-        _warn_gps(path)
     masks = Masks(views=views)
 
     proof_show = None
@@ -396,14 +463,13 @@ def _write_bundle(
     if proof_photo.is_file():
         proof_show, masks.proof_paper, masks.proof_garment = _record_proof(client, proof_photo, result.spec, out)
         shutil.copyfile(proof_photo, out / "proof.jpg")
-        _warn_gps(proof_photo)
         (out / "proof_result.json").write_text(proof_show.model_dump_json(indent=1))
 
     render_preview(result.spec, out / "preview.png")
     (out / "masks.json").write_text(masks.model_dump_json(indent=1))
     placement = _placement(result.spec, targets, homographies)
     (out / "placement.json").write_text(placement.model_dump_json(indent=1))
-    table = read_eval(eval_csv) or _truth_row(
+    table = csv_table or _truth_row(
         garment_dir, result.measurements, all(s.ok for s in result.spec.seams))
     if table is not None:
         (out / "eval.json").write_text(table.model_dump_json(indent=1))
@@ -416,7 +482,7 @@ def _write_bundle(
     keys = sorted({p.name.split(".")[0] for p in used})
     files = sorted(str(p.relative_to(out)) for p in out.rglob("*") if p.is_file())
     manifest = Manifest(
-        format=FORMAT, name=name, created=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        format=FORMAT, name=name, created=_newest_photo_time(garment_dir),
         mode=mode, garment=garment_dir.name, reasoning_model=client.config.reasoning_model.id,
         model_calls=client.calls - calls_before, spent_usd=round(client.ledger_total_usd() - spent_before, 6),
         files=files, cache_keys=keys, has_proof=proof_show is not None, has_eval=table is not None)
