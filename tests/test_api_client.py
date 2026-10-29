@@ -149,11 +149,19 @@ def test_c07_api_key_is_not_written_to_cache_or_ledger(tmp_path):
     assert all(KEY not in p.read_text() for p in tmp_path.iterdir() if p.is_file())
 
 
-def test_req_rsn_06_truncated_answer_is_an_error_and_not_cached(tmp_path):
-    client, _ = _client(tmp_path, FakeTransport(_answer(finish="length")))
+def test_req_rsn_06_truncated_answer_is_an_error_and_not_cached_as_an_answer(tmp_path):
+    """Changed for the task "cache rejected answers" (REQ-API-02): the paid, cut-off answer is kept
+    under a ``.rejected.json`` marker only, so a rerun fails the same way without paying again.
+    It is never stored where reason() looks for a good answer."""
+    transport = FakeTransport(_answer(finish="length"))
+    client, _ = _client(tmp_path, transport)
     with pytest.raises(ApiError, match="max_tokens"):
         client.reason("p")
-    assert not list(tmp_path.glob("*.json"))
+    assert [f.name for f in tmp_path.glob("*.json") if not f.name.endswith(".rejected.json")] == []
+    calls = len(transport.calls)
+    with pytest.raises(ApiError, match="max_tokens"):
+        client.reason("p")
+    assert len(transport.calls) == calls
 
 
 # ---- budget guard (REQ-API-04) ---------------------------------------------------

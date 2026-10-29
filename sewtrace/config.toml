@@ -58,14 +58,21 @@ max_tokens_param = "max_tokens"
 prompt_cache_key = "sewtrace-v1"
 upload_jpeg_quality = 95   # Muse is sent the decoded pixels re-encoded at this quality. Separate from [sam],
                            # so tuning SAM does not invalidate the Muse cache keys.
+max_upload_px = 1568       # DAY 1 VALUE TO CONFIRM (REQ-API-02, SPEC 8.1, 13). Long side of a photo sent to Muse. The
+                           # decoded pixels are shrunk (INTER_AREA) to this before the JPEG re-encode, to keep
+                           # SPEC 8.1's about 1,500 image tokens per photo near true for a 12 to 48 MP phone photo
+                           # (check the Day 1 token count). Part of the cache key.
 est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
 
 [sam]
 min_score = 0.5            # REQ-SEG-04: stop when the best mask scores less. The cookbook shows NO score on SAM
                            # records. Without a score the check is skipped with a warning (SPEC conflict, Day 1).
-upload_jpeg_quality = 95   # SAM is sent the decoded pixels (EXIF applied), re-encoded as JPEG at full resolution.
+upload_jpeg_quality = 95   # SAM is sent the decoded pixels (EXIF applied), re-encoded as JPEG (after the max_upload_px downscale).
                            # PNG would be 3 to 5 times larger for a phone photo (payload and upload time), and
                            # SAM is billed per image, so size does not change the price. Q95 adds no visible edge.
+max_upload_px = 2048       # DAY 1 VALUE TO CONFIRM (REQ-API-02, SPEC 13). Long side of a photo sent to SAM; larger photos
+                           # are shrunk (INTER_AREA) first. The masks and boxes come back in that smaller frame and are
+                           # scaled back to the original photo, so the mm geometry is unchanged. Part of the cache key.
 box_overhang_tol_px = 1.0  # a SAM box that passes the image by more than this means a frame mismatch: error
 
 [sam.prompts]              # REQ-SEG-02

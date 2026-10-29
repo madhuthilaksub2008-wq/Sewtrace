@@ -47,7 +47,8 @@ import ssl
 import time
 import urllib.error
 import urllib.request
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import aclosing, contextmanager
 from pathlib import Path
 from typing import Any
@@ -361,11 +362,17 @@ class MetaClient:
             images = [_read_pixels(p) for p in paths]
             digests = [hashlib.sha256(i.tobytes()).hexdigest() for i in images]
             params["upload_jpeg_quality"] = self.config.reasoning.upload_jpeg_quality
+            params["max_upload_px"] = self.config.reasoning.max_upload_px
             params["shapes"] = [list(i.shape) for i in images]
         key = self._key("reason", model.id, prompt, paths, params, image_digests=digests)
         cached = self._cache_file(key, ".json")
         if cached.exists():
             return json.loads(cached.read_text())
+        rejected = self._cache_file(key, ".rejected.json")
+        if rejected.exists():
+            # A paid answer that was cut off or not JSON. Judged by the same code as live, so it fails
+            # the same way and the caller's retry or fallback runs without a second payment.
+            return _answer_from_choice(model.id, json.loads(rejected.read_text()), reasoning)
         self._require_online(f"reasoning call to {model.id}")
         self.calls += 1
         if self.settings.mock:
@@ -373,7 +380,7 @@ class MetaClient:
                 raise RuntimeError("reason() called in mock mode without a mock answer")
             answer = mock()
         else:
-            answer = self._call_reasoning(model, prompt, images, schema, instructions)
+            answer = self._call_reasoning(model, prompt, images, schema, instructions, rejected_file=rejected)
         cached.write_text(json.dumps(answer))
         return answer
 
@@ -392,18 +399,22 @@ class MetaClient:
         The parser is checked before the paid call, and the raw events are cached right
         after it, so a decoding problem never makes a second paid call necessary."""
         parser, image, result = self._sam_parsed(image_path, prompt)
-        return sam_results_from(result, parser.decode_mask_to_raster, image.shape[:2], image_path.name, prompt,
-                                box_tol_px=self.config.sam.box_overhang_tol_px)
+        sent_hw = _fit_long_side(image, self.config.sam.max_upload_px).shape[:2]
+        return sam_results_from(result, parser.decode_mask_to_raster, sent_hw, image_path.name, prompt,
+                                box_tol_px=self.config.sam.box_overhang_tol_px, full_hw=image.shape[:2])
 
     def sam_boxes(self, image_path: str | Path, prompt: str) -> tuple[tuple[int, int], list[tuple[str, float, float, float, float]]]:
         """``((width, height), [(object_id, left, top, right, bottom), ...])`` of the cached SAM
-        answer, in the pixel frame of the decoded photo. Never calls the API: it needs the stored
-        raw events (Day 1 uses it to check the box frame by eye)."""
+        answer, in the pixel frame of the decoded photo (the original, not the downscaled upload).
+        Never calls the API: it needs the stored raw events (Day 1 uses it to check the box frame
+        by eye)."""
         image_path = Path(image_path)
         if not self._events_file(image_path, prompt).exists():
             raise CacheMiss(f"no stored SAM answer for {image_path.name!r} with prompt {prompt!r}; segment it first.")
         _, image, result = self._sam_parsed(image_path, prompt)
-        boxes = [(str(r.object_id), float(r.left), float(r.top), float(r.right), float(r.bottom))
+        sent_h, sent_w = _fit_long_side(image, self.config.sam.max_upload_px).shape[:2]
+        sx, sy = image.shape[1] / sent_w, image.shape[0] / sent_h
+        boxes = [(str(r.object_id), float(r.left) * sx, float(r.top) * sy, float(r.right) * sx, float(r.bottom) * sy)
                  for r in result.records if r.kind == "box"]
         return (image.shape[1], image.shape[0]), boxes
 
@@ -414,8 +425,8 @@ class MetaClient:
         if events_file.exists():
             events = json.loads(events_file.read_text())
         else:
-            quality = self.config.sam.upload_jpeg_quality
-            body = sam_request_body(self.config.models.sam.id, prompt, _jpeg_data_url(image, quality))
+            quality, max_px = self.config.sam.upload_jpeg_quality, self.config.sam.max_upload_px
+            body = sam_request_body(self.config.models.sam.id, prompt, _jpeg_data_url(image, quality, max_px))
             response = self._paid(self.config.models.sam, "/responses", body, Usage(images=1),
                                   transport=self._stream_transport, usage_from=_sam_usage)
             events = response["events"]
@@ -442,7 +453,8 @@ class MetaClient:
         model = self.config.models.sam.id
         if self.settings.mock:
             return self._key("sam", model, prompt, [image_path], {})
-        params: dict[str, Any] = {"upload_jpeg_quality": self.config.sam.upload_jpeg_quality}
+        params: dict[str, Any] = {"upload_jpeg_quality": self.config.sam.upload_jpeg_quality,
+                                  "max_upload_px": self.config.sam.max_upload_px}
         if decoded:
             params["decode_version"] = SAM_DECODE_VERSION
         pixels = _read_pixels(image_path)
@@ -452,14 +464,16 @@ class MetaClient:
 
     def _call_reasoning(
         self, model: ModelConfig, prompt: str, images: Sequence[np.ndarray], schema: dict[str, Any] | None,
-        instructions: str | None = None,
+        instructions: str | None = None, rejected_file: Path | None = None,
     ) -> dict[str, Any]:
         """Muse chat completion, request shape as in the cookbook (01_api_fundamentals).
-        ``images`` are decoded pixels, re-encoded here so no EXIF (GPS, camera) leaves the server."""
+        ``images`` are decoded pixels, downscaled and re-encoded here so no EXIF (GPS, camera) leaves the
+        server. A paid answer that is cut off or not JSON is stored in ``rejected_file`` before the
+        error is raised, so a rerun does not pay for it again (REQ-API-02)."""
         reasoning = self.config.reasoning
-        quality = reasoning.upload_jpeg_quality
+        quality, max_px = reasoning.upload_jpeg_quality, reasoning.max_upload_px
         body = reasoning_request_body(
-            model.id, prompt, [_jpeg_data_url(i, quality) for i in images], schema, instructions,
+            model.id, prompt, [_jpeg_data_url(i, quality, max_px) for i in images], schema, instructions,
             effort=reasoning.effort, max_tokens=reasoning.max_tokens,
             max_tokens_param=reasoning.max_tokens_param, prompt_cache_key=reasoning.prompt_cache_key,
         )
@@ -471,15 +485,14 @@ class MetaClient:
         )
         response = self._paid(model, "/chat/completions", body, estimate)
         choice = response["choices"][0]
-        if choice.get("finish_reason") == "length":
-            raise ApiError(
-                f"{model.id} answer was cut off at {reasoning.max_tokens_param}={reasoning.max_tokens} "
-                "(reasoning tokens count against it). Raise reasoning.max_tokens in config.toml."
-            )
         try:
-            return json.loads(choice["message"]["content"])
-        except json.JSONDecodeError as e:
-            raise ApiError(f"{model.id} answer is not valid JSON: {e}") from e
+            return _answer_from_choice(model.id, choice, reasoning)
+        except ApiError:
+            if rejected_file is not None:
+                rejected_file.write_text(json.dumps({
+                    "finish_reason": choice.get("finish_reason"),
+                    "message": {"content": (choice.get("message") or {}).get("content")}}))
+            raise
 
     def _require_synthetic_for_contributor(self, paths: Sequence[Path]) -> None:
         """SPEC 4.3 item 5: the contributor endpoint trains on the data it gets, so a real
@@ -629,6 +642,20 @@ class MetaClient:
         })
 
 
+def _answer_from_choice(model_id: str, choice: dict[str, Any], reasoning: Any) -> dict[str, Any]:
+    """The JSON answer of one chat choice, or ApiError. The one place that judges a raw answer, for
+    the live call and for the replay of a stored rejected one."""
+    if choice.get("finish_reason") == "length":
+        raise ApiError(
+            f"{model_id} answer was cut off at {reasoning.max_tokens_param}={reasoning.max_tokens} "
+            "(reasoning tokens count against it). Raise reasoning.max_tokens in config.toml."
+        )
+    try:
+        return json.loads(choice["message"]["content"])
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ApiError(f"{model_id} answer is not valid JSON: {e}") from e
+
+
 def _read_pixels(path: Path) -> np.ndarray:
     """The pixels the pipeline works on. ``cv2.imread`` applies the EXIF orientation, so this is
     the frame every later step (marker, contour, mm scale) uses."""
@@ -638,11 +665,24 @@ def _read_pixels(path: Path) -> np.ndarray:
     return image
 
 
-def _jpeg_data_url(image: np.ndarray, quality: int) -> str:
-    """Re-encode the decoded pixels for SAM and Muse at full resolution (no downscaling yet: a
-    separate follow-up). Encoding drops EXIF (GPS, camera), so a model cannot rotate the photo
-    behind our back, and SAM box coordinates are in the frame of ``image``."""
-    ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+def _fit_long_side(image: np.ndarray, max_px: int) -> np.ndarray:
+    """``image`` shrunk with INTER_AREA so its long side is at most ``max_px``; the same array if it
+    already fits. Both sides are rounded, so a caller maps coordinates back with the per-axis
+    factors ``original / sent``, not one scale."""
+    height, width = image.shape[:2]
+    long_side = max(height, width)
+    if long_side <= max_px:
+        return image
+    scale = max_px / long_side
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+
+
+def _jpeg_data_url(image: np.ndarray, quality: int, max_px: int) -> str:
+    """Downscale (long side ``max_px``, so the image token count matches SPEC 8.1) and re-encode the
+    decoded pixels for SAM and Muse. Encoding drops EXIF (GPS, camera), so a model cannot rotate the
+    photo behind our back. SAM box coordinates are in the frame of the downscaled image."""
+    ok, buffer = cv2.imencode(".jpg", _fit_long_side(image, max_px), [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise ApiError("Could not re-encode the photo for the model.")
     return f"data:image/jpeg;base64,{base64.b64encode(buffer.tobytes()).decode()}"
@@ -699,6 +739,19 @@ def _load_sam_parser() -> Any:
     return meta_sam_parser
 
 
+def _run_sync(make_coroutine: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
+    """Run a coroutine to completion from sync code, also when the caller sits inside a running event
+    loop (a FastAPI async handler). ``asyncio.run`` refuses there, so the coroutine gets a fresh loop
+    in a worker thread. The work is CPU only (the stored events are replayed), so blocking the caller
+    for its short duration is fine."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(make_coroutine())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(make_coroutine())).result()
+
+
 def _parse_sam_events(parser: Any, events: list[dict[str, Any]]) -> Any:
     """Run the official parser over the stored events and check the outcome."""
 
@@ -711,7 +764,7 @@ def _parse_sam_events(parser: Any, events: list[dict[str, Any]]) -> Any:
         async with aclosing(source()) as stream:
             return await parser.parse_responses_stream(stream, parser.image_segmentation_format()).final_result()
 
-    result = asyncio.run(run())
+    result = _run_sync(run)
     if result.outcome.status != "completed":
         reason = getattr(result.outcome, "reason", "unknown")
         raise ApiError(f"SAM answer was incomplete: {reason} ({getattr(result.outcome, 'detail', None)})")
@@ -735,7 +788,7 @@ def _record_score(*records: Any) -> float | None:
 
 def sam_results_from(
     result: Any, decode_mask: Callable[[Any], Any], image_hw: tuple[int, int], photo: str, prompt: str,
-    *, box_tol_px: float,
+    *, box_tol_px: float, full_hw: tuple[int, int] | None = None,
 ) -> list[SamResult]:
     """Parsed segmentation records -> full-image boolean masks.
 
@@ -745,10 +798,17 @@ def sam_results_from(
     size is an error, not a guess. The raster is read as row-major, any non-zero value is
     foreground.
 
-    ``image_hw`` must be the shape of the pixels that were sent to SAM. A box that passes the
-    image by more than ``box_tol_px`` means the two frames differ (EXIF rotation, server-side
-    resize): that is an error, never a clip, since it would misplace the mask in mm silently."""
+    ``image_hw`` must be the shape of the pixels that were sent to SAM. Photos are downscaled
+    before the upload (``sam.max_upload_px``), so pass the original shape as ``full_hw``: boxes and
+    masks are then scaled back to that frame, which keeps the mm geometry unchanged. A box that
+    passes the original image by more than ``box_tol_px`` means the two frames differ (EXIF
+    rotation, server-side resize): that is an error, never a clip, since it would misplace the
+    mask in mm silently. One sent pixel is rounding noise, so the tolerance is ``box_tol_px``
+    sent pixels, measured in the original frame (``box_tol_px`` times the larger scale factor)."""
     height, width = image_hw
+    full_h, full_w = full_hw or image_hw
+    sx, sy = full_w / width, full_h / height
+    tol_px = box_tol_px * max(sx, sy)
     boxes = {r.object_id: r for r in result.records if r.kind == "box"}
     out: list[SamResult] = []
     for record in (r for r in result.records if r.kind == "mask"):
@@ -759,11 +819,11 @@ def sam_results_from(
                            f"expected {mw} x {mh}.")
         raster = flat.reshape(mh, mw) > 0
         box = boxes.get(record.object_id)
-        if box is not None and (box.left < -box_tol_px or box.top < -box_tol_px
-                                or box.right > width + box_tol_px or box.bottom > height + box_tol_px):
+        if box is not None and (box.left * sx < -tol_px or box.top * sy < -tol_px
+                                or box.right * sx > full_w + tol_px or box.bottom * sy > full_h + tol_px):
             raise ApiError(
-                f"{photo}: SAM box {record.object_id} for {prompt!r} is ({box.left:g}, {box.top:g}) to "
-                f"({box.right:g}, {box.bottom:g}), but the image is {width} x {height} px. The box and the "
+                f"{photo}: SAM box {record.object_id} for {prompt!r} is ({box.left * sx:g}, {box.top * sy:g}) to "
+                f"({box.right * sx:g}, {box.bottom * sy:g}), but the image is {full_w} x {full_h} px. The box and the "
                 "photo use different pixel frames (EXIF rotation or a resize on the server). The mask "
                 "would land in the wrong place, so no mask was used. Run 'sewtrace day1' and check the overlay.")
         full = np.zeros((height, width), bool)
@@ -780,6 +840,8 @@ def sam_results_from(
                 f"the image ({width} x {height}) nor its box. The mask layout is unconfirmed (Day 1): "
                 "check a real response and fix sam_results_from.")
         if full.any():
+            if (full_h, full_w) != (height, width):  # linear then 0.5 keeps a smooth edge, not 2 px stair steps
+                full = cv2.resize(full.astype(np.float32), (full_w, full_h), interpolation=cv2.INTER_LINEAR) > 0.5
             out.append(SamResult(mask=full, score=_record_score(record, box)))
     return out
 
