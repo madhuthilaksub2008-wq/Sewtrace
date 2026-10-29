@@ -4,7 +4,7 @@ The test page lets a tester run Sewtrace in a browser. It is a test tool. It is 
 
 **WARNING:** REAL mode makes paid calls to the Meta Model API. Every run costs money. REAL mode needs a password. The server refuses to start in REAL mode without one.
 
-**WARNING:** The spend ledger is the file `data/ledger.csv`. If the ledger is lost, the budget guard starts again at $0. Put `data/` on a persistent volume in REAL mode. See "The ledger volume".
+**WARNING:** The spend ledger is the file `data/ledger.csv`. If the ledger is lost, the budget guard starts again at $0. Put `data/` on a persistent volume in REAL mode. In the Docker image, REAL mode refuses to start unless `/app/data` is a mount point. See "The ledger volume".
 
 ## Modes
 
@@ -24,15 +24,32 @@ The page shows the mode, the reasoning model and the ledger total in the bar at 
 | `SEWTRACE_MOCK` | `1` is mock mode (default). `0` is REAL mode. |
 | `SEWTRACE_WEB_PASSWORD` | The access password. Required in REAL mode. Optional in MOCK mode. |
 | `SEWTRACE_OFFLINE` | `1` is cache-only mode. |
+| `SEWTRACE_REQUIRE_LEDGER_MOUNT` | The image sets it to `1`. REAL mode then refuses to start when `/app/data` is not a mount point. Do not unset it on a public host. |
+| `SEWTRACE_CACHE_DIR` | The image sets it to `/app/data/cache`, inside the volume. |
 | `PORT` | The port in the Docker image. Default 8000. Render sets it for you. |
 
 The ledger path is not an environment variable. It is `api.ledger_path` in `sewtrace/config.toml`. This rule stops a second ledger that starts at $0.
 
-The web limits are in `sewtrace/config.toml` under `[web]`: `max_upload_mb`, `job_retention_min` and `port`.
+The web limits are in `sewtrace/config.toml` under `[web]`: `max_upload_mb`, `max_pixels`, `job_retention_min`, `auth_fail_delay_s` and `port`.
 
 ## Access control
 
-The page uses HTTP Basic auth when `SEWTRACE_WEB_PASSWORD` is set. The browser asks for a password. Enter any user name and the password. The server compares the password in constant time. Use HTTPS on the host, because Basic auth sends the password with each request. The path `/healthz` has no password, so the host can check that the server is up.
+The page uses HTTP Basic auth when `SEWTRACE_WEB_PASSWORD` is set. The browser asks for a password. Enter any user name and the password. The server compares the password in constant time. A wrong password waits `auth_fail_delay_s` (1 s) before the answer, which slows guessing. Use HTTPS on the host, because Basic auth sends the password with each request. The path `/healthz` has no password, so the host can check that the server is up.
+
+Every POST request needs the header `X-Sewtrace: 1`. The page sends it. A form on another site cannot send it, so it cannot start a paid run with the password that your browser remembers.
+
+### Make a password
+
+A public host gets guessed. Use a long random password.
+
+1. Make the password.
+
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(24))"
+   ```
+
+2. Set the output as `SEWTRACE_WEB_PASSWORD` on the host.
+3. Do not use this password anywhere else.
 
 ## Run locally
 
@@ -91,27 +108,31 @@ docker run --rm -p 8000:8000 \
   sewtrace
 ```
 
-The container starts as root only to fix the owner of `/app/data` and `/app/cache`. Then it drops to the user `sewtrace`. The server never runs as root.
+The container starts as root only to create the cache folder and to fix the owner of `/app/data`. Then it drops to the user `sewtrace`. The server never runs as root.
 
 ## The ledger volume
 
-The code finds the ledger at `<repo root>/data/ledger.csv`. In the image the repo root is `/app`. So the ledger is `/app/data/ledger.csv`.
+The code finds the ledger at `<repo root>/data/ledger.csv`. In the image the repo root is `/app`. So the ledger is `/app/data/ledger.csv`. The cache is `/app/data/cache`, in the same folder. Use one volume for both. Render allows one disk for each service, and a Fly Machine mounts one volume.
 
 1. Create a persistent volume or disk on the host.
 2. Mount it at `/app/data`.
-3. Check the file `ledger.csv` after the first REAL run. It must still exist after a redeploy.
+3. Start the server in REAL mode.
+4. Read the first lines of the server log. Look for the line that starts with `ledger`. It shows the ledger path, the total spent and the cache folder. After a redeploy the total must be the same as before.
+5. Check the file `ledger.csv` after the first REAL run. It must still exist after a redeploy.
 
-The cache is in `/app/cache`. Mount a second volume there if you want cached answers to survive a redeploy. Cached answers cost nothing to replay. Never clear the cache to get a fresh result.
+The mount check works like this. In the image, REAL mode calls `os.path.ismount("/app/data")`. If the answer is false, the server stops with the message "Attach a persistent volume". The check relies on the host showing the volume as a mount point. Render disks and Fly volumes should (this was not tested here). If your host mounts the volume in a different way, the server will refuse to start. Do not unset `SEWTRACE_REQUIRE_LEDGER_MOUNT` to get around this. Find out how the host mounts the volume instead. Outside Docker (`sewtrace serve` on your computer) the check is off.
+
+Cached answers cost nothing to replay, and they let OFFLINE mode work after a redeploy. Never clear the cache to get a fresh result.
 
 ## Deploy on Render
 
 1. Push the repository to GitHub.
 2. In Render, click "New", then "Web Service".
 3. Choose the repository. Set "Runtime" to "Docker". Render finds the `Dockerfile`.
-4. To use REAL mode, add the build argument `INSTALL_REAL` with the value `1`.
-5. Add a persistent disk. Set the mount path to `/app/data`. A disk needs a paid instance type.
+4. To use REAL mode, add the environment variable `INSTALL_REAL` with the value `1`. Render passes environment variables to the Docker build, so the build gets it as the build argument. Check the build log to see that the real extra was installed.
+5. Add one persistent disk. Set the mount path to `/app/data`. A disk needs a paid instance type. Without a disk, REAL mode does not start.
 6. Add these environment variables:
-   - `SEWTRACE_WEB_PASSWORD`: your password.
+   - `SEWTRACE_WEB_PASSWORD`: a long random password (see "Make a password").
    - `SEWTRACE_MOCK`: `1` for a test without cost. `0` for REAL mode.
    - `META_API_KEY`: your key. Needed only in REAL mode.
 7. Set the health check path to `/healthz`.
@@ -125,7 +146,7 @@ Fly.io, Railway and similar hosts work the same way.
 
 1. Build the image from the `Dockerfile`, or let the host build it.
 2. Set the three environment variables as secrets.
-3. Mount a persistent volume at `/app/data`.
+3. Mount one persistent volume at `/app/data`.
 4. Route HTTPS traffic to port 8000, or to the value of `PORT`.
 5. Set the health check path to `/healthz`.
 6. Run only one instance. Two instances would each keep their own run lock and their own ledger copy.
@@ -135,6 +156,9 @@ Fly.io, Railway and similar hosts work the same way.
 - Only one run is active at a time. A second run gets the message "A run is already active".
 - Every run goes through `MetaClient`: budget guard, ledger and cache.
 - The page accepts JPEG and PNG files up to `max_upload_mb` for each photo.
+- A photo may have at most `max_pixels` (50 million) pixels. The server reads the size from the file header and refuses a larger photo before it decodes it.
+- The photos that go to the Muse model are decoded and encoded again as JPEG. The EXIF data (GPS position, camera) is not sent.
+- A proof photo is checked against the pattern of the last successful run. The page shows which run. A failed run clears the pattern.
 - Uploaded photos are stored in a temporary folder for each job. The server deletes the folder after `job_retention_min` minutes.
 - The server never sends the API key to the browser and never writes it to a log.
 - In MOCK mode, uploaded photos are refused. The mock SAM works only with the synthetic sample tee.

@@ -41,7 +41,7 @@ def describe_error(err: BaseException, scrub: Sequence[str] = ()) -> dict:
     else:
         log.exception("unexpected error in a web job", exc_info=err)
         title, message = "Unexpected error", "Something failed on the server. Read the server log, then run again."
-    for text in scrub:
+    for text in sorted(scrub, key=len, reverse=True):  # a long path before the folder that holds it
         if text:
             message = message.replace(text, "")
     out = {"kind": type(err).__name__, "title": title, "message": message}

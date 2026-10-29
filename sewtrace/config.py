@@ -166,6 +166,8 @@ class WebConfig(_Strict):
     max_upload_mb: float = Field(gt=0)  # per photo
     job_retention_min: float = Field(gt=0)  # a finished job folder is deleted after this age
     port: int = Field(ge=1, le=65535)
+    max_pixels: int = Field(gt=0)  # per photo, from the file header
+    auth_fail_delay_s: float = Field(ge=0)  # wait before a 401 for a wrong password
 
 
 class AppConfig(_Strict):

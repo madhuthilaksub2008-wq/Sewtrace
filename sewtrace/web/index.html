@@ -189,7 +189,7 @@ async function start(url, form, msgBox, outBox, render) {
   setBusy(true);
   note(msgBox, "info", "Starting...");
   try {
-    const {id} = await api(url, {method: "POST", body: form});
+    const {id} = await api(url, {method: "POST", body: form, headers: {"X-Sewtrace": "1"}});
     await follow(id, msgBox, outBox, render);
   } catch (e) {
     note(msgBox, "err", e.message, e.title);
@@ -272,6 +272,7 @@ function renderProof(id, r, box) {
     if (r.neck.expected_mm !== null) t += ` Expected from the spec ${r.neck.expected_mm.toFixed(1)} mm, difference ${signed(r.neck.difference_mm)}.`;
     out.push(h("div", {class: "msg " + (r.neck.flagged ? "warn" : "info")}, t, r.neck.flagged ? ` WARNING: the difference is more than ${r.neck.tol_mm} mm. Check the neck depths of the cut paper against spec.json.` : ""));
   }
+  out.push(h("p", {class: "small"}, "Checked against the pattern of " + (r.spec_source === "sample" ? "the sample tee run" : "run " + r.spec_source.slice(0, 8)) + "."));
   out.push(h("img", {src: file(id, r.overlay), alt: "proof overlay: green within tolerance, red elsewhere"}));
   out.push(h("p", {class: "small"}, "Green: gap under " + r.tol_mm + " mm. Red: all other points. Grey: fold edge and neck, not compared. Model calls: " + r.model_calls + "."));
   box.replaceChildren(...out);
@@ -299,8 +300,11 @@ $("proofSampleBtn").addEventListener("click", () => {
   await refreshStatus();
   const latest = state.latest || {};
   setInterval(refreshStatus, 5000);
+  // Two separate tries: a deleted run must not stop the proof from coming back.
   try {
     if (latest.run) { setBusy(true); await follow(latest.run, $("runMsg"), $("runOut"), renderRun); }
+  } catch (e) { /* job was deleted: start clean */ }
+  try {
     if (latest.proof) { await follow(latest.proof, $("proofMsg"), $("proofOut"), renderProof); }
   } catch (e) { /* job was deleted: start clean */ } finally { setBusy(false); }
 })();

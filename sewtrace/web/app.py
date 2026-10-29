@@ -2,14 +2,19 @@
 
 Access: when SEWTRACE_WEB_PASSWORD is set, every route except /healthz needs HTTP Basic auth
 (any user name, that password, constant-time compare). REAL mode (paid calls) refuses to start
-without the password. Only one pipeline run is active at a time.
+without the password. In the Docker image (SEWTRACE_REQUIRE_LEDGER_MOUNT=1) REAL mode also refuses
+to start unless the ledger folder is a mount point, because a ledger on a disk that is wiped on
+restart resets the budget guard (REQ-API-04, C-01). Every POST needs the header X-Sewtrace: 1, which a
+cross-site form cannot send. Only one pipeline run is active at a time.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
+import logging
 import mimetypes
 import os
 import tempfile
@@ -23,12 +28,17 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.datastructures import UploadFile
 
 from sewtrace.api.client import MetaClient
-from sewtrace.config import ROOT, Settings
+from sewtrace.config import ROOT, Settings, resolve_ledger_path
 from sewtrace.output.marker_pdf import marker_pdf_bytes
 from sewtrace.web import service
+from sewtrace.web.imagesize import image_size
 from sewtrace.web.jobs import Busy, JobStore
 
+log = logging.getLogger(__name__)
+
 PASSWORD_ENV = "SEWTRACE_WEB_PASSWORD"
+REQUIRE_MOUNT_ENV = "SEWTRACE_REQUIRE_LEDGER_MOUNT"  # set to 1 in the Docker image
+CSRF_HEADER = "x-sewtrace"
 PAGE = Path(__file__).with_name("index.html")
 DOWNLOAD_NAMES = {"pdf", "svg", "dxf", "spec"}
 MULTIPART_SLACK_BYTES = 64 * 1024  # form overhead on top of the photo limits
@@ -62,15 +72,26 @@ def password_ok(header: str | None, password: str) -> bool:
     return hmac.compare_digest(_digest(given), _digest(password))
 
 
+def check_ledger_mount(settings: Settings) -> None:
+    """In the image, REAL mode needs the ledger folder on a mounted volume. A folder on the
+    container disk is wiped on restart, and the cache with it, so the budget guard would start
+    again at $0 without any other check noticing (REQ-API-04, C-01)."""
+    if settings.mock or settings.offline or os.environ.get(REQUIRE_MOUNT_ENV) != "1":
+        return
+    folder = (settings.ledger_path or resolve_ledger_path(settings.config)).parent
+    if not os.path.ismount(folder):
+        raise WebConfigError(
+            f"REAL mode spends money, and the ledger folder {folder} is not a mounted volume, so the spend "
+            f"total would restart at $0 after a restart or a redeploy. Attach a persistent volume at {folder} "
+            "and start again, or use mock mode (SEWTRACE_MOCK=1). See docs/DEPLOY.md, 'The ledger volume'."
+        )
+
+
 def _error(status: int, kind: str, title: str, message: str) -> JSONResponse:
     return JSONResponse({"error": {"kind": kind, "title": title, "message": message}}, status_code=status)
 
 
-def _sniff_image(data: bytes) -> bool:
-    return data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"
-
-
-async def _read_photo(upload: UploadFile | str | None, label: str, max_bytes: int) -> tuple[bytes | None, JSONResponse | None]:
+async def _read_photo(upload: UploadFile | str | None, label: str, max_bytes: int, max_pixels: int) -> tuple[bytes | None, JSONResponse | None]:
     """One uploaded photo as JPEG bytes, or the error response. A JPEG is kept as sent (EXIF
     stays); a PNG becomes a JPEG, because the pipeline reads ``<view>.jpg``."""
     if not isinstance(upload, UploadFile) or not upload.filename:
@@ -80,7 +101,12 @@ async def _read_photo(upload: UploadFile | str | None, label: str, max_bytes: in
     if len(data) > max_bytes:
         return None, _error(413, "PhotoTooLarge", "A photo is too large",
                             f"The {label} photo is larger than {max_bytes / 1024 / 1024:g} MB. Use a smaller file.")
-    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) if _sniff_image(data) else None
+    size = image_size(data)
+    if size is not None and size[0] * size[1] > max_pixels:
+        return None, _error(413, "PhotoTooManyPixels", "A photo has too many pixels",
+                            f"The {label} photo is {size[0] * size[1] / 1e6:.0f} MP. The limit is "
+                            f"{max_pixels / 1e6:g} MP. Use a smaller photo.")
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) if size is not None else None
     if image is None:
         return None, _error(415, "PhotoNotImage", "A photo is not an image",
                             f"The {label} photo is not a JPEG or PNG image. Choose a photo file.")
@@ -103,13 +129,18 @@ def create_app(
             f"REAL mode spends money, so the web page needs a password. Set {PASSWORD_ENV} and start again, "
             "or use mock mode (SEWTRACE_MOCK=1)."
         )
+    check_ledger_mount(settings)
     web = settings.config.web
-    max_bytes = int(web.max_upload_mb * 1024 * 1024)
+    max_bytes, max_pixels = int(web.max_upload_mb * 1024 * 1024), web.max_pixels
     client = MetaClient(settings)
+    log.info("ledger %s, total $%.4f of $%.2f, mode %s, cache %s", client.ledger_path, client.ledger_total_usd(),
+             settings.config.api.budget_limit_usd, mode_label(settings), client.cache_dir)
     sample_root = sample_root or ROOT / "data" / "synth"
     jobs_dir = jobs_dir or Path(tempfile.gettempdir()) / "sewtrace-web"
     sample_dir = service.ensure_sample(sample_root)
-    store = JobStore(jobs_dir, web.job_retention_min, scrub=(settings.api_key,))
+    # Server folders and the key never reach the page, even inside an error message.
+    scrub = (settings.api_key, str(ROOT), str(client.cache_dir), str(client.ledger_path), str(sample_root), str(sample_dir))
+    store = JobStore(jobs_dir, web.job_retention_min, scrub=scrub)
     ctx = service.Context(client)
     mock_only_sample = settings.mock
 
@@ -120,9 +151,14 @@ def create_app(
     async def guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         if request.url.path == "/healthz":
             return await call_next(request)
-        if password and not password_ok(request.headers.get("authorization"), password):
+        given = request.headers.get("authorization")
+        if password and not password_ok(given, password):
+            if given:  # a wrong guess waits; the first prompt of a browser does not
+                await asyncio.sleep(web.auth_fail_delay_s)
             return Response("Password needed.", status_code=401, headers={"WWW-Authenticate": 'Basic realm="Sewtrace"'})
         if request.method == "POST":
+            if request.headers.get(CSRF_HEADER) != "1":
+                return _error(403, "Forbidden", "Request refused", "Start runs from the Sewtrace page.")
             length = request.headers.get("content-length", "")
             if not length.isdigit():
                 return _error(411, "LengthRequired", "The upload has no size", "Send the request with a Content-Length.")
@@ -131,7 +167,7 @@ def create_app(
                               f"Each photo may be at most {web.max_upload_mb:g} MB.")
         return await call_next(request)
 
-    @app.get("/healthz")
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
     def healthz() -> dict:
         return {"ok": True}
 
@@ -173,7 +209,7 @@ def create_app(
             return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True))
         uploads: dict[str, bytes] = {}
         for view in service.VIEWS:
-            data, err = await _read_photo(form.get(view), view, max_bytes)
+            data, err = await _read_photo(form.get(view), view, max_bytes, max_pixels)
             if err is not None:
                 return err
             uploads[f"{view}.jpg"] = data  # type: ignore[assignment]
@@ -186,7 +222,7 @@ def create_app(
         form = await request.form()
         if form.get("sample"):
             return start("proof", lambda job: service.run_proof(ctx, job, None))
-        data, err = await _read_photo(form.get("photo"), "proof", max_bytes)
+        data, err = await _read_photo(form.get("photo"), "proof", max_bytes, max_pixels)
         if err is not None:
             return err
         if mock_only_sample:

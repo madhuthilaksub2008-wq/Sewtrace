@@ -1,10 +1,13 @@
 # Sewtrace test page. Build:   docker build -t sewtrace .
 # With real SAM decoding:      docker build --build-arg INSTALL_REAL=1 -t sewtrace .
-# Mount a persistent volume at /app/data: it holds the spend ledger (docs/DEPLOY.md).
+# Mount ONE persistent volume at /app/data: it holds the spend ledger and the cache (docs/DEPLOY.md).
 FROM python:3.12-slim
 
 ARG INSTALL_REAL=0
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+# The cache sits inside the one volume, so a redeploy keeps the answers that were paid for.
+# REAL mode refuses to start unless /app/data is a mount point (a wiped ledger resets the budget guard).
+ENV SEWTRACE_CACHE_DIR=/app/data/cache SEWTRACE_REQUIRE_LEDGER_MOUNT=1
 
 RUN useradd --create-home --uid 10001 sewtrace
 WORKDIR /app
@@ -15,7 +18,7 @@ COPY pyproject.toml README.md ./
 COPY sewtrace ./sewtrace
 RUN pip install -e . \
     && if [ "$INSTALL_REAL" = "1" ]; then pip install -e '.[real]'; fi \
-    && mkdir -p data cache \
+    && mkdir -p data/cache \
     && chown -R sewtrace:sewtrace /app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 

@@ -47,6 +47,15 @@ class JobStore:
         self._guard = threading.Lock()  # protects ``jobs``
         self._run_lock = threading.Lock()  # held by the one active job
         self.root.mkdir(parents=True, exist_ok=True)
+        self._purge_stale_folders()
+
+    def _purge_stale_folders(self) -> None:
+        """Delete job folders that an earlier process left in the root (a restart loses the job
+        list, so ``purge`` cannot see them). Age is the folder modification time."""
+        cutoff = time.time() - self.retention_s
+        for folder in self.root.iterdir():
+            if folder.is_dir() and folder.stat().st_mtime < cutoff:
+                shutil.rmtree(folder, ignore_errors=True)
 
     @property
     def busy(self) -> bool:

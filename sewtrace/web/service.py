@@ -36,6 +36,7 @@ class Context:
     client: MetaClient
     last_spec: PanelSpec | None = None  # the pattern the proof is checked against
     last_sample_dir: Path | None = None  # set when the last run was the sample tee
+    last_source: str | None = None  # "sample" or the id of the run that made ``last_spec``
 
 
 def ensure_sample(sample_root: Path) -> Path:
@@ -62,6 +63,8 @@ def mask_overlay(photo: Path, mask: np.ndarray, out: Path) -> Path:
 
 
 def run_pattern(ctx: Context, job: Job, garment_dir: Path, sample: bool) -> dict:
+    # A failed run must not leave the old pattern for a later proof check to use without a word.
+    ctx.last_spec, ctx.last_sample_dir, ctx.last_source = None, None, None
     job.step = "Running the pipeline: marker, SAM, Muse, seam check"
     result = pipeline.run(garment_dir, job.dir / "out", ctx.client)
 
@@ -79,6 +82,7 @@ def run_pattern(ctx: Context, job: Job, garment_dir: Path, sample: bool) -> dict
     truth = json.loads(truth_file.read_text())["measurements"] if sample and truth_file.exists() else {}
     ctx.last_spec = result.spec
     ctx.last_sample_dir = garment_dir if sample else None
+    ctx.last_source = "sample" if sample else job.id
     return {
         "synthetic": bool(truth),
         "photos": [{"view": v, "file": f"mask_{v}"} for v in VIEWS],
@@ -121,4 +125,4 @@ def run_proof(ctx: Context, job: Job, photo: Path | None) -> dict:
                 "flagged": result.neck_gap_flagged, "tol_mm": result.neck_gap_tol_mm}
     return {"mean_mm": result.mean_mm, "max_mm": result.max_mm, "p95_mm": result.p95_mm,
             "pct_within": 100 * result.frac_within_tol, "tol_mm": result.tol_mm, "neck": neck,
-            "overlay": "proof_overlay", "model_calls": ctx.client.calls - calls_before}
+            "overlay": "proof_overlay", "spec_source": ctx.last_source, "model_calls": ctx.client.calls - calls_before}

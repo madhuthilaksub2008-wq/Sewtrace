@@ -32,14 +32,17 @@ def sample_root(tmp_path_factory) -> Path:
     return root
 
 
-def make_client(tmp_path, sample_root, *, mock=True, password="", api_key="", web=None, offline=False):
+CSRF = {"X-Sewtrace": "1"}  # the header the page sends on every POST
+
+
+def make_client(tmp_path, sample_root, *, mock=True, password="", api_key="", web=None, offline=False, csrf=True):
     base = Settings(api_key=api_key, mock=mock, cache_dir=tmp_path / "cache", offline=offline,
                     ledger_path=tmp_path / "ledger.csv")
-    if web is not None:
-        config = base.config.model_copy(update={"web": base.config.web.model_copy(update=web)})
-        base = dataclasses.replace(base, config=config)
+    web = {"auth_fail_delay_s": 0.0, **(web or {})}  # tests do not wait; one test checks the delay
+    config = base.config.model_copy(update={"web": base.config.web.model_copy(update=web)})
+    base = dataclasses.replace(base, config=config)
     app = create_app(base, password=password, jobs_dir=tmp_path / "jobs", sample_root=sample_root)
-    return TestClient(app)
+    return TestClient(app, headers=CSRF if csrf else None)
 
 
 def wait_job(client, job_id, timeout_s=90.0) -> dict:
@@ -124,7 +127,6 @@ def test_req_sew_05_sample_run_end_to_end(client):
     assert "attachment" in pdf.headers["content-disposition"]
     for name in ("svg", "dxf", "spec"):
         assert client.get(f"/api/jobs/{jid}/files/{name}").status_code == 200
-    assert client.get(f"/api/jobs/{jid}/files/../../etc/passwd").status_code == 404
     assert client.get("/api/jobs/nope").status_code == 404
     status = client.get("/api/status").json()
     assert status["has_pattern"] and status["latest"]["run"] == jid
@@ -153,8 +155,9 @@ def test_mock_mode_refuses_real_photos_with_a_clear_message(client, sample_root)
     assert client.get("/api/status").json()["uploads_enabled"] is False
 
 
-def test_req_api_04_second_concurrent_run_is_rejected(client, monkeypatch):
-    """One pipeline run at a time: a second run is refused while one is active."""
+def test_c_01_second_concurrent_run_is_rejected(client, monkeypatch):
+    """C-01: one pipeline run at a time. Two runs at once would read the same ledger total, and
+    both could pass the budget check. (No REQ covers the web lock; C-01 is the credit it protects.)"""
     started, release = threading.Event(), threading.Event()
     real_run = pipeline.run
 
@@ -303,6 +306,7 @@ def test_status_bar_and_no_key_leak(tmp_path, sample_root):
     assert key not in client.get("/api/status").text and key not in str(job) and key not in client.get("/").text
     assert make_client(tmp_path, sample_root, offline=True, mock=False).get("/api/status").json()["mode"] == "OFFLINE"
     assert make_client(tmp_path, sample_root, mock=False, password="x", api_key="k").get("/healthz").status_code == 200
+    assert make_client(tmp_path, sample_root, password="x").head("/healthz").status_code == 200
 
 
 def test_job_folders_are_deleted_after_the_retention_time(tmp_path):
@@ -340,3 +344,203 @@ def test_uploads_are_stored_per_job_as_jpeg(tmp_path, sample_root, monkeypatch):
     assert res.status_code == 202 and wait_job(client, res.json()["id"])["state"] == "done"
     assert seen["sample"] is False and str(tmp_path / "jobs") in str(seen["dir"])
     assert seen["front.jpg"] == jpg and seen["back.jpg"][:3] == b"\xff\xd8\xff"
+
+
+# ---- review fixes ---------------------------------------------------------------------------
+
+def test_req_api_04_real_mode_in_the_image_refuses_a_ledger_folder_that_is_not_a_mount(
+        tmp_path, sample_root, monkeypatch, caplog):
+    """REQ-API-04, C-01: on a host without a disk the ledger would restart at $0. The image sets
+    SEWTRACE_REQUIRE_LEDGER_MOUNT=1; REAL mode then needs the ledger folder to be a mount point."""
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    mounted: list[bool] = [False]
+    seen: list[str] = []
+    monkeypatch.setattr("os.path.ismount", lambda p: seen.append(str(p)) or mounted[0])
+    with pytest.raises(WebConfigError) as err:
+        make_client(tmp_path, sample_root, mock=False, api_key="k", password="pw")
+    assert str(tmp_path) in str(err.value) and "persistent volume" in str(err.value)
+    assert seen == [str(tmp_path)]  # the folder of the ledger file
+    mounted[0] = True
+    (tmp_path / "ledger.csv").write_text("time,model,input_tokens,cached_tokens,output_tokens,images,cost_usd,estimated\n"
+                                         "t,m,0,0,0,1,2.5,0\n")
+    with caplog.at_level("INFO", logger="sewtrace.web.app"):
+        assert make_client(tmp_path, sample_root, mock=False, api_key="k", password="pw")
+    line = next(r.getMessage() for r in caplog.records if "ledger" in r.getMessage())
+    assert str(tmp_path / "ledger.csv") in line and "$2.5000" in line and "pw" not in line
+
+
+def test_req_api_04_mount_check_does_not_apply_to_mock_offline_or_local(tmp_path, sample_root, monkeypatch):
+    """MOCK and OFFLINE spend nothing; without the env (local ``sewtrace serve``) nothing changes."""
+    monkeypatch.setattr("os.path.ismount", lambda p: False)
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    assert make_client(tmp_path, sample_root, mock=True)
+    assert make_client(tmp_path, sample_root, mock=False, offline=True)
+    monkeypatch.delenv("SEWTRACE_REQUIRE_LEDGER_MOUNT")
+    assert make_client(tmp_path, sample_root, mock=False, api_key="k", password="pw")
+
+
+def test_req_api_04_serve_refuses_an_unmounted_ledger_folder(monkeypatch, capsys):
+    """The same check runs for ``sewtrace serve`` in REAL mode inside the image."""
+    monkeypatch.setenv("META_API_KEY", "dummy-key-never-sent")
+    monkeypatch.setenv("SEWTRACE_MOCK", "0")
+    monkeypatch.setenv("SEWTRACE_WEB_PASSWORD", "pw")
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    monkeypatch.delenv("SEWTRACE_OFFLINE", raising=False)
+    monkeypatch.setattr("os.path.ismount", lambda p: False)
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["serve"])
+    assert stop.value.code == 1 and "persistent volume" in capsys.readouterr().err
+
+
+def test_req_api_02_image_sets_the_cache_folder_inside_the_one_volume():
+    """REQ-API-02, REQ-API-08: one volume at /app/data holds ledger and cache."""
+    root = Path(__file__).resolve().parent.parent
+    docker = (root / "Dockerfile").read_text()
+    assert "SEWTRACE_CACHE_DIR=/app/data/cache" in docker and "SEWTRACE_REQUIRE_LEDGER_MOUNT=1" in docker
+    entry = (root / "docker-entrypoint.sh").read_text()
+    assert "mkdir -p" in entry and "chown -R sewtrace:sewtrace /app/data" in entry
+
+
+def test_proof_names_its_pattern_and_a_failed_run_clears_it(client, monkeypatch):
+    """A proof is never checked against a pattern of an earlier run without saying so."""
+    assert run_sample(client)["state"] == "done"
+    proof = wait_job(client, client.post("/api/proof", data={"sample": "1"}).json()["id"])
+    assert proof["result"]["spec_source"] == "sample"
+    ctx = client.app.state.ctx
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: 1 / 0)
+    assert wait_job(client, client.post("/api/run", data={"sample": "1"}).json()["id"])["state"] == "error"
+    assert ctx.last_spec is None and client.get("/api/status").json()["has_pattern"] is False
+    late = wait_job(client, client.post("/api/proof", data={"sample": "1"}).json()["id"])
+    assert late["state"] == "error" and "no pattern yet" in late["error"]["message"]
+
+
+def test_post_without_the_sewtrace_header_is_refused(tmp_path, sample_root):
+    """A cross-site form cannot set a custom header, so it cannot start a run with cached credentials."""
+    client = make_client(tmp_path, sample_root, csrf=False)
+    for path in ("/api/run", "/api/proof"):
+        res = client.post(path, data={"sample": "1"})
+        assert res.status_code == 403 and res.json()["error"]["kind"] == "Forbidden"
+    assert client.post("/api/run", data={"sample": "1"}, headers={"X-Sewtrace": "0"}).status_code == 403
+    assert client.get("/api/status").status_code == 200  # reads need no header
+    assert client.post("/api/run", data={"sample": "1"}, headers=CSRF).status_code == 202
+    assert "X-Sewtrace" in (Path(__file__).parent.parent / "sewtrace/web/index.html").read_text()
+    wait_job(client, client.get("/api/status").json()["latest"]["run"])
+
+
+def test_post_without_content_length_gets_411(client):
+    res = client.post("/api/run", content=iter([b"sample=1"]),
+                      headers={"Content-Type": "application/x-www-form-urlencoded"})
+    assert res.status_code == 411 and res.json()["error"]["kind"] == "LengthRequired"
+
+
+def _png_header(width: int, height: int) -> bytes:
+    """A PNG signature and IHDR that declare a size. The rest is missing, so it cannot decode."""
+    import struct
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+
+
+def test_photo_pixel_cap_is_read_from_the_header_before_decoding(tmp_path, sample_root, monkeypatch):
+    """A small file can declare a gigapixel image. Refuse it by its header, never call imdecode."""
+    from sewtrace.web import imagesize
+
+    def no_decode(*a, **k):
+        raise AssertionError("decoded an image above the pixel cap")
+
+    monkeypatch.setattr(cv2, "imdecode", no_decode)
+    client = make_client(tmp_path, sample_root)
+    huge = ("f.png", _png_header(32000, 32000), "image/png")  # about 1 gigapixel
+    res = client.post("/api/run", files={"front": huge, "back": huge, "sleeve": huge})
+    assert res.status_code == 413 and res.json()["error"]["kind"] == "PhotoTooManyPixels"
+    assert "front photo" in res.json()["error"]["message"]
+    limit = get_config().web.max_pixels
+    assert limit == 50_000_000
+    assert imagesize.image_size(_png_header(7000, 7000)) == (7000, 7000) and 7000 * 7000 < limit  # 49 MP
+    assert imagesize.image_size(_png_header(8000, 8000)) == (8000, 8000) and 8000 * 8000 > limit
+    # JPEG: the frame header comes after an EXIF segment, which is skipped by its length.
+    exif = b"\xff\xe1" + (2 + 6).to_bytes(2, "big") + b"Exif\0\0"
+    sof = b"\xff\xc2\x00\x0b\x08" + (6000).to_bytes(2, "big") + (8000).to_bytes(2, "big") + b"\x01\x01\x11\x00"
+    assert imagesize.image_size(b"\xff\xd8" + exif + sof) == (8000, 6000)
+    assert imagesize.image_size(b"\xff\xd8\xff\xe0\x00\x02") is None and imagesize.image_size(b"junk") is None
+    monkeypatch.undo()
+    jpg = photo_bytes(sample_root, "front")
+    w, h = imagesize.image_size(jpg)
+    small = make_client(tmp_path / "small", sample_root, web={"max_pixels": w * h - 1})
+    res = small.post("/api/proof", files={"photo": ("p.jpg", jpg, "image/jpeg")})
+    assert res.status_code == 413
+    ok = make_client(tmp_path / "ok", sample_root, web={"max_pixels": w * h}, mock=False, offline=True)
+    assert ok.post("/api/proof", files={"photo": ("p.jpg", jpg, "image/jpeg")}).status_code == 202
+    wait_job(ok, ok.get("/api/status").json()["latest"]["proof"])
+
+
+def test_error_messages_hide_server_folders(client, monkeypatch):
+    """The ledger, cache, repo root and sample folders never reach the page."""
+    from sewtrace.config import ROOT
+    ctx = client.app.state.ctx
+    secrets = [str(ctx.client.ledger_path), str(ctx.client.cache_dir), str(ROOT / "data" / "synth" / "tee1"),
+               str(ROOT / "sewtrace" / "x.py")]
+
+    def fail(*a, **k):
+        raise ApiError("failed with " + " and ".join(secrets))
+
+    monkeypatch.setattr(pipeline, "run", fail)
+    job = wait_job(client, client.post("/api/run", data={"sample": "1"}).json()["id"])
+    message = job["error"]["message"]
+    assert job["state"] == "error" and message.startswith("failed with")
+    for text in secrets + [str(ROOT), str(ctx.client.ledger_path.parent)]:
+        assert text not in message
+
+
+def test_wrong_password_waits_before_the_401(tmp_path, sample_root):
+    """A failed Basic auth waits auth_fail_delay_s. No header at all (the first browser prompt) does not."""
+    client = make_client(tmp_path, sample_root, password="pw", web={"auth_fail_delay_s": 0.3})
+    t0 = time.monotonic()
+    assert client.get("/").status_code == 401
+    assert time.monotonic() - t0 < 0.25
+    t0 = time.monotonic()
+    wrong = {"Authorization": "Basic " + base64.b64encode(b"u:nope").decode()}
+    assert client.get("/", headers=wrong).status_code == 401
+    assert time.monotonic() - t0 >= 0.3
+    right = {"Authorization": "Basic " + base64.b64encode(b"u:pw").decode()}
+    t0 = time.monotonic()
+    assert client.get("/", headers=right).status_code == 200
+    assert time.monotonic() - t0 < 0.25
+
+
+@pytest.mark.parametrize("name", ["..%2F..%2Fetc%2Fpasswd", "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "%2e%2e%5c%2e%2e%5cetc",
+                                  "..%252f..%252fetc%252fpasswd", "mask_front%00.jpg", "%2Fetc%2Fpasswd"])
+def test_file_route_refuses_encoded_traversal(client, name):
+    """The route serves only names in the job's file table. httpx would flatten literal ``..``, so
+    the dot segments are percent-encoded and sent as they are."""
+    jid = run_sample(client)["id"]
+    res = client.get(f"/api/jobs/{jid}/files/{name}")
+    assert res.status_code == 404 and "root:" not in res.text
+    assert client.get(f"/api/jobs/{jid}/files/mask_front").status_code == 200  # the same route works for a real name
+
+
+def test_overlays_make_no_model_call(client, monkeypatch):
+    """The mask overlays re-use the cached masks: client.calls does not move after pipeline.run."""
+    seen = {}
+    real_run = pipeline.run
+
+    def spy(*args, **kwargs):
+        result = real_run(*args, **kwargs)
+        seen["after_pipeline"] = client.app.state.ctx.client.calls
+        return result
+
+    monkeypatch.setattr(pipeline, "run", spy)
+    job = run_sample(client)
+    assert job["state"] == "done" and "after_pipeline" in seen
+    assert client.app.state.ctx.client.calls == seen["after_pipeline"] == job["result"]["model_calls"]
+
+
+def test_job_store_deletes_stale_folders_of_earlier_processes(tmp_path):
+    root = tmp_path / "jobs"
+    old, young = root / "old", root / "young"
+    for folder in (old, young):
+        (folder).mkdir(parents=True)
+        (folder / "front.jpg").write_bytes(b"x")
+    stamp = time.time() - 3 * 3600
+    import os
+    os.utime(old, (stamp, stamp))
+    JobStore(root, retention_min=120)
+    assert not old.exists() and young.exists()

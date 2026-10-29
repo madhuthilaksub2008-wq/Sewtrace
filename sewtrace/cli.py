@@ -71,10 +71,13 @@ def _dispatch(args: argparse.Namespace) -> None:
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
     elif args.cmd == "serve":
+        import logging
+
         import uvicorn
 
         from sewtrace.config import get_config
         from sewtrace.web.app import WebConfigError, create_app
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")  # shows the ledger line
         try:
             app = create_app()
         except WebConfigError as err:

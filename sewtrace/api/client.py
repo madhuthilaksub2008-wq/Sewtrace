@@ -41,7 +41,6 @@ import hashlib
 import http.client
 import json
 import logging
-import mimetypes
 import socket
 import ssl
 import time
@@ -329,7 +328,15 @@ class MetaClient:
             params["instructions_sha256"] = hashlib.sha256(instructions.encode()).hexdigest()
         paths = [Path(p) for p in image_paths]
         self._require_synthetic_for_contributor(paths)
-        key = self._key("reason", model.id, prompt, paths, params)
+        images: list[np.ndarray] = []
+        digests: list[str] | None = None
+        if paths and not self.settings.mock:
+            # Like SAM: the key follows the decoded pixels that are sent, not the file bytes.
+            images = [_read_pixels(p) for p in paths]
+            digests = [hashlib.sha256(i.tobytes()).hexdigest() for i in images]
+            params["upload_jpeg_quality"] = self.config.sam.upload_jpeg_quality
+            params["shapes"] = [list(i.shape) for i in images]
+        key = self._key("reason", model.id, prompt, paths, params, image_digests=digests)
         cached = self._cache_file(key, ".json")
         if cached.exists():
             return json.loads(cached.read_text())
@@ -340,7 +347,7 @@ class MetaClient:
                 raise RuntimeError("reason() called in mock mode without a mock answer")
             answer = mock()
         else:
-            answer = self._call_reasoning(model, prompt, paths, schema, instructions)
+            answer = self._call_reasoning(model, prompt, images, schema, instructions)
         cached.write_text(json.dumps(answer))
         return answer
 
@@ -418,21 +425,23 @@ class MetaClient:
                          image_digests=[hashlib.sha256(pixels.tobytes()).hexdigest()])
 
     def _call_reasoning(
-        self, model: ModelConfig, prompt: str, image_paths: Sequence[Path], schema: dict[str, Any] | None,
+        self, model: ModelConfig, prompt: str, images: Sequence[np.ndarray], schema: dict[str, Any] | None,
         instructions: str | None = None,
     ) -> dict[str, Any]:
-        """Muse chat completion, request shape as in the cookbook (01_api_fundamentals)."""
+        """Muse chat completion, request shape as in the cookbook (01_api_fundamentals).
+        ``images`` are decoded pixels, re-encoded here so no EXIF (GPS, camera) leaves the server."""
         reasoning = self.config.reasoning
+        quality = self.config.sam.upload_jpeg_quality
         body = reasoning_request_body(
-            model.id, prompt, [_data_url(p) for p in image_paths], schema, instructions,
+            model.id, prompt, [_jpeg_data_url(i, quality) for i in images], schema, instructions,
             effort=reasoning.effort, max_tokens=reasoning.max_tokens,
             max_tokens_param=reasoning.max_tokens_param, prompt_cache_key=reasoning.prompt_cache_key,
         )
         estimate = Usage(
             input_tokens=(len(prompt) + len(instructions or "")) // CHARS_PER_TOKEN
-            + reasoning.est_image_tokens * len(image_paths),
+            + reasoning.est_image_tokens * len(images),
             output_tokens=reasoning.max_tokens,  # worst case: the model uses the whole limit
-            images=len(image_paths),
+            images=len(images),
         )
         response = self._paid(model, "/chat/completions", body, estimate)
         choice = response["choices"][0]
@@ -591,30 +600,22 @@ class MetaClient:
         })
 
 
-def _data_url(path: Path) -> str:
-    """The cookbook sends images as ``data:<mime>;base64,...`` for both SAM and Muse."""
-    mime, _ = mimetypes.guess_type(path.name)
-    if mime is None or not mime.startswith("image/"):
-        raise ApiError(f"Cannot tell the image type of {path.name}. Use a .jpg or .png photo.")
-    return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
-
-
 def _read_pixels(path: Path) -> np.ndarray:
     """The pixels the pipeline works on. ``cv2.imread`` applies the EXIF orientation, so this is
     the frame every later step (marker, contour, mm scale) uses."""
     image = cv2.imread(str(path))
     if image is None:
-        raise ApiError(f"{path} is not a readable image. Check the photo path.")
+        raise ApiError(f"{path} is not a readable image (unknown image type or damaged file). Use a .jpg or .png photo.")
     return image
 
 
 def _jpeg_data_url(image: np.ndarray, quality: int) -> str:
-    """Re-encode the decoded pixels for SAM at full resolution (no downscaling yet: a separate
-    follow-up). Encoding drops EXIF, so SAM cannot rotate the photo behind our back, and its box
-    coordinates are in the frame of ``image``."""
+    """Re-encode the decoded pixels for SAM and Muse at full resolution (no downscaling yet: a
+    separate follow-up). Encoding drops EXIF (GPS, camera), so a model cannot rotate the photo
+    behind our back, and SAM box coordinates are in the frame of ``image``."""
     ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
-        raise ApiError("Could not re-encode the photo for SAM.")
+        raise ApiError("Could not re-encode the photo for the model.")
     return f"data:image/jpeg;base64,{base64.b64encode(buffer.tobytes()).decode()}"
 
 

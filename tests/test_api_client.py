@@ -278,7 +278,7 @@ def test_req_api_02_changed_parameter_misses_cache(tmp_path, photo, change):
     if change == "prompt":
         prompt = "p2"
     elif change == "image":
-        photo.write_bytes(b"other bytes")
+        cv2.imwrite(str(photo), np.full((40, 40, 3), 90, np.uint8))  # other pixels (real keys hash pixels)
     elif change == "schema":
         schema = {"type": "array"}
     elif change == "effort":
@@ -576,3 +576,42 @@ def test_spec_4_3_contributor_accepts_synthetic_photos_and_text_only(tmp_path, p
     assert client.reason("p", [tee / "front.jpg"]) == {"ok": 1}
     assert transport.calls[0][2]["model"] == "muse-spark-1.3-contributor"
     assert client.reason("text only") == {"ok": 1}  # no images: nothing to protect
+
+
+# ---- Muse gets re-encoded pixels, not the upload (privacy, REQ-API-02) -----------------------
+
+def _jpeg_with_exif(path: Path, color: int) -> bytes:
+    """A JPEG with an APP1 (EXIF) segment that holds a fake GPS tag, as a phone writes it."""
+    ok, buf = cv2.imencode(".jpg", np.full((40, 40, 3), color, np.uint8))
+    payload = b"Exif\0\0" + b"GPSLatitude=12.34;Make=SecretPhone"
+    data = bytes(buf)[:2] + b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload + bytes(buf)[2:]
+    path.write_bytes(data)
+    return data
+
+
+def test_req_api_02_muse_images_are_reencoded_without_exif(tmp_path):
+    """The bytes sent to Muse hold no APP1/EXIF segment, like the SAM upload; the cache key follows the pixels."""
+    import base64
+    photo = tmp_path / "gps.jpg"
+    original = _jpeg_with_exif(photo, 200)
+    assert b"GPSLatitude" in original
+    transport = FakeTransport(_answer())
+    client, _ = _client(tmp_path, transport)
+    client.reason("p", [photo])
+    content = transport.calls[0][2]["messages"][-1]["content"]
+    (url,) = [c["image_url"]["url"] for c in content if c.get("type") == "image_url"]
+    assert url.startswith("data:image/jpeg;base64,")
+    sent = base64.b64decode(url.split(",", 1)[1])
+    assert b"GPSLatitude" not in sent and b"SecretPhone" not in sent and b"Exif" not in sent
+    assert b"\xff\xe1" not in sent[:200]  # no APP1 marker among the first segments
+    assert cv2.imdecode(np.frombuffer(sent, np.uint8), cv2.IMREAD_COLOR).shape == (40, 40, 3)
+    # Same pixels in a file without EXIF: same key, so no second paid call.
+    plain = tmp_path / "plain.jpg"
+    cv2.imwrite(str(plain), cv2.imdecode(np.frombuffer(original, np.uint8), cv2.IMREAD_COLOR))
+    client.reason("p", [plain])
+    assert len(transport.calls) == 1
+    # Different pixels: a new key.
+    other = tmp_path / "other.jpg"
+    _jpeg_with_exif(other, 90)
+    client.reason("p", [other])
+    assert len(transport.calls) == 2
