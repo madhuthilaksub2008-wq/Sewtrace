@@ -27,6 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.datastructures import UploadFile
 
+from sewtrace import demo
 from sewtrace.api.client import LedgerMountError, MetaClient
 from sewtrace.config import ROOT, Settings
 from sewtrace.output.marker_pdf import marker_pdf_bytes
@@ -40,6 +41,7 @@ PASSWORD_ENV = "SEWTRACE_WEB_PASSWORD"
 MAX_PIXELS_ENV = "OPENCV_IO_MAX_IMAGE_PIXELS"
 CSRF_HEADER = "x-sewtrace"
 PAGE = Path(__file__).with_name("index.html")
+DEMO_PAGE = Path(__file__).with_name("demo.html")
 DOWNLOAD_NAMES = {"pdf", "svg", "dxf", "spec"}
 MULTIPART_SLACK_BYTES = 64 * 1024  # form overhead on top of the photo limits
 REAL_MODE_MESSAGE = (
@@ -117,6 +119,7 @@ def create_app(
     password: str | None = None,
     jobs_dir: Path | None = None,
     sample_root: Path | None = None,
+    demo_root: Path | None = None,
 ) -> FastAPI:
     """Build the app. Raises WebConfigError in REAL mode without a password."""
     settings = settings or Settings.load()
@@ -138,6 +141,7 @@ def create_app(
     log.info("ledger %s, total $%.4f of $%.2f, mode %s, cache %s", client.ledger_path, client.ledger_total_usd(),
              settings.config.api.budget_limit_usd, mode_label(settings), client.cache_dir)
     sample_root = sample_root or ROOT / "data" / "synth"
+    demo_root = demo_root or demo.DEMO_DIR
     jobs_dir = jobs_dir or Path(tempfile.gettempdir()) / "sewtrace-web"
     sample_dir = service.ensure_sample(sample_root)
     # Server folders and the key never reach the page, even inside an error message.
@@ -176,6 +180,31 @@ def create_app(
     @app.get("/")
     def page() -> FileResponse:
         return FileResponse(PAGE, media_type="text/html")
+
+    @app.get("/demo")
+    def demo_page() -> FileResponse:
+        return FileResponse(DEMO_PAGE, media_type="text/html")
+
+    # The demo routes read recorded files only: no pipeline, no MetaClient call (REQ-API-08, C-02).
+    @app.get("/api/demo")
+    def demo_list() -> dict:
+        return {"bundles": demo.list_bundles(demo_root)}
+
+    @app.get("/api/demo/{name}")
+    def demo_data(name: str) -> JSONResponse:
+        try:
+            return JSONResponse(demo.payload(demo.load_bundle(name, demo_root)))
+        except demo.DemoError as err:
+            return _error(404, "DemoMissing", "The demo cannot be played", str(err))
+
+    @app.get("/api/demo/{name}/files/{file}")
+    def demo_file(name: str, file: str) -> Response:
+        path = None
+        if file in demo.SERVED_FILES and demo.NAME_RE.match(name):
+            path = demo_root / name / file
+        if path is None or not path.is_file():
+            return _error(404, "FileGone", "File not found", f"The demo file {file} is not in the bundle.")
+        return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream")
 
     @app.get("/marker.pdf")
     def marker() -> Response:

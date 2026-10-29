@@ -43,6 +43,8 @@ pip install -e '.[real]'
 
 Start the test page with `sewtrace serve`. To deploy it, read `docs/DEPLOY.md`.
 
+Record a demo with `sewtrace demo record <garment_dir>`. Play it with no network with `sewtrace demo play <name>`. Read `docs/DEMO.md`.
+
 Run the Day 1 test on one photo. It makes two paid calls, so it needs the flag:
 
 ```bash

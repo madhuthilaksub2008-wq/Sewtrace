@@ -1,0 +1,17 @@
+[
+ {
+  "iteration": 0,
+  "source": "initial",
+  "applied": [],
+  "diffs": {
+   "front.shoulder~back.shoulder": -0.5,
+   "front.side~back.side": -0.53,
+   "front.armhole+back.armhole~sleeve.cap": 5.3,
+   "sleeve.underarm~sleeve.underarm:mirror": 0.0
+  },
+  "failing": [],
+  "equal_by_construction": [
+   "sleeve.underarm~sleeve.underarm:mirror"
+  ]
+ }
+]

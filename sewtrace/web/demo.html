@@ -1,0 +1,616 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewtrace demo</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0d131c; color: #f2f5f9; font-family: system-ui, "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #demoStage { flex: 1 1 auto; min-height: 0; width: 100%; display: block; }
+  #demoControls { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 8px 16px;
+                  background: #18212e; border-top: 1px solid #2c394b; font-size: 15px; }
+  #demoControls.hidden { display: none; }
+  button, select { font: inherit; padding: 5px 14px; border-radius: 6px; border: 1px solid #5b6b82; background: #223044; color: #f2f5f9; cursor: pointer; }
+  button.primary { background: #2f6fd6; border-color: #2f6fd6; min-width: 84px; }
+  input[type=range] { flex: 1 1 260px; min-width: 200px; }
+  #demoTime { font-variant-numeric: tabular-nums; color: #b8c4d4; min-width: 110px; }
+  #demoHint { color: #8b9bb0; font-size: 13px; }
+  a { color: #8fb8ff; }
+  text { font-family: system-ui, "Segoe UI", sans-serif; }
+  .glow { filter: drop-shadow(0 0 6px rgba(80, 220, 255, .8)); }
+</style>
+</head>
+<body>
+<svg id="demoStage" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Sewtrace demo: three photos to one sewing pattern"></svg>
+<div id="demoControls">
+  <button id="demoRestart" type="button">Restart</button>
+  <button id="demoBack" type="button">Back</button>
+  <button id="demoPlay" class="primary" type="button">Play</button>
+  <button id="demoStep" type="button">Step</button>
+  <label>Speed
+    <select id="demoSpeed">
+      <option value="0.5">0.5x</option><option value="1" selected>1x</option>
+      <option value="1.5">1.5x</option><option value="2">2x</option>
+    </select>
+  </label>
+  <input id="demoSeek" type="range" min="0" max="1000" value="0" aria-label="Position">
+  <span id="demoTime">0.0 s</span>
+  <a href="/">Test page</a>
+  <span id="demoHint">Space: play or pause. Left and right arrows: step. H: hide these controls.</span>
+</div>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const W = 1920, H = 1080;
+const LEFT = {x: 60, y: 140, w: 1020, h: 765};   // photo box
+const RIGHT = {x: 1140, y: 140, w: 720, h: 810}; // measurements, pattern, numbers
+const C = {ink: "#f2f5f9", dim: "#8b9bb0", cyan: "#4fd8ff", amber: "#ffb43c", red: "#e5484d", green: "#30a46c", grey: "#6b7686", panel: "#18212e", line: "#2c394b"};
+const KEY_LABEL = {chest_width: "Chest width", body_length: "Body length", shoulder_width: "Shoulder width",
+                   sleeve_length: "Sleeve length", neck_width: "Neck width", armhole_depth: "Armhole depth"};
+
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const lerp = (a, b, u) => a + (b - a) * u;
+const ease = (u) => { u = clamp01(u); return u * u * (3 - 2 * u); };
+const ramp = (t, a, b) => clamp01((t - a) / (b - a));
+const f1 = (v) => v.toFixed(1), f2 = (v) => v.toFixed(2);
+const signed = (v, d = 2) => (Math.abs(v) < 0.5 * Math.pow(10, -d) ? 0 : v).toFixed(d).replace(/^(?=\d)/, "+");
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+  if (parent) parent.append(e);
+  return e;
+}
+function txt(parent, x, y, size, fill, str, extra) {
+  const e = el("text", Object.assign({x, y, "font-size": size, fill}, extra || {}), parent);
+  e.textContent = str;
+  return e;
+}
+const setT = (e, str) => { if (e.textContent !== str) e.textContent = str; };
+const show = (e, o) => { e.setAttribute("opacity", o.toFixed(3)); e.style.display = o <= 0.001 ? "none" : ""; };
+
+function mix(c1, c2, u) {
+  const p = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+  const a = p(c1), b = p(c2);
+  return "#" + a.map((v, i) => Math.round(lerp(v, b[i], clamp01(u))).toString(16).padStart(2, "0")).join("");
+}
+
+let D = null;       // bundle data from /api/demo/<name>
+let tl = null;      // timeline
+let total = 0;
+let t = 0, playing = false, speed = 1, last = 0;
+const ui = {};
+
+// ---------- photo geometry ----------
+function fitBox(box, w, h) {
+  const k = Math.min(box.w / w, box.h / h);
+  return {k, ox: box.x + (box.w - w * k) / 2, oy: box.y + (box.h - h * k) / 2, w, h};
+}
+function photoMap(view) {
+  const v = view === "proof" ? {width_px: D.proof.width_px, height_px: D.proof.height_px} : D.views[view];
+  return fitBox(LEFT, v.width_px, v.height_px);
+}
+const toStage = (m, p) => [m.ox + p[0] * m.k, m.oy + p[1] * m.k];
+function pathD(pts, closed) { return pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("") + (closed ? "Z" : ""); }
+function polyLen(pts, closed) {
+  let s = 0;
+  for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  if (closed) s += Math.hypot(pts[0][0] - pts.at(-1)[0], pts[0][1] - pts.at(-1)[1]);
+  return s;
+}
+function bbox(pts) {
+  const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+  return {x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys)};
+}
+function centroid(pts) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % pts.length], cr = x0 * y1 - x1 * y0;
+    a += cr; cx += (x0 + x1) * cr; cy += (y0 + y1) * cr;
+  }
+  return Math.abs(a) < 1e-6 ? [pts[0][0], pts[0][1]] : [cx / (3 * a), cy / (3 * a)];
+}
+function edgeIdx(n, [s, e]) {
+  const out = [];
+  if (s <= e) for (let i = s; i <= e; i++) out.push(i); else { for (let i = s; i < n; i++) out.push(i); for (let i = 0; i <= e; i++) out.push(i); }
+  return out;
+}
+
+// ---------- timeline ----------
+function buildTimeline() {
+  const seg = [];
+  let c = 0;
+  const add = (id, title, dur, extra) => { const p = Object.assign({id, title, t0: c, t1: c + dur, dur}, extra || {}); seg.push(p); c += dur; return p; };
+  const views = ["front", "back", "sleeve"];
+  add("masks", "1  SAM finds the t-shirt in each photo", 3.4 * views.length);
+  add("measure", "2  The marker turns pixels into millimetres", 1.0 + 0.9 * D.measurement_keys.length + 2.0);
+  const lifted = D.placement.panels.filter((p) => p.photo_view);
+  const loose = D.placement.panels.filter((p) => !p.photo_view);
+  add("lift", "3  The panels lift out of the photos", 3.8 * lifted.length + (loose.length ? 2.0 : 0.6), {lifted, loose});
+  const rows = D.seam_log;
+  const n = D.seams.length;
+  const iter = [];
+  let d = c;
+  rows.forEach((r, i) => {
+    const dur = i === 0 ? 0.8 + 0.8 * n + 1.4 : 4.2;
+    iter.push({i, t0: d, t1: d + dur});
+    d += dur;
+  });
+  add("seams", "4  The seam check turns every pair green", d - c + 2.5, {iter});
+  if (D.proof) add("proof", "5  The paper pattern on the t-shirt", 10.0);
+  add("end", `6  Six measurements on ${D.eval ? new Set(D.eval.rows.map((r) => r.garment)).size : "the"} tees`, 4.0 + 0.7 * (D.eval ? D.eval.rows.length : 0) + 4.0);
+  total = c;
+  return seg;
+}
+const phaseOf = (id) => tl.find((p) => p.id === id);
+
+// ---------- build the scene ----------
+let S = {};
+function buildScene() {
+  const svg = ui.stage;
+  svg.replaceChildren();
+  el("rect", {x: 0, y: 0, width: W, height: H, fill: "#0d131c"}, svg);
+  txt(svg, 60, 80, 56, C.ink, "Sewtrace", {"font-weight": 700});
+  S.title = txt(svg, 1860, 78, 40, C.cyan, "", {"text-anchor": "end", "font-weight": 600});
+  S.bar = el("rect", {x: 60, y: 104, width: 0, height: 6, fill: C.cyan, rx: 3}, svg);
+  el("rect", {x: 60, y: 104, width: 1800, height: 6, fill: C.line, rx: 3, opacity: 0.6}, svg).before(S.bar);
+  for (const p of tl) el("rect", {x: 60 + 1800 * p.t0 / total - 1, y: 100, width: 3, height: 14, fill: C.dim}, svg);
+
+  // left zone: photo
+  S.leftFrame = el("rect", {x: LEFT.x - 6, y: LEFT.y - 6, width: LEFT.w + 12, height: LEFT.h + 12, rx: 10, fill: "#111925", stroke: C.line, "stroke-width": 2}, svg);
+  S.img = el("image", {x: 0, y: 0, width: 10, height: 10, preserveAspectRatio: "none"}, svg);
+  S.imgKey = null;
+  S.photoCap = txt(svg, LEFT.x, LEFT.y + LEFT.h + 52, 34, C.ink, "");
+  S.mask = el("path", {fill: C.cyan, "fill-opacity": 0, stroke: C.cyan, "stroke-width": 5, "stroke-linejoin": "round", class: "glow"}, svg);
+  S.maskKey = null;
+
+  // right zone frame
+  S.rightFrame = el("rect", {x: RIGHT.x - 6, y: RIGHT.y - 6, width: RIGHT.w + 12, height: RIGHT.h + 12, rx: 10, fill: C.panel, stroke: C.line, "stroke-width": 2}, svg);
+
+  // masks info (right)
+  S.maskInfo = el("g", {}, svg);
+  txt(S.maskInfo, RIGHT.x + 24, RIGHT.y + 56, 34, C.dim, "SAM mask, scaled by the marker");
+  S.maskRows = ["front", "back", "sleeve"].map((v, i) => {
+    const g = el("g", {}, S.maskInfo), y = RIGHT.y + 150 + i * 170;
+    const o = D.views[v], b = bbox(o.outline_mm);
+    txt(g, RIGHT.x + 24, y, 46, C.cyan, v[0].toUpperCase() + v.slice(1), {"font-weight": 700});
+    txt(g, RIGHT.x + 24, y + 56, 36, C.ink, `${f1(b.x1 - b.x0)} x ${f1(b.y1 - b.y0)} mm`);
+    txt(g, RIGHT.x + 24, y + 104, 28, C.dim, `${o.outline_px.length} outline points`);
+    return g;
+  });
+
+  // measurements (right)
+  S.meas = el("g", {}, svg);
+  txt(S.meas, RIGHT.x + 24, RIGHT.y + 56, 34, C.dim, "Measured from the photos");
+  S.measRows = D.measurement_keys.map((k, i) => {
+    const g = el("g", {}, S.meas), y = RIGHT.y + 140 + i * 110;
+    el("line", {x1: RIGHT.x + 24, x2: RIGHT.x + RIGHT.w - 24, y1: y + 28, y2: y + 28, stroke: C.line, "stroke-width": 2}, g);
+    txt(g, RIGHT.x + 24, y, 38, C.ink, KEY_LABEL[k] || k);
+    const val = txt(g, RIGHT.x + RIGHT.w - 24, y, 52, C.amber, "", {"text-anchor": "end", "font-weight": 700});
+    return {g, val, key: k};
+  });
+
+  // pattern layout (right)
+  S.layout = el("g", {}, svg);
+  buildLayout();
+
+  // seams (left)
+  S.seamBox = el("g", {}, svg);
+  buildSeams();
+
+  // proof
+  S.proof = el("g", {}, svg);
+  if (D.proof) buildProof();
+
+  // end card
+  S.end = el("g", {}, svg);
+  buildEnd();
+
+  S.foot = txt(svg, 60, 1050, 24, C.dim, `Recorded ${D.created.slice(0, 10)} in ${D.mode.toUpperCase()} mode from ${D.garment}. This page plays the recording: no network, no model call.`);
+}
+
+function sheetMap() {
+  const all = D.placement.panels.flatMap((p) => p.cut_layout_mm);
+  const b = bbox(all), pad = 30, top = 80;
+  const k = Math.min((RIGHT.w - 2 * pad) / (b.x1 - b.x0), (RIGHT.h - top - pad - 50) / (b.y1 - b.y0));
+  return {k, ox: RIGHT.x + (RIGHT.w - (b.x1 - b.x0) * k) / 2 - b.x0 * k, oy: RIGHT.y + top - b.y0 * k + 10};
+}
+const sheetPt = (m, p) => [m.ox + p[0] * m.k, m.oy + p[1] * m.k];
+
+function buildLayout() {
+  const g = S.layout, m = S.sheet = sheetMap();
+  txt(g, RIGHT.x + 24, RIGHT.y + 56, 34, C.dim, "Pattern at 1 : 1");
+  // 100 mm scale bar, the same square that is on page 1 of the PDF
+  const bar = el("g", {}, g);
+  const bx = RIGHT.x + RIGHT.w - 24 - 100 * m.k, by = RIGHT.y + RIGHT.h - 28;
+  el("line", {x1: bx, x2: bx + 100 * m.k, y1: by, y2: by, stroke: C.ink, "stroke-width": 4}, bar);
+  el("line", {x1: bx, x2: bx, y1: by - 10, y2: by + 10, stroke: C.ink, "stroke-width": 4}, bar);
+  el("line", {x1: bx + 100 * m.k, x2: bx + 100 * m.k, y1: by - 10, y2: by + 10, stroke: C.ink, "stroke-width": 4}, bar);
+  txt(bar, bx - 14, by + 9, 26, C.ink, "100 mm", {"text-anchor": "end"});
+  S.panels = D.placement.panels.map((p) => {
+    const gp = el("g", {}, g);
+    const cut = el("path", {d: pathD(p.cut_layout_mm.map((q) => sheetPt(m, q)), true), fill: "none", stroke: C.ink, "stroke-width": 2.5, "stroke-dasharray": "10 6"}, gp);
+    const stitch = el("path", {fill: "rgba(255,180,60,.28)", stroke: C.amber, "stroke-width": 4, "stroke-linejoin": "round"}, gp);
+    const lay = p.layout_mm.map((q) => sheetPt(m, q));
+    let fold = null;
+    if (p.on_fold && p.edges.fold) fold = el("path", {d: pathD(edgeIdx(lay.length, p.edges.fold).map((i) => lay[i]), false), fill: "none", stroke: "#6fb2ff", "stroke-width": 5, "stroke-dasharray": "14 8"}, gp);
+    const b = bbox(lay), [cx, cy] = centroid(lay), flat = b.y1 - b.y0 < 90;
+    // A flat panel (neckband) gets one line; the others get a name and the cut line under it.
+    const label = txt(gp, cx, flat ? cy + 8 : cy - 4, flat ? 24 : 26, C.ink, flat ? `${p.name.toUpperCase()}  cut ${p.cut}` : p.name.toUpperCase(), {"text-anchor": "middle", "font-weight": 700});
+    const sub = txt(gp, cx, cy + 26, 20, C.dim, flat ? "" : "cut " + p.cut, {"text-anchor": "middle"});
+    let from = null;
+    if (p.photo_px) { const pm = photoMap(p.photo_view); from = p.photo_px.map((q) => toStage(pm, q)); }
+    return {p, g: gp, cut, stitch, fold, label, sub, from, to: lay};
+  });
+  // seam highlights drawn over the panels
+  S.seamLines = D.seams.map((s) => {
+    const refs = [...s.a.split("+"), ...s.b.split("+")].map((r) => r.split(":")[0].split("."));
+    return refs.map(([pn, en]) => {
+      const pl = S.panels.find((q) => q.p.name === pn);
+      if (!pl || !pl.p.edges[en]) return null;
+      const pts = edgeIdx(pl.to.length, pl.p.edges[en]).map((i) => pl.to[i]);
+      return el("path", {d: pathD(pts, false), fill: "none", "stroke-width": 11, "stroke-linecap": "round", "stroke-linejoin": "round", opacity: 0.9}, g);
+    }).filter(Boolean);
+  });
+}
+
+const prettyRef = (r) => r.split("+").map((x) => x.replace(":mirror", " (mirrored)").replace(".", " ")).join(" + ");
+function buildSeams() {
+  const g = S.seamBox, n = D.seams.length;
+  txt(g, LEFT.x + 8, LEFT.y + 44, 36, C.dim, "Seam pairs that are sewn together");
+  S.callTxt = txt(g, LEFT.x + LEFT.w - 8, LEFT.y + 44, 40, C.ink, "", {"text-anchor": "end", "font-weight": 700});
+  const step = Math.min(112, (LEFT.h - 220) / n);
+  S.seamRows = D.seams.map((s, i) => {
+    const y = LEFT.y + 130 + i * step, r = el("g", {}, g);
+    const dot = el("circle", {cx: LEFT.x + 40, cy: y - 10, r: 24, fill: C.grey}, r);
+    txt(r, LEFT.x + 90, y, 34, C.ink, prettyRef(s.a) + "  to  " + prettyRef(s.b));
+    const sub = txt(r, LEFT.x + 90, y + 36, 26, C.dim, "");
+    return {s, dot, sub};
+  });
+  S.seamNote = txt(g, LEFT.x + 8, LEFT.y + LEFT.h - 62, 34, C.amber, "", {"font-weight": 600});
+  S.seamDetail = txt(g, LEFT.x + 8, LEFT.y + LEFT.h - 22, 28, C.ink, "");
+}
+
+function buildProof() {
+  const g = S.proof, pr = D.proof, n = pr.points_px.length;
+  S.proofMap = photoMap("proof");
+  const pts = pr.points_px.map((p) => toStage(S.proofMap, p));
+  const res = pr.result;
+  S.proofSegs = pts.map((p, i) => {
+    const j = (i + 1) % n;
+    const dmm = Math.hypot(res.points_mm[i][0] - res.points_mm[j][0], res.points_mm[i][1] - res.points_mm[j][1]);
+    if (dmm > 2.5 * res.step_mm) return null; // a stretch that was left out lies between these points
+    return el("line", {x1: p[0], y1: p[1], x2: pts[j][0], y2: pts[j][1], "stroke-width": 9, "stroke-linecap": "round"}, g);
+  });
+  S.proofNeck = pr.neck_points_px.map((p) => { const q = toStage(S.proofMap, p); return el("circle", {cx: q[0], cy: q[1], r: 4, fill: C.grey}, g); });
+  S.proofFold = pr.fold_px ? el("path", {d: pathD(pr.fold_px.map((p) => toStage(S.proofMap, p)), false), stroke: C.grey, "stroke-width": 9, fill: "none"}, g) : null;
+  S.proofRight = el("g", {}, g);
+  const x = RIGHT.x + 24, y = RIGHT.y;
+  txt(S.proofRight, x, y + 56, 34, C.dim, "Gap between paper and t-shirt edge");
+  S.gapBig = txt(S.proofRight, x, y + 220, 150, C.green, "", {"font-weight": 700});
+  txt(S.proofRight, x, y + 285, 40, C.ink, "mean gap, mm");
+  S.proofLines = [0, 1, 2].map((i) => txt(S.proofRight, x, y + 380 + i * 62, 38, C.ink, ""));
+  S.proofNeckTxt = txt(S.proofRight, x, y + 600, 28, C.dim, "");
+  txt(S.proofRight, x, y + 730, 28, C.dim, `Green: gap under ${res.tol_mm} mm. Red: more.`);
+  txt(S.proofRight, x, y + 768, 28, C.dim, "Grey: fold and neck, not compared.");
+}
+
+function buildEnd() {
+  const g = S.end;
+  el("rect", {x: 40, y: 130, width: 1840, height: 880, rx: 14, fill: C.panel, stroke: C.line, "stroke-width": 2}, g);
+  txt(g, 90, 205, 46, C.ink, "Error in mm against the ground truth", {"font-weight": 700});
+  S.endRows = [];
+  const E = D.eval;
+  if (!E) { txt(g, 90, 320, 38, C.amber, "No eval results are in this recording. Run: sewtrace eval, then record the demo again."); return; }
+  const cols = D.measurement_keys, x0 = 90, cw = 190, first = 300;
+  txt(g, x0, 290, 28, C.dim, "tee", {});
+  cols.forEach((k, i) => (KEY_LABEL[k] || k).split(" ").forEach((word, n) => txt(g, first + i * cw + cw - 20, 262 + 30 * n, 26, C.dim, word, {"text-anchor": "end"})));
+  txt(g, first + cols.length * cw + 170, 290, 26, C.dim, "mean error", {"text-anchor": "end"});
+  txt(g, first + cols.length * cw + 340, 290, 26, C.dim, "seams", {"text-anchor": "end"});
+  const rowH = Math.min(100, 560 / (E.rows.length + 1));
+  E.rows.forEach((r, i) => {
+    const y = 360 + i * rowH, row = el("g", {}, g);
+    el("line", {x1: 80, x2: 1840, y1: y + 22, y2: y + 22, stroke: C.line, "stroke-width": 2}, row);
+    txt(row, x0, y, 40, C.ink, r.garment + (E.rows.some((q) => q.garment === r.garment && q.run !== r.run) ? " #" + r.run : ""), {"font-weight": 600});
+    cols.forEach((k, j) => {
+      const v = r.errors_mm[k];
+      txt(row, first + j * cw + cw - 20, y, 40, C.ink, v === null || v === undefined ? "-" : signed(v), {"text-anchor": "end"});
+    });
+    txt(row, first + cols.length * cw + 170, y, 40, C.amber, r.mean_abs_err_mm === null ? "-" : f2(r.mean_abs_err_mm), {"text-anchor": "end", "font-weight": 700});
+    txt(row, first + cols.length * cw + 340, y, 40, r.seams_ok ? C.green : C.red, r.seams_ok ? "all ok" : "FAIL", {"text-anchor": "end", "font-weight": 700});
+    S.endRows.push(row);
+  });
+  const y = 360 + E.rows.length * rowH + 20;
+  S.endMean = el("g", {}, g);
+  txt(S.endMean, 90, y + 40, 46, C.ink, "Mean absolute error", {"font-weight": 700});
+  txt(S.endMean, first + cols.length * cw + 170, y + 40, 52, C.green, E.mean_abs_err_mm === null ? "-" : f2(E.mean_abs_err_mm) + " mm", {"text-anchor": "end", "font-weight": 700});
+  txt(g, 90, 975, 24, C.dim, "Source: " + E.source);
+}
+
+// ---------- draw one frame ----------
+function setPhoto(key) {
+  if (S.imgKey === key) return;
+  S.imgKey = key;
+  const m = photoMap(key);
+  S.img.setAttribute("href", D.urls[key]);
+  S.img.setAttribute("x", m.ox); S.img.setAttribute("y", m.oy);
+  S.img.setAttribute("width", m.w * m.k); S.img.setAttribute("height", m.h * m.k);
+}
+function setMask(view, drawn, fill) {
+  const key = view;
+  const m = photoMap(view), pts = D.views[view].outline_px.map((p) => toStage(m, p));
+  if (S.maskKey !== key) { S.maskKey = key; S.mask.setAttribute("d", pathD(pts, true)); S.maskLen = polyLen(pts, true); }
+  S.mask.setAttribute("stroke-dasharray", S.maskLen.toFixed(1));
+  S.mask.setAttribute("stroke-dashoffset", (S.maskLen * (1 - clamp01(drawn))).toFixed(1));
+  S.mask.setAttribute("fill-opacity", (0.18 * fill).toFixed(3));
+  S.mask.style.display = drawn <= 0 ? "none" : "";
+}
+
+function frame() {
+  const views = ["front", "back", "sleeve"];
+  const P = Object.fromEntries(tl.map((p) => [p.id, p]));
+  const cur = tl.find((p) => t < p.t1) || tl.at(-1);
+  setT(S.title, cur.title);
+  S.bar.setAttribute("width", (1800 * t / total).toFixed(1));
+
+  // defaults: everything hidden, each phase turns on what it owns
+  let leftPhoto = null, photoDim = 1, layoutOpacity = 0;
+  let maskView = null, maskDrawn = 0, maskFill = 0;
+  let cap = "";
+
+  // 1 masks
+  if (t < P.masks.t1) {
+    const i = Math.min(2, Math.floor(t / 3.4)), u = t - i * 3.4;
+    leftPhoto = views[i]; maskView = views[i];
+    maskDrawn = ease(ramp(u, 0.5, 2.5)); maskFill = ramp(u, 2.3, 3.0);
+    cap = `${views[i]} photo: the SAM outline draws on`;
+    S.maskRows.forEach((r, j) => show(r, j < i ? 1 : j === i ? ramp(u, 2.2, 2.8) : 0));
+  }
+  // 2 measurements
+  if (t >= P.measure.t0 && t < P.measure.t1) {
+    const u = t - P.measure.t0;
+    leftPhoto = "front"; maskView = "front"; maskDrawn = 1; maskFill = 1;
+    cap = "The 100 mm marker in each photo sets the scale";
+    S.measRows.forEach((r, i) => {
+      const a = 1.0 + 0.9 * i, k = ease(ramp(u, a, a + 0.8));
+      show(r.g, k);
+      setT(r.val, k <= 0 ? "" : f1(D.measurements[r.key] * ease(ramp(u, a, a + 0.8))) + " mm");
+    });
+  }
+  // 3 lift
+  const L = P.lift;
+  const lay = {};
+  if (t >= L.t0) {
+    const u = t - L.t0, n = L.lifted.length;
+    const fadeIn = ramp(t, L.t0, L.t0 + 0.5);
+    layoutOpacity = fadeIn;
+    const idx = Math.min(n - 1, Math.floor(u / 3.8));
+    S.panels.forEach((pl) => {
+      let o = 0, pos = null, cutO = 0;
+      const j = L.lifted.indexOf(pl.p);
+      if (j >= 0) {
+        const lu = u - j * 3.8;
+        if (lu < 0) { o = 0; }
+        else {
+          const mv = ease(ramp(lu, 1.2, 2.8));
+          o = ramp(lu, 0, 0.5);
+          pos = pl.from.map((a, i) => [lerp(a[0], pl.to[i][0], mv), lerp(a[1], pl.to[i][1], mv)]);
+          cutO = ramp(lu, 2.8, 3.6);
+        }
+        if (u >= 3.8 * (j + 1)) pos = pl.to;
+      } else {
+        const lu = u - 3.8 * n;
+        o = ramp(lu, 0, 0.8); cutO = o; pos = pl.to;
+      }
+      lay[pl.p.name] = {o, pos, cutO};
+    });
+    if (t < L.t1) {
+      const j = idx, pl = L.lifted[j], lu = u - 3.8 * Math.min(j, n - 1);
+      if (u < 3.8 * n) {
+        leftPhoto = pl.photo_view; maskView = pl.photo_view; maskDrawn = 1; maskFill = 0.4;
+        cap = `${pl.name} panel (cut ${pl.cut}), from the ${pl.photo_view} photo`;
+        photoDim = 1;
+      } else { leftPhoto = "sleeve"; photoDim = 0.3; cap = "The neckband is drawn from the neck length"; }
+    }
+  }
+  // 4 seams
+  let seamState = null;
+  if (t >= P.seams.t0) seamState = seamAt(t);
+  // 5 proof
+  let proofShow = 0, sweep = 0;
+  if (D.proof && t >= P.proof.t0) {
+    const u = t - P.proof.t0;
+    proofShow = 1; sweep = ease(ramp(u, 1.6, 7.0));
+    leftPhoto = "proof"; cap = u < 1.6 ? "Proof photo: the paper pattern on the t-shirt" : "Paper edge against t-shirt edge";
+  }
+  // 6 end
+  const E = P.end;
+  const endU = t - E.t0;
+
+  // left zone
+  const inSeams = t >= P.seams.t0 && !(D.proof && t >= P.proof.t0) && t < E.t0;
+  const inEnd = t >= E.t0;
+  const showPhoto = leftPhoto && !inSeams && !inEnd;
+  if (leftPhoto) setPhoto(leftPhoto);
+  show(S.img, showPhoto ? photoDim : 0);
+  show(S.leftFrame, inEnd ? 0 : 1);
+  setT(S.photoCap, showPhoto ? cap : "");
+  if (maskView && showPhoto) setMask(maskView, maskDrawn, maskFill); else S.mask.style.display = "none";
+
+  // right zone
+  const hideRight = inEnd;
+  show(S.rightFrame, hideRight ? 0 : 1);
+  show(S.maskInfo, t < P.masks.t1 ? 1 : 0);
+  show(S.meas, t >= P.measure.t0 && t < L.t0 ? 1 : 0);
+  show(S.layout, (t >= L.t0 && !(D.proof && t >= P.proof.t0) && !inEnd) ? layoutOpacity : 0);
+  S.panels.forEach((pl) => {
+    const s = lay[pl.p.name] || {o: 0, pos: null, cutO: 0};
+    show(pl.g, s.o);
+    if (s.pos) pl.stitch.setAttribute("d", pathD(s.pos, true));
+    show(pl.cut, s.cutO); if (pl.fold) show(pl.fold, s.cutO);
+    show(pl.label, s.cutO); show(pl.sub, s.cutO);
+  });
+  // seams
+  show(S.seamBox, inSeams ? 1 : 0);
+  S.seamLines.forEach((lines) => lines.forEach((l) => l.style.display = "none"));
+  if (seamState) drawSeams(seamState, inSeams);
+  // proof
+  show(S.proof, proofShow && t < E.t0 ? 1 : 0);
+  if (D.proof && proofShow) drawProof(sweep, t - P.proof.t0);
+  // end
+  show(S.end, inEnd ? ramp(endU, 0, 0.6) : 0);
+  if (inEnd && S.endRows) {
+    S.endRows.forEach((r, i) => show(r, ramp(endU, 0.8 + 0.7 * i, 1.3 + 0.7 * i)));
+    if (S.endMean) show(S.endMean, ramp(endU, 1.0 + 0.7 * S.endRows.length, 1.8 + 0.7 * S.endRows.length));
+  }
+  S.foot.style.display = "";
+  ui.seek.value = Math.round(1000 * t / total);
+  ui.time.textContent = `${t.toFixed(1)} / ${total.toFixed(1)} s`;
+}
+
+// Seam rows follow seam_log: state of every pair at time tt.
+function seamAt(tt) {
+  const S4 = phaseOf("seams"), n = D.seams.length, log = D.seam_log;
+  let k = 0;
+  while (k + 1 < S4.iter.length && tt >= S4.iter[k + 1].t0) k++;
+  const it = S4.iter[k], u = tt - it.t0;
+  const status = (row, name) => row.failing.includes(name) ? "red" : "green";
+  const rows = D.seams.map((s, i) => {
+    const now = status(log[k], s.name);
+    let colour, mixed;
+    if (k === 0) { const a = 0.8 + 0.8 * i; colour = mix(C.grey, now === "red" ? C.red : C.green, ramp(u, a, a + 0.4)); mixed = ramp(u, a, a + 0.4) > 0; }
+    else {
+      const before = status(log[k - 1], s.name);
+      colour = mix(before === "red" ? C.red : C.green, now === "red" ? C.red : C.green, ease(ramp(u, 1.4, 2.4)));
+      mixed = true;
+    }
+    const row = u >= 1.8 || k === 0 ? log[k] : log[k - 1];
+    return {s, colour, shown: mixed, diff: row.diffs[s.name], equal: (row.equal_by_construction || []).includes(s.name)};
+  });
+  const calls = log.slice(0, k + 1).filter((r) => r.source === "model").length;
+  const row = log[k];
+  const settled = tt >= S4.iter.at(-1).t1;
+  return {rows, calls, row, k, settled, finalOk: log.at(-1).failing.length === 0};
+}
+function describeRow(row) {
+  const parts = (row.applied || []).map((a) => a.pair ? `${a.panel} ${a.edge} ${f1(a.from_mm)} to ${f1(a.to_mm)} mm` : `sleeve cap ${f1(a.from_mm)} to ${f1(a.to_mm)} mm`);
+  const detail = parts.join(", ");
+  if (row.source === "initial") return ["First check of every pair", ""];
+  if (row.source === "model") return ["Model call: the model adjusts the sleeve cap", detail || "no usable change"];
+  if (row.source === "pair_fix") return ["Code fix, no model call: equal length for the pair", detail];
+  return ["Code fix after the model calls", detail];
+}
+function drawSeams(st, visible) {
+  setT(S.callTxt, `Model calls: ${st.calls} of ${D.max_adjust_calls}`);
+  st.rows.forEach((r, i) => {
+    const row = S.seamRows[i];
+    row.dot.setAttribute("fill", r.colour);
+    const tolTxt = `allowed ${f1(r.s.min_diff_mm)} to ${f1(r.s.max_diff_mm)} mm`;
+    setT(row.sub, !r.shown ? "not checked yet" : r.equal ? "same edge on both sides, difference 0 by construction" : `difference ${signed(r.diff, 1)} mm, ${tolTxt}`);
+    S.seamLines[i].forEach((l) => { l.setAttribute("stroke", r.colour); l.style.display = r.shown ? "" : "none"; });
+  });
+  const [head, detail] = st.settled ? [st.finalOk ? `All ${D.seams.length} pairs match. Model calls: ${st.calls}.` : "A pair still fails. No pattern is exported.", ""] : describeRow(st.row);
+  setT(S.seamNote, head);
+  setT(S.seamDetail, detail);
+  S.seamNote.setAttribute("fill", st.settled && st.finalOk ? C.green : C.amber);
+}
+function drawProof(sweep, u) {
+  const pr = D.proof, res = pr.result, n = res.distances_mm.length, upto = Math.floor(sweep * n);
+  S.proofSegs.forEach((s, i) => {
+    if (!s) return;
+    const done = i < upto;
+    s.setAttribute("stroke", done ? (res.distances_mm[i] < res.tol_mm ? C.green : C.red) : "#c9d3e0");
+    s.setAttribute("stroke-opacity", done ? 1 : 0.55);
+  });
+  S.proofNeck.forEach((c) => show(c, ramp(u, 0.8, 1.6)));
+  if (S.proofFold) show(S.proofFold, ramp(u, 0.8, 1.6));
+  let running = 0;
+  for (let i = 0; i < upto; i++) running += res.distances_mm[i];
+  const finished = upto >= n;
+  const mean = finished ? res.mean_mm : (upto ? running / upto : 0);
+  show(S.proofRight, ramp(u, 0.5, 1.2));
+  setT(S.gapBig, f2(mean));
+  S.gapBig.setAttribute("fill", mean < res.tol_mm ? C.green : C.red);
+  setT(S.proofLines[0], `max gap ${f2(res.max_mm)} mm`);
+  setT(S.proofLines[1], `95% of points under ${f2(res.p95_mm)} mm`);
+  setT(S.proofLines[2], `${(100 * res.frac_within_tol).toFixed(1)}% within ${res.tol_mm} mm`);
+  const neckMean = res.neck_distances_mm.length ? res.neck_distances_mm.reduce((a, b) => a + b, 0) / res.neck_distances_mm.length : null;
+  setT(S.proofNeckTxt, neckMean === null ? "" : `Neck (information only): mean gap ${f1(neckMean)} mm`);
+}
+
+// ---------- controls ----------
+function stepTo(dir) {
+  const marks = tl.map((p) => p.t0);
+  if (dir > 0) { const nxt = marks.find((m) => m > t + 0.05); t = nxt === undefined ? total : nxt; }
+  else { const prev = marks.filter((m) => m < t - 0.6); t = prev.length ? prev.at(-1) : 0; }
+  frame();
+}
+function setPlaying(on) {
+  playing = on;
+  ui.play.textContent = on ? "Pause" : "Play";
+  if (on) { if (t >= total) t = 0; last = performance.now(); requestAnimationFrame(tick); }
+}
+function tick(now) {
+  if (!playing) return;
+  t = Math.min(total, t + speed * (now - last) / 1000);
+  last = now;
+  frame();
+  if (t >= total) { setPlaying(false); return; }
+  requestAnimationFrame(tick);
+}
+
+function message(title, body) {
+  ui.stage.replaceChildren();
+  el("rect", {x: 0, y: 0, width: W, height: H, fill: "#0d131c"}, ui.stage);
+  txt(ui.stage, 960, 440, 60, C.ink, title, {"text-anchor": "middle", "font-weight": 700});
+  txt(ui.stage, 960, 540, 34, C.amber, body, {"text-anchor": "middle"});
+}
+
+function preload(urls) {
+  return Promise.all(Object.values(urls).map((u) => new Promise((ok) => { const i = new Image(); i.onload = i.onerror = ok; i.src = u; })));
+}
+
+async function main() {
+  for (const id of ["Stage", "Play", "Step", "Back", "Restart", "Speed", "Seek", "Time", "Controls"]) ui[id.toLowerCase()] = document.getElementById("demo" + id);
+  ui.play.addEventListener("click", () => setPlaying(!playing));
+  ui.step.addEventListener("click", () => { setPlaying(false); stepTo(1); });
+  ui.back.addEventListener("click", () => { setPlaying(false); stepTo(-1); });
+  ui.restart.addEventListener("click", () => { t = 0; frame(); setPlaying(true); });
+  ui.speed.addEventListener("change", () => { speed = parseFloat(ui.speed.value); });
+  ui.seek.addEventListener("input", () => { t = total * ui.seek.value / 1000; frame(); });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.tagName === "SELECT" || ev.target.tagName === "INPUT") return;
+    if (ev.key === " ") { ev.preventDefault(); setPlaying(!playing); }
+    else if (ev.key === "ArrowRight") { setPlaying(false); stepTo(1); }
+    else if (ev.key === "ArrowLeft") { setPlaying(false); stepTo(-1); }
+    else if (ev.key === "h" || ev.key === "H") ui.controls.classList.toggle("hidden");
+  });
+  const q = new URLSearchParams(location.search);
+  try {
+    let name = q.get("name");
+    if (!name) {
+      const list = await (await fetch("/api/demo")).json();
+      if (!list.bundles.length) return message("No demo is recorded", "Record one: sewtrace demo record data/synth/tee1");
+      name = list.bundles[0];
+    }
+    const res = await fetch("/api/demo/" + encodeURIComponent(name));
+    const body = await res.json();
+    if (!res.ok) return message(body.error.title, body.error.message);
+    D = body;
+  } catch (e) { return message("The demo data cannot be loaded", String(e)); }
+  await preload(D.urls);
+  tl = buildTimeline();
+  buildScene();
+  if (q.get("clean") === "1") ui.controls.classList.add("hidden");
+  if (q.get("t")) t = Math.min(total, parseFloat(q.get("t")));
+  if (q.get("speed")) { speed = parseFloat(q.get("speed")); ui.speed.value = q.get("speed"); }
+  frame();
+  if (q.get("autoplay") === "1") setPlaying(true);
+  window.sewtraceDemo = {seek: (x) => { t = x; frame(); }, total, timeline: tl};
+}
+main();
+</script>
+</body>
+</html>

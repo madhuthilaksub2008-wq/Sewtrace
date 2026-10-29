@@ -255,6 +255,7 @@ class MetaClient:
         self.ledger_path = self.settings.ledger_path or resolve_ledger_path(self.config)
         self._require_ledger_mount()
         self.calls = 0  # real or mocked calls that missed the cache
+        self.cache_files_used: set[Path] = set()  # every cache file looked up; `demo record` copies the existing ones
         self._transport = transport
         self._stream_transport = stream_transport
         self._sleep = sleep
@@ -600,7 +601,9 @@ class MetaClient:
 
     def _cache_file(self, key: str, suffix: str) -> Path:
         """Real answers are named ``real-<key>`` so the ledger guard can tell them from mock ones."""
-        return self.cache_dir / f"{'' if self.settings.mock else 'real-'}{key}{suffix}"
+        path = self.cache_dir / f"{'' if self.settings.mock else 'real-'}{key}{suffix}"
+        self.cache_files_used.add(path)
+        return path
 
     def _key(
         self, kind: str, model: str, prompt: str, images: Sequence[Path], params: dict[str, Any],

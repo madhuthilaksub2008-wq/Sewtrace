@@ -1,4 +1,4 @@
-"""Command line: sewtrace synth | run | eval | verify | serve | day1."""
+"""Command line: sewtrace synth | run | eval | verify | serve | day1 | demo."""
 
 from __future__ import annotations
 
@@ -34,12 +34,29 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("photo")
     d.add_argument("--yes-spend", action="store_true",
                    help="required: confirm that the two paid calls are approved")
+    dm = sub.add_parser("demo", help="record a demo bundle, or play one with no network (docs/DEMO.md)")
+    dsub = dm.add_subparsers(dest="demo_cmd", required=True)
+    rec = dsub.add_parser("record", help="run the pipeline once and write demo/<name>/")
+    rec.add_argument("garment_dir")
+    rec.add_argument("--name", default=None, help="bundle name (default: the folder name)")
+    rec.add_argument("--yes-spend", action="store_true", help="required in REAL mode: confirm the paid calls")
+    rec.add_argument("--force", action="store_true", help="replace a bundle of the same name")
+    rec.add_argument("--eval-csv", default="out/eval/results.csv",
+                     help="eval results for the end card (default: out/eval/results.csv, if it exists)")
+    rec.add_argument("--demo-dir", default="demo", help="folder of bundles (default: demo)")
+    play = dsub.add_parser("play", help="serve a recorded bundle with no network and no model call")
+    play.add_argument("name")
+    play.add_argument("--check", action="store_true", help="only check that the bundle is complete")
+    play.add_argument("--demo-dir", default="demo", help="folder of bundles (default: demo)")
+    play.add_argument("--host", default="127.0.0.1")
+    play.add_argument("--port", type=int, default=None, help="default: web.port in config.toml")
     args = ap.parse_args(argv)
     from sewtrace.api.client import ApiError
+    from sewtrace.demo import DemoError
     from sewtrace.pipeline import ContourFailed, PanelInferenceFailed
     try:
         _dispatch(args)
-    except (ApiError, ContourFailed, PanelInferenceFailed, NotImplementedError) as err:
+    except (ApiError, ContourFailed, PanelInferenceFailed, NotImplementedError, DemoError) as err:
         # Budget stop, offline cache miss, timeout, policy stop, rejected request, unwired real
         # endpoint, missing SAM parser, Day 1 refusal: no traceback.
         _fail(f"{args.cmd}: {err}")
@@ -86,6 +103,8 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif args.cmd == "day1":
         from sewtrace.day1 import run_day1
         run_day1(args.photo, yes_spend=args.yes_spend)
+    elif args.cmd == "demo":
+        _demo(args)
     elif args.cmd == "verify":
         _verify(args.photo, args.out, args.spec)
     elif args.cmd == "eval":
@@ -98,6 +117,42 @@ def _dispatch(args: argparse.Namespace) -> None:
         failed = sum(tee_failed(r) for r in rows)
         if failed:  # exit non-zero so a failing tee cannot pass unnoticed
             _fail(f"eval: {failed} of {len(rows)} runs failed. See the error column above.")
+
+
+def _demo(args: argparse.Namespace) -> None:
+    from sewtrace import demo
+    if args.demo_cmd == "record":
+        from sewtrace.api.client import SegmentationFailed
+        from sewtrace.pipeline import PhotoMissing
+        from sewtrace.reason.seams import SeamCheckFailed
+        from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
+        try:
+            folder = demo.record(args.garment_dir, args.name, yes_spend=args.yes_spend, force=args.force,
+                                 demo_dir=Path(args.demo_dir), eval_csv=Path(args.eval_csv))
+        except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed) as err:
+            _fail(err)
+        print(f"demo bundle written to {folder}")
+        return
+    demo_dir = Path(args.demo_dir)
+    bundle = demo.load_bundle(args.name, demo_dir)  # a missing file stops here, by name
+    print(demo.summary(bundle))
+    if args.check:
+        return
+    import dataclasses
+
+    import uvicorn
+
+    from sewtrace.config import Settings, get_config
+    from sewtrace.web.app import WebConfigError, create_app
+    # Offline and without a key: the page cannot make a model call, whatever the environment says.
+    settings = dataclasses.replace(Settings.load(), api_key="", mock=False, offline=True)
+    try:
+        app = create_app(settings, demo_root=demo_dir.resolve())
+    except WebConfigError as err:
+        _fail(err)
+    port = args.port or get_config().web.port
+    print(f"Open http://{args.host}:{port}/demo?name={args.name}")
+    uvicorn.run(app, host=args.host, port=port)
 
 
 def _fail(message: object) -> NoReturn:
