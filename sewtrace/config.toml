@@ -185,9 +185,10 @@ neck_gap_tolerance_mm = 5.0
 # edge is not a cut edge, so it is left out of the gap, and each paper point is
 # compared with the body edge on its own side of the fold only.
 fold_straight_tol_mm = 2.0 # a paper edge is "straight" when it stays this close to a line
-fold_smooth_mm = 5.0       # the paper outline is smoothed by a Gaussian of this sigma before the straight-edge search: a SAM mask edge wobbles by 1 to 2 mm, more than fold_straight_tol_mm, and would cut the fold edge in pieces
+fold_band_mm = 6.0         # along the fold, paper points this close to the fold line are fold, not cut edge: covers a mask wobble or a bulge of 3 to 4 mm. Also the length cut off each end of the fold for this rule
+fold_ransac_trials = 200   # random line candidates for the fold fit
 fold_min_inset_mm = 30.0   # the fold edge lies at least this far inside the t-shirt edge
-fold_exclude_mm = 1.5      # paper points this close to the fold edge are left out
+fold_exclude_mm = 1.5      # paper points this close to the fold line are always left out (the exact-gap oracle, mock/proof.py, uses it too)
 centre_margin_mm = 10.0    # body edge this far past the fold line still counts as the same side
 
 [marker]

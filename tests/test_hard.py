@@ -281,27 +281,32 @@ def test_req_ver_02_expected_gap_leaves_out_every_point_nearest_the_armhole(angl
     assert not np.isclose(gaps, 30.0, atol=1e-6).any()   # the paper's right edge is 30 mm from the armhole
 
 
-def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(hard_dir, tmp_path, client):
-    """REQ-VER-02: wavy hand-cut paper with a lift shadow on a hard tee. The fold is found and the
-    measured mean gap is within 0.5 mm of the exact one (measured -0.09 mm; the clean proof uses 0.5 mm).
+@pytest.mark.parametrize("tee, scale, seed", [
+    ("tee3", 1.02, 5),   # the first case: measured -0.23 mm
+    ("tee3", 0.98, 6),   # a 3 to 4 mm bulge cut the found fold to 244 mm of 400: +15.4 mm before
+    ("tee8", 1.0, 5),    # the same bulge: +14.6 mm before
+    ("tee8", 1.02, 5),   # mask wobble put 13 fold points outside the 1.5 mm band: +1.8 mm before
+])
+def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(hard_dir, tmp_path, client, tee, scale, seed):
+    """REQ-VER-02: wavy hand-cut paper with a lift shadow on a hard tee. The whole fold is found
+    and the measured mean gap is within 0.5 mm of the exact one (the clean proof uses 0.5 mm too).
+    The tolerance is the same as before the fold fix: only the way the fold is found changed.
 
-    History: this test had abs=1.5 for a measured 1.3 mm under-read. The cause was the expected gap,
-    not the measurement: a paper point nearest the armhole or the neck is left out when that edge is
-    the nearest one, and the test of 'nearest' was made against a neck and armhole line that did not
-    match the body ring (an average of the right and left side) and had no tie rule.
+    History: the fold used to be followed along the outline in chunks, and left out within a fixed
+    1.5 mm. A bulge of 3 to 4 mm cut the fold short and a wobble of 2 to 3 mm left fold points
+    in, both counted as cut edge with gaps of 30 to 140 mm. The fold is now a RANSAC line fit
+    and a band around the fitted line (proof.fold_band_mm).
 
-    Known open gaps (SPEC 10.1, not covered here, see the report): other seeds scatter by -0.4 to +0.6 mm;
-    paper edge wobble of 2 to 3 mm next to the fold puts fold points outside proof.fold_exclude_mm
-    (tee8, scale 1.02: +1.8 mm); a 3 to 4 mm bulge of the fold edge cuts the found fold short (tee3,
-    scale 0.98, seed 6: +15 mm)."""
+    Known open gap (SPEC 10.1): other seeds scatter by -0.5 to +0.3 mm."""
     from sewtrace.vision.verify import verify_proof
 
-    shutil.copytree(hard_dir / "tee3", tmp_path / "tee3")   # the fixture's tee3 (no lens, no curl); proof files stay out of it
-    truth = proof.make_proof_hard(tmp_path / "tee3", seed=5, scale=1.02, name="proof")
-    photo = tmp_path / "tee3" / "proof.jpg"
+    shutil.copytree(hard_dir / tee, tmp_path / tee)   # no lens, no curl; proof files stay out of the fixture
+    truth = proof.make_proof_hard(tmp_path / tee, seed=seed, scale=scale, name="proof")
+    photo = tmp_path / tee / "proof.jpg"
     result = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))))
-    print(f"measured {result.mean_mm:.2f} expected {truth['expected_gap_mean_mm']:.2f}")
+    print(f"{tee} scale {scale} seed {seed}: measured {result.mean_mm:.2f} expected {truth['expected_gap_mean_mm']:.2f}")
     assert result.fold_mm is not None
-    p0, p1 = np.asarray(result.fold_mm)
-    assert np.linalg.norm(p1 - p0) > 250
+    true_fold = np.asarray(truth["fold_mm"])
+    found_len = np.linalg.norm(np.diff(np.asarray(result.fold_mm), axis=0))
+    assert found_len == pytest.approx(np.linalg.norm(np.diff(true_fold, axis=0)), abs=8.0)
     assert result.mean_mm == pytest.approx(truth["expected_gap_mean_mm"], abs=0.5)

@@ -166,7 +166,8 @@ class PatternConfig(_Strict):
 class ProofConfig(_Strict):
     gap_tolerance_mm: float = Field(gt=0)
     fold_straight_tol_mm: float = Field(gt=0)
-    fold_smooth_mm: float = Field(gt=0)
+    fold_band_mm: float = Field(gt=0)
+    fold_ransac_trials: int = Field(gt=0)
     fold_min_inset_mm: float = Field(gt=0)
     fold_exclude_mm: float = Field(gt=0)
     centre_margin_mm: float = Field(ge=0)

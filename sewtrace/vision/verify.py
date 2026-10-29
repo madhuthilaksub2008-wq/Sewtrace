@@ -26,7 +26,6 @@ import cv2
 import numpy as np
 import shapely
 from pydantic import BaseModel
-from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
 
 from sewtrace.api.client import MetaClient
@@ -100,57 +99,59 @@ def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
     return homography.px_to_mm(biggest.reshape(-1, 2).astype(float))
 
 
-def _smoothed_ring(ring_mm: np.ndarray, sigma_mm: float) -> np.ndarray:
-    """Closed outline resampled every mm and smoothed along itself (corners shrink a little)."""
-    dense = np.asarray(shapely.segmentize(shapely.LinearRing(ring_mm), 1.0).coords)[:-1]
-    return gaussian_filter1d(dense, sigma_mm, axis=0, mode="wrap")
+def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Least squares line through points: (centre, unit direction)."""
+    centre = points.mean(axis=0)
+    return centre, np.linalg.svd(points - centre)[2][0]
 
 
-def _refit_fold(paper_mm: np.ndarray, a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Fold edge end points from the unsmoothed outline: the smoothed ring found where the fold
-    is, but smoothing pulls a line towards the inside and shortens it at its corners. Fit a line
-    to the paper points that lie near the found segment, dropping outliers (the first points of
-    the edges that meet the fold), then end it at the first and last of those points."""
-    tol = get_config().proof.fold_straight_tol_mm
-    dense = np.asarray(shapely.segmentize(shapely.LinearRing(paper_mm), 1.0).coords)[:-1]
-    d = (b - a) / np.linalg.norm(b - a)
-    normal = np.array([-d[1], d[0]])
-    reach = get_config().proof.fold_smooth_mm
-    near = (np.abs((dense - a) @ normal) <= 2 * tol) & ((dense - a) @ d >= -reach) & ((dense - b) @ d <= reach)
-    pts = dense[near]
-    for _ in range(3):
-        centre = pts.mean(axis=0)
-        direction = np.linalg.svd(pts - centre)[2][0]
-        resid = np.abs((pts - centre) @ np.array([-direction[1], direction[0]]))
-        keep = resid <= max(2 * np.median(resid), 0.05)
-        if keep.all() or keep.sum() < 10:
-            break
-        pts = pts[keep]
-    along = (pts - centre) @ direction
-    return centre + along.min() * direction, centre + along.max() * direction
+def _line_residual(points: np.ndarray, centre: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """Distance of each point to the infinite line, mm."""
+    return np.abs((points - centre) @ np.array([-direction[1], direction[0]]))
 
 
 def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """End points of the paper's fold edge: its long straight edge that lies deepest inside
-    the t-shirt outline (the centre line is about half a chest away from any t-shirt edge)."""
+    """End points of the paper's fold edge.
+
+    The fold lies on the t-shirt centre line, about half a chest from any t-shirt edge, so the
+    paper points at least ``fold_min_inset_mm`` inside the t-shirt outline are the fold (plus
+    a little of the neck). A RANSAC line fit over those points finds the fold and ignores the
+    neck. The line is refined on its inliers, then ended at the outermost paper points within
+    ``fold_band_mm`` of it. A mask wobble or a bulge of a few mm cannot cut the fold short,
+    because no chunk of the outline is followed."""
     cfg = get_config().proof
-    simple = np.asarray(shapely.simplify(shapely.LinearRing(_smoothed_ring(paper_mm, cfg.fold_smooth_mm)),
-                                         cfg.fold_straight_tol_mm).coords)
-    body_ring = shapely.LinearRing(body_mm)
-    min_length = 0.5 * float(np.ptp(paper_mm, axis=0).max())
-    best: tuple[float, np.ndarray, np.ndarray] | None = None
-    for a, b in zip(simple[:-1], simple[1:]):
-        if np.linalg.norm(b - a) < min_length:
+    dense = np.asarray(shapely.segmentize(shapely.LinearRing(paper_mm), 1.0).coords)[:-1]
+    inset = shapely.distance(shapely.points(dense), shapely.LinearRing(body_mm))
+    deep = dense[inset >= cfg.fold_min_inset_mm]
+    min_length = 0.5 * float(np.ptp(paper_mm, axis=0).max())  # dense points are 1 mm apart
+    no_fold = ValueError(
+        "No fold edge found on the paper: put the fold of the half panel on the centre of the t-shirt (SPEC 9.4)"
+    )
+    if len(deep) < min_length:
+        raise no_fold
+    rng = np.random.default_rng(0)  # fixed: the same photo always gives the same fold
+    best = np.zeros(len(deep), bool)
+    for _ in range(cfg.fold_ransac_trials):
+        i, j = rng.choice(len(deep), size=2, replace=False)
+        span = np.linalg.norm(deep[j] - deep[i])
+        if span < cfg.fold_straight_tol_mm:
             continue
-        samples = shapely.line_interpolate_point(shapely.LineString([a, b]), np.linspace(0, 1, 21), normalized=True)
-        inset = float(np.median(shapely.distance(samples, body_ring)))
-        if inset >= cfg.fold_min_inset_mm and (best is None or inset > best[0]):
-            best = (inset, a, b)
-    if best is None:
-        raise ValueError(
-            "No fold edge found on the paper: put the fold of the half panel on the centre of the t-shirt (SPEC 9.4)"
-        )
-    return _refit_fold(paper_mm, best[1], best[2])
+        inliers = _line_residual(deep, deep[i], (deep[j] - deep[i]) / span) <= cfg.fold_straight_tol_mm
+        if inliers.sum() > best.sum():
+            best = inliers
+    if best.sum() < min_length:
+        raise no_fold
+    # Least trimmed squares: fit the closer half of the points near the line, repeat. RANSAC
+    # alone can settle on a line tilted towards a bulge, because that line has more inliers.
+    centre, direction = _fit_line(deep[best])
+    for _ in range(5):
+        resid = _line_residual(deep, centre, direction)
+        near = resid <= cfg.fold_straight_tol_mm
+        centre, direction = _fit_line(deep[near & (resid <= np.median(resid[near]))])
+    # The ends come from all paper points, not only the deep ones: near the hem the fold is
+    # less than fold_min_inset_mm from the t-shirt edge.
+    along = (dense[_line_residual(dense, centre, direction) <= cfg.fold_band_mm] - centre) @ direction
+    return centre + along.min() * direction, centre + along.max() * direction
 
 
 def _body_side_runs(body_mm: np.ndarray, keep: np.ndarray) -> shapely.Geometry:
@@ -216,7 +217,13 @@ def edge_gaps_split(
 
         paper_side = np.sign(side(np.asarray(ring.centroid.coords)))[0]
         keep_body = paper_side * side(body_pts) >= -cfg.centre_margin_mm
-        keep_paper = shapely.distance(pts, shapely.LineString([p0, p1])) >= cfg.fold_exclude_mm
+        d_fold = np.asarray(shapely.distance(pts, shapely.LineString([p0, p1])), float)
+        # Fold points: within fold_band_mm of the fold line (wider than the mask wobble), but only
+        # along the fold itself. The cut edges that start at the fold ends (neck, hem) come that
+        # close too, and keep their gap, except within fold_exclude_mm of the line.
+        along = (xy - p0) @ direction
+        inside_fold = (along >= cfg.fold_band_mm) & (along <= np.linalg.norm(p1 - p0) - cfg.fold_band_mm)
+        keep_paper = (d_fold >= cfg.fold_exclude_mm) & ~((d_fold < cfg.fold_band_mm) & inside_fold)
     body_edge = _body_side_runs(body_pts, keep_body)
     dist = np.asarray(shapely.distance(pts, body_edge), float)
     near = cKDTree(body_pts[keep_body]).query(xy)[1]

@@ -276,3 +276,54 @@ def test_req_ver_02_cli_verify_prints_expected_neck_gap_and_flags_a_difference(p
     (found / "spec.json").write_text(good.read_text())
     cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png")])
     assert "neck gap expected from the spec" in capsys.readouterr().out
+
+
+# ---- fold edge: bulge, wobble, cut edge next to it (REQ-VER-02) ----------------------
+
+def _rect_case(fold_shape):
+    """Body 600 x 700 mm; half paper cut 3 mm inside the body edge on three sides; its fold on
+    x = 300 follows ``fold_shape(y)`` (mm off the line, towards the left)."""
+    body = np.asarray(shapely.segmentize(shapely.box(0, 0, 600, 700), 1.0).exterior.coords)[:-1]
+    ys = np.arange(697.0, 2.9, -1.0)
+    fold = np.column_stack([300 - fold_shape(ys), ys])
+    paper = np.vstack([[[300, 3.0], [597, 3.0], [597, 697.0]], fold])
+    return paper, body
+
+
+@pytest.mark.parametrize("name, shape", [
+    ("straight", lambda y: 0 * y),
+    ("bulge", lambda y: 3.5 * np.sin(np.clip((y - 250) / 150, 0, 1) * np.pi)),   # 3.5 mm over 150 mm
+    ("wobble", lambda y: 2.5 * np.sin(y / 6.0)),                                      # 2.5 mm, short waves
+])
+def test_req_ver_02_fold_found_whole_and_cut_edge_next_to_it_keeps_its_gap(name, shape):
+    """REQ-VER-02: the whole fold is found (694 mm) and left out, even with a bulge or a wobble of
+    2 to 4 mm; a paper cut 3 mm too small still shows 3 mm everywhere except within the fold band."""
+    paper, body = _rect_case(shape)
+    p0, p1 = find_fold_edge(paper, body)
+    assert abs(np.linalg.norm(p1 - p0) - 694) < 8
+    pts, d = edge_gaps(paper, body, fold=(p0, p1))
+    assert len(d) > 300
+    assert np.allclose(d, 3.0, atol=0.2), f"{name}: max gap {d.max():.1f} mm"
+    band = get_config().proof.fold_band_mm
+    top = pts[np.isclose(pts[:, 1], 3.0)]
+    assert top[:, 0].min() < 300 + 2 * band   # the cut edge right next to the fold is compared
+
+
+def test_req_ver_02_fold_line_must_be_deep_inside_the_tee():
+    """REQ-VER-02: a straight paper edge near the tee edge is a cut edge, not a fold."""
+    body = np.asarray(shapely.segmentize(shapely.box(0, 0, 600, 700), 1.0).exterior.coords)[:-1]
+    paper = np.array([[10, 10], [590, 10], [590, 690], [10, 690]], float)
+    with pytest.raises(ValueError, match="fold"):
+        find_fold_edge(paper, body)
+
+
+def test_req_geo_01_clean_mask_radius_is_stable_at_exactly_3_px_per_mm():
+    """REQ-GEO-01: cleanup_mm * px_per_mm = 1.5 at 3 px/mm must give a radius of 2 px, also when
+    the product is 1.4999999999999998. A whisker 3 px wide survives a 1 px radius, not a 2 px one."""
+    from sewtrace.vision import contour
+
+    mask = np.zeros((200, 200), np.uint8)
+    mask[40:160, 40:160] = 1
+    mask[98:101, 160:168] = 1   # whisker 3 px wide, 8 px long
+    for px_per_mm in (3.0, np.nextafter(3.0, 0), 3.0 * (1 - 1e-12)):
+        assert not contour.clean_mask(mask, px_per_mm)[98:101, 162:168].any(), px_per_mm

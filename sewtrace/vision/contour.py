@@ -123,7 +123,9 @@ def clean_mask(mask: np.ndarray, px_per_mm: float) -> np.ndarray:
     ``contour.mask.cleanup_mm`` closed or removed (REQ-SEG-03). A real SAM mask has small
     holes, edge nicks and stray blobs that must not turn into corners of the outline."""
     mask = (np.asarray(mask) > 0).astype(np.uint8)
-    radius = max(int(round(get_config().contour.mask.cleanup_mm * px_per_mm)), 1)
+    # Round half up with an epsilon: at 3 px/mm the radius is 1.5 px, and float noise (or banker's
+    # rounding) must not give 1 for one photo and 2 for another.
+    radius = max(int(np.floor(get_config().contour.mask.cleanup_mm * px_per_mm + 0.5 + 1e-6)), 1)
     pad = radius + 2
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
