@@ -72,6 +72,7 @@ class ReasoningConfig(_Strict):
     prompt_cache_key: str = Field(default="sewtrace-v1", min_length=1)
     est_image_tokens: int = Field(ge=0)
     upload_jpeg_quality: int = Field(default=95, ge=1, le=100)  # own value, so tuning SAM does not change Muse cache keys
+    max_upload_px: int = Field(default=1568, ge=64)  # long side of a photo sent to Muse; larger photos are downscaled
 
 
 class SamPrompts(_Strict):
@@ -83,6 +84,7 @@ class SamPrompts(_Strict):
 class SamConfig(_Strict):
     min_score: float = Field(ge=0, le=1)
     upload_jpeg_quality: int = Field(ge=1, le=100)  # SAM gets the pixels the pipeline reads, re-encoded
+    max_upload_px: int = Field(default=2048, ge=64)  # long side of a photo sent to SAM; larger photos are downscaled
     box_overhang_tol_px: float = Field(ge=0)  # a SAM box may pass the image edge by this much (rounding)
     prompts: SamPrompts
 
