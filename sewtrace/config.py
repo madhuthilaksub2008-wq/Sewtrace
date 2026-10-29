@@ -68,6 +68,8 @@ class ReasoningConfig(_Strict):
     model: Literal["spark", "spark_contributor", "wonder"]
     effort: ReasoningEffort
     max_tokens: int = Field(gt=0)
+    max_tokens_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    prompt_cache_key: str = Field(default="sewtrace-v1", min_length=1)
     est_image_tokens: int = Field(ge=0)
 
 

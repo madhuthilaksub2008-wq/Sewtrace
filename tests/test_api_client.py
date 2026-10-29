@@ -300,8 +300,10 @@ def test_req_api_02_sam_mock_mask_is_not_served_to_real_mode(tmp_path, photo):
     mock_client.segment(photo, "t-shirt")
     assert mock_client.calls == 1
     real_client, _ = _client(tmp_path, FakeTransport())
-    with pytest.raises(NotImplementedError):  # a miss, not the cached mock mask
-        real_client.segment(photo, "t-shirt")
+    asked = []  # the real SAM call is reached: a miss, not the cached mock mask
+    real_client._call_sam = lambda image, prompt: asked.append(prompt) or [SamResult(mask=_blob(2), score=0.9)]
+    assert not np.array_equal(real_client.segment(photo, "t-shirt"), mock_client.segment(photo, "t-shirt"))
+    assert asked == ["t-shirt"]
 
 
 # ---- offline mode (REQ-API-08) ---------------------------------------------------

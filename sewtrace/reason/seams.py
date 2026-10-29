@@ -131,10 +131,11 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
                         [seam_name(s) for s in failing if s not in fixable])
             break
         if calls < max_calls:
-            prompt = build_adjust_prompt(spec, fixable)
+            instructions, prompt = build_adjust_messages(spec, fixable)
             calls += 1  # a failed call still counts toward the limit of REQ-SEW-02
             try:
-                answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA)
+                answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA,
+                                       instructions=instructions)
             except (BudgetExceeded, CacheMiss, PolicyViolation, ApiRequestRejected):
                 raise
             except ApiError as exc:  # no usable answer: same as an answer that is skipped
@@ -227,8 +228,10 @@ def seam_name(seam: Seam) -> str:
     return f"{seam.a}~{seam.b}"
 
 
-def build_adjust_prompt(spec: PanelSpec, failing: list[Seam]) -> str:
-    """Short text-only prompt: fixed prefix first (cache discount), then the failing cap seam."""
+def build_adjust_messages(spec: PanelSpec, failing: list[Seam]) -> tuple[str, str]:
+    """(instructions, data) for one seam-loop call. Instructions depend only on config and the
+    schema, so every call sends the same prefix and the prompt cache applies. Data is the
+    failing seam and the current cap. Chat Completions keeps no state: each call is complete."""
     cfg = get_config().seam
     sleeve = spec.panel("sleeve")
     cap = fit_cap(sleeve.edge_points("cap"))
@@ -238,7 +241,7 @@ def build_adjust_prompt(spec: PanelSpec, failing: list[Seam]) -> str:
         f"b - a = {s.diff_mm:+.1f} mm, allowed {s.min_diff_mm:+.1f} to {s.max_diff_mm:+.1f}"
         for s in failing
     ]
-    return "\n".join([
+    instructions = "\n".join([
         "You are a pattern maker checking a kids' t-shirt pattern (mm, half panels on fold).",
         "The sleeve cap does not sew to the armholes within tolerance. You may change only the",
         "sleeve cap shape: two handle lengths of the half cap curve (a cubic Bezier from the cap top",
@@ -248,11 +251,19 @@ def build_adjust_prompt(spec: PanelSpec, failing: list[Seam]) -> str:
         f"{cfg.cap_ease_min_mm:g} to {cfg.cap_ease_max_mm:g} mm longer than front armhole plus back armhole (ease).",
         "Return ONLY JSON with exactly this field and no other:",
         json.dumps(ADJUST_SCHEMA, separators=(",", ":")),
+    ])
+    data = "\n".join([
         "Failing seam:",
         *rows,
         f"Cap width: {cap_width_mm(sleeve):.1f} mm. Current half cap length: {edge_length(sleeve, 'cap'):.1f} mm.",
         f"Current handles: crown_run_mm {cap.crown_run_mm:.1f}, underarm_run_mm {cap.underarm_run_mm:.1f}.",
     ])
+    return instructions, data
+
+
+def build_adjust_prompt(spec: PanelSpec, failing: list[Seam]) -> str:
+    """The whole text of one seam-loop call: fixed prefix first, then the failing cap seam."""
+    return "\n".join(build_adjust_messages(spec, failing))
 
 
 def apply_adjustment(spec: PanelSpec, answer: dict) -> tuple[PanelSpec, list[dict]]:

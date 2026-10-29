@@ -330,6 +330,18 @@ def test_req_sew_02_prompt_states_whole_cap_range_from_config(tees):
     assert f"{CAP.split('~')[0]}" in prompt
 
 
+def test_req_sew_02_instructions_prefix_is_fixed_and_data_changes(tees):
+    """REQ-SEW-02: every seam-loop call sends the same developer prefix (prompt cache); only the
+    user text changes with the failing seam."""
+    spec_a = _longer_front_armhole(truth_spec(tees[0]), 16.0)
+    spec_b = _longer_front_armhole(truth_spec(tees[0]), 24.0)
+    ia, da = seams.build_adjust_messages(spec_a, [s for s in check_seams(spec_a) if not s.ok])
+    ib, db = seams.build_adjust_messages(spec_b, [s for s in check_seams(spec_b) if not s.ok])
+    assert ia == ib and da != db
+    assert "Failing seam" not in ia and "Failing seam" in da
+    assert "2 x the half cap" in ia
+
+
 def test_req_sew_04_require_seams_ok_names_pair_and_diff(tees):
     spec = _back_shoulder_6mm_long(truth_spec(tees[0]))
     with pytest.raises(SeamCheckFailed) as err:

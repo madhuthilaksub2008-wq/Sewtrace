@@ -23,6 +23,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
+# Meta's official decoder for SAM output. Needed only for real SAM calls (REQ-SEG-01).
+real = ["meta_sam_parser"]
 
 [project.scripts]
 sewtrace = "sewtrace.cli:main"

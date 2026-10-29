@@ -1,4 +1,4 @@
-"""Command line: sewtrace synth | run | eval | verify."""
+"""Command line: sewtrace synth | run | eval | verify | day1."""
 
 from __future__ import annotations
 
@@ -27,6 +27,10 @@ def main(argv: list[str] | None = None) -> None:
     v.add_argument("--spec", default=None,
                    help="spec.json of the cut pattern (default: out/<photo folder name>/spec.json, "
                         "the folder of 'sewtrace run <that folder>'); gives the expected neck gap")
+    d = sub.add_parser("day1", help="Day 1 test: ONE paid SAM call and ONE paid Spark call (REQ-API-09)")
+    d.add_argument("photo")
+    d.add_argument("--yes-spend", action="store_true",
+                   help="required: confirm that the two paid calls are approved")
     args = ap.parse_args(argv)
     from sewtrace.api.client import ApiError
     from sewtrace.pipeline import ContourFailed, PanelInferenceFailed
@@ -34,7 +38,7 @@ def main(argv: list[str] | None = None) -> None:
         _dispatch(args)
     except (ApiError, ContourFailed, PanelInferenceFailed, NotImplementedError) as err:
         # Budget stop, offline cache miss, timeout, policy stop, rejected request, unwired real
-        # endpoint: no traceback.
+        # endpoint, missing SAM parser, Day 1 refusal: no traceback.
         _fail(f"{args.cmd}: {err}")
 
 
@@ -63,6 +67,9 @@ def _dispatch(args: argparse.Namespace) -> None:
                       f"{change['to_mm']:.2f} mm (pair {change['pair']})")
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
+    elif args.cmd == "day1":
+        from sewtrace.day1 import run_day1
+        run_day1(args.photo, yes_spend=args.yes_spend)
     elif args.cmd == "verify":
         _verify(args.photo, args.out, args.spec)
     elif args.cmd == "eval":

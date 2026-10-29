@@ -49,10 +49,18 @@ effort = "high"
 # for one Spark call at this limit is about $0.14 output cost, which the budget guard
 # uses as its estimate.
 max_tokens = 32000
+# NOT IN THE COOKBOOK: the name of the output limit parameter. Allowed: max_tokens,
+# max_completion_tokens. Default is max_tokens (SPEC wording). DAY 1 CHECK (REQ-API-09): if the
+# API answers HTTP 400 naming this parameter, switch it here. No code change needed.
+max_tokens_param = "max_tokens"
+# Sent as prompt_cache_key (cookbook 05_prompt_caching). One fixed value, so calls that share
+# the same developer message prefix hit the same cache.
+prompt_cache_key = "sewtrace-v1"
 est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
 
 [sam]
-min_score = 0.5            # REQ-SEG-04: stop when the best mask scores less (score field unconfirmed; Day 1 test)
+min_score = 0.5            # REQ-SEG-04: stop when the best mask scores less. The cookbook shows NO score on SAM
+                           # records. Without a score the check is skipped with a warning (SPEC conflict, Day 1).
 
 [sam.prompts]              # REQ-SEG-02
 garment = "t-shirt"        # front, back and the t-shirt in the proof photo
