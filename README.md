@@ -34,3 +34,15 @@ cp .env.example .env            # leave META_API_KEY empty to stay mocked
 python -m sewtrace.mock.synth   # writes data/synth/tee1..tee5 (each with truth.json)
 pytest
 ```
+
+Real SAM calls need Meta's SAM decoder. Install it:
+
+```bash
+pip install -e '.[real]'
+```
+
+Run the Day 1 test on one photo. It makes two paid calls, so it needs the flag:
+
+```bash
+sewtrace day1 <photo> --yes-spend
+```

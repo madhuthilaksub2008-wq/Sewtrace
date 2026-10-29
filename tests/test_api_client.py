@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from sewtrace.api.client import (
     ApiError,
+    ApiNotSent,
     ApiRequestRejected,
     ApiTimeout,
     BudgetExceeded,
@@ -69,7 +70,7 @@ def _client(tmp_path, transport, *, mock=False, offline=False, config=None, key=
 @pytest.fixture
 def photo(tmp_path) -> Path:
     path = tmp_path / "p.jpg"
-    path.write_bytes(b"not really a jpeg")
+    cv2.imwrite(str(path), np.full((40, 40, 3), 200, np.uint8))  # real SAM keys hash the decoded pixels
     return path
 
 
@@ -528,8 +529,8 @@ def test_req_api_07_lost_connection_logs_estimate_but_dns_failure_does_not(tmp_p
     with pytest.raises(ApiTransportError):
         client.reason("p")
     assert _rows(client)[0]["estimated"] == "1"
-    other, _ = _client(tmp_path / "x", FakeTransport(ApiError("dns")))
-    with pytest.raises(ApiError):
+    other, _ = _client(tmp_path / "x", FakeTransport(ApiNotSent("dns")))
+    with pytest.raises(ApiNotSent):
         other.reason("p")
     assert not other.ledger_path.exists()
 

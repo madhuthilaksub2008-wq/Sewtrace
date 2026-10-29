@@ -81,6 +81,8 @@ class SamPrompts(_Strict):
 
 class SamConfig(_Strict):
     min_score: float = Field(ge=0, le=1)
+    upload_jpeg_quality: int = Field(ge=1, le=100)  # SAM gets the pixels the pipeline reads, re-encoded
+    box_overhang_tol_px: float = Field(ge=0)  # a SAM box may pass the image edge by this much (rounding)
     prompts: SamPrompts
 
 

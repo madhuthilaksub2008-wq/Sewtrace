@@ -38,10 +38,12 @@ import asyncio
 import base64
 import csv
 import hashlib
+import http.client
 import json
 import logging
 import mimetypes
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -66,6 +68,10 @@ CHARS_PER_TOKEN = 4  # rough token count for the pre-call estimate only
 # (SAM, Responses API) has the same shape and returns {"events": [<one dict per SSE event>]}.
 Transport = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
 
+# Bump when ``sam_results_from`` or the mask decoding changes. It is part of the key of the decoded
+# mask only, so the stored raw events are reused and a decoder fix needs no new paid call.
+SAM_DECODE_VERSION = 2
+
 PARSER_MISSING = (
     "SAM 3.1 output is decoded with Meta's meta_sam_parser, which is not installed. "
     "No call was made. Run: pip install -e '.[real]'"
@@ -88,6 +94,12 @@ class ApiTimeout(ApiError):
 
 class ApiTransportError(ApiError):
     """The connection broke after the request may have been sent, so the call may be billed."""
+
+
+class ApiNotSent(ApiError):
+    """The request never left this machine (DNS failure, connection refused, TLS handshake
+    failure). Nothing can be billed, so ``_paid`` writes no ledger row. A transport must raise
+    this only when it is sure; every other failure after the call started is billed."""
 
 
 class BudgetExceeded(ApiError):
@@ -156,22 +168,34 @@ def _open(url: str, headers: dict[str, str], body: dict[str, Any], timeout_s: fl
             raise TimeoutError(str(e)) from e
         if isinstance(e.reason, ConnectionError) and not isinstance(e.reason, ConnectionRefusedError):
             raise ApiTransportError(f"connection lost: {e.reason}") from e
-        raise ApiError(f"network error: {e.reason}") from e  # DNS or refused: never sent
+        raise ApiNotSent(f"network error: {e.reason}") from e  # DNS, refused or handshake: never sent
     except ConnectionError as e:  # reset while reading the answer: the server got the request
         raise ApiTransportError(f"connection lost: {e}") from e
+    except (http.client.HTTPException, ssl.SSLError) as e:
+        # IncompleteRead, a bad status line or a TLS error while reading: the request was sent.
+        raise ApiTransportError(f"connection broke while reading the answer: {e!r}") from e
 
 
 def urllib_transport(url: str, headers: dict[str, str], body: dict[str, Any], timeout_s: float) -> dict[str, Any]:
     with _open(url, headers, body, timeout_s) as response:
-        return json.loads(response.read())
+        raw = response.read()
+    try:
+        return json.loads(raw)
+    except ValueError as e:  # the server answered, so the call may be billed
+        raise ApiTransportError(f"the answer is not JSON: {raw[:100]!r}") from e
 
 
 def urllib_stream_transport(
     url: str, headers: dict[str, str], body: dict[str, Any], timeout_s: float,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    """Read a server-sent-events stream to its end. ``timeout_s`` is the limit for the whole
-    call, not for one read: a stream that keeps trickling must still stop (REQ-API-07)."""
+    """Read a server-sent-events stream to its end (REQ-API-07).
+
+    ``timeout_s`` is the socket timeout of the connect and of each read. A total deadline of
+    ``timeout_s`` is also checked each time a line arrives, so a stream that keeps trickling stops.
+    The deadline is NOT enforced on a silent socket: urllib has no public way to lower the socket
+    timeout of an open response, so the last read may wait up to ``timeout_s`` more. The worst
+    case is therefore just under 2 x ``timeout_s``."""
     deadline = clock() + timeout_s
     with _open(url, {**headers, "Accept": "text/event-stream"}, body, timeout_s) as response:
         return {"events": list(parse_sse(_lines_before(response, deadline, clock, timeout_s)))}
@@ -236,7 +260,7 @@ class MetaClient:
         is skipped with a warning. It is never faked as 1.0."""
         image_path = Path(image_path)
         model = self.config.models.sam
-        key = self._key("sam", model.id, prompt, [image_path], {})
+        key = self._sam_key(image_path, prompt, decoded=True)
         cached, cached_score = self._cache_file(key, ".png"), self._cache_file(key, ".score.json")
         if cached.exists() and cached_score.exists():
             stored = json.loads(cached_score.read_text())["score"]
@@ -245,7 +269,11 @@ class MetaClient:
                 score=None if stored is None else float(stored),
             )
         else:
-            self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
+            # Offline can still re-decode stored raw events (no network); otherwise it is a miss.
+            replay = (self.settings.offline and not self.settings.mock
+                      and self._cache_file(self._sam_key(image_path, prompt, decoded=False), ".events.json").exists())
+            if not replay:
+                self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
             self.calls += 1
             if self.settings.mock:
                 results = _mock_segment(image_path, prompt, self.config.sam.prompts.garment)
@@ -323,22 +351,64 @@ class MetaClient:
 
         The parser is checked before the paid call, and the raw events are cached right
         after it, so a decoding problem never makes a second paid call necessary."""
-        model = self.config.models.sam
+        parser, image, result = self._sam_parsed(image_path, prompt)
+        return sam_results_from(result, parser.decode_mask_to_raster, image.shape[:2], image_path.name, prompt,
+                                box_tol_px=self.config.sam.box_overhang_tol_px)
+
+    def sam_boxes(self, image_path: str | Path, prompt: str) -> tuple[tuple[int, int], list[tuple[str, float, float, float, float]]]:
+        """``((width, height), [(object_id, left, top, right, bottom), ...])`` of the cached SAM
+        answer, in the pixel frame of the decoded photo. Never calls the API: it needs the stored
+        raw events (Day 1 uses it to check the box frame by eye)."""
+        image_path = Path(image_path)
+        if not self._events_file(image_path, prompt).exists():
+            raise CacheMiss(f"no stored SAM answer for {image_path.name!r} with prompt {prompt!r}; segment it first.")
+        _, image, result = self._sam_parsed(image_path, prompt)
+        boxes = [(str(r.object_id), float(r.left), float(r.top), float(r.right), float(r.bottom))
+                 for r in result.records if r.kind == "box"]
+        return (image.shape[1], image.shape[0]), boxes
+
+    def _sam_parsed(self, image_path: Path, prompt: str) -> tuple[Any, np.ndarray, Any]:
         parser = _load_sam_parser()
-        image = cv2.imread(str(image_path))
-        if image is None:
-            raise ApiError(f"{image_path} is not a readable image. Check the photo path.")
-        events_file = self._cache_file(self._key("sam", model.id, prompt, [image_path], {}), ".events.json")
+        image = _read_pixels(image_path)
+        events_file = self._events_file(image_path, prompt)
         if events_file.exists():
             events = json.loads(events_file.read_text())
         else:
-            body = sam_request_body(model.id, prompt, _data_url(image_path))
-            response = self._paid(model, "/responses", body, Usage(images=1),
+            quality = self.config.sam.upload_jpeg_quality
+            body = sam_request_body(self.config.models.sam.id, prompt, _jpeg_data_url(image, quality))
+            response = self._paid(self.config.models.sam, "/responses", body, Usage(images=1),
                                   transport=self._stream_transport, usage_from=_sam_usage)
             events = response["events"]
+            if not any(e.get("type") == "response.completed" for e in events):
+                # A cut-off or failed stream must not be replayed forever from the cache.
+                kinds = sorted({str(e.get("type")) for e in events if "fail" in str(e.get("type"))
+                                or "incomplete" in str(e.get("type"))}) or ["none"]
+                raise ApiError(
+                    f"{image_path.name}: the SAM stream for the prompt {prompt!r} ended without "
+                    f"response.completed (error events: {', '.join(kinds)}). The call was billed at the "
+                    "usage the ledger shows and the answer was not cached. Run the command again to "
+                    "pay for a new attempt, or check the Meta API status first."
+                )
             events_file.write_text(json.dumps(events))
-        result = _parse_sam_events(parser, events)
-        return sam_results_from(result, parser.decode_mask_to_raster, image.shape[:2], image_path.name, prompt)
+        return parser, image, _parse_sam_events(parser, events)
+
+    def _events_file(self, image_path: Path, prompt: str) -> Path:
+        return self._cache_file(self._sam_key(image_path, prompt, decoded=False), ".events.json")
+
+    def _sam_key(self, image_path: Path, prompt: str, *, decoded: bool) -> str:
+        """Key of the raw events (``decoded=False``) or of the decoded mask. Real calls hash the
+        decoded pixels that are sent plus the upload quality; mock calls hash the file bytes. Only
+        the decoded mask depends on ``SAM_DECODE_VERSION``."""
+        model = self.config.models.sam.id
+        if self.settings.mock:
+            return self._key("sam", model, prompt, [image_path], {})
+        params: dict[str, Any] = {"upload_jpeg_quality": self.config.sam.upload_jpeg_quality}
+        if decoded:
+            params["decode_version"] = SAM_DECODE_VERSION
+        pixels = _read_pixels(image_path)
+        params["shape"] = list(pixels.shape)  # same bytes, different shape must not collide
+        return self._key("sam", model, prompt, [image_path], params,
+                         image_digests=[hashlib.sha256(pixels.tobytes()).hexdigest()])
 
     def _call_reasoning(
         self, model: ModelConfig, prompt: str, image_paths: Sequence[Path], schema: dict[str, Any] | None,
@@ -415,6 +485,8 @@ class MetaClient:
                     f"{model.id} call took more than {api.timeout_s:g} s. "
                     "The ledger holds the worst-case cost of this call."
                 ) from e
+            except ApiNotSent:
+                raise  # never left this machine: nothing to bill
             except ApiTransportError:
                 self._append_ledger(model, estimate, estimated=True)
                 raise
@@ -427,8 +499,23 @@ class MetaClient:
                 raise ApiRequestRejected(
                     f"{model.id} call was rejected: {e}. Check the model ID, the request parameters and "
                     "META_API_KEY in config.toml and the environment. Nothing was retried.") from e
+            except Exception as e:  # noqa: BLE001 (any other failure after sending may be billed)
+                # E.g. a stream event that is not JSON, or an error nobody mapped. Bill the worst
+                # case, then re-raise: never leave a possibly paid call without a row (REQ-API-04).
+                self._append_ledger(model, estimate, estimated=True)
+                if isinstance(e, ApiError):
+                    raise
+                raise ApiTransportError(
+                    f"{model.id} call failed after the request was sent: {e!r}. "
+                    "The ledger holds the worst-case cost of this call.") from e
         assert response is not None
-        self._append_ledger(model, usage_from(response, estimate))
+        try:
+            usage = usage_from(response, estimate)
+        except Exception:  # noqa: BLE001
+            # The money is spent whatever the answer looks like: bill the estimate, never skip the row.
+            log.exception("%s: usage missing or malformed in the answer; the ledger holds the estimate", model.id)
+            usage = estimate
+        self._append_ledger(model, usage)
         return response
 
     def _require_ledger(self) -> None:
@@ -472,14 +559,25 @@ class MetaClient:
         """Real answers are named ``real-<key>`` so the ledger guard can tell them from mock ones."""
         return self.cache_dir / f"{'' if self.settings.mock else 'real-'}{key}{suffix}"
 
-    def _key(self, kind: str, model: str, prompt: str, images: Sequence[Path], params: dict[str, Any]) -> str:
-        """SHA-256 of mode, model, prompt, image bytes and every request parameter (REQ-API-02)."""
+    def _key(
+        self, kind: str, model: str, prompt: str, images: Sequence[Path], params: dict[str, Any],
+        image_digests: Sequence[str] | None = None,
+    ) -> str:
+        """SHA-256 of mode, model, prompt, image content and the request parameters that change the
+        answer (REQ-API-02). ``max_tokens_param`` (only the wire name of the limit, whose value is
+        in the key) and ``prompt_cache_key`` (only routes the provider's prompt cache) are left
+        out on purpose, so renaming them does not pay for the same answer again.
+
+        Image content is the file bytes. For real SAM calls it is ``image_digests``: the hash of the
+        decoded pixels that are sent, so the key follows what the model sees (EXIF rotation applied)."""
+        digests = list(image_digests) if image_digests is not None else [
+            hashlib.sha256(p.read_bytes()).hexdigest() for p in images]
         return _sha256_json({
             "mode": "mock" if self.settings.mock else "real",
             "kind": kind,
             "model": model,
             "prompt": prompt,
-            "images": [hashlib.sha256(p.read_bytes()).hexdigest() for p in images],
+            "images": digests,
             "params": params,
         })
 
@@ -490,6 +588,25 @@ def _data_url(path: Path) -> str:
     if mime is None or not mime.startswith("image/"):
         raise ApiError(f"Cannot tell the image type of {path.name}. Use a .jpg or .png photo.")
     return f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode()}"
+
+
+def _read_pixels(path: Path) -> np.ndarray:
+    """The pixels the pipeline works on. ``cv2.imread`` applies the EXIF orientation, so this is
+    the frame every later step (marker, contour, mm scale) uses."""
+    image = cv2.imread(str(path))
+    if image is None:
+        raise ApiError(f"{path} is not a readable image. Check the photo path.")
+    return image
+
+
+def _jpeg_data_url(image: np.ndarray, quality: int) -> str:
+    """Re-encode the decoded pixels for SAM at full resolution (no downscaling yet: a separate
+    follow-up). Encoding drops EXIF, so SAM cannot rotate the photo behind our back, and its box
+    coordinates are in the frame of ``image``."""
+    ok, buffer = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise ApiError("Could not re-encode the photo for SAM.")
+    return f"data:image/jpeg;base64,{base64.b64encode(buffer.tobytes()).decode()}"
 
 
 def sam_request_body(model_id: str, prompt: str, image_data_url: str) -> dict[str, Any]:
@@ -579,6 +696,7 @@ def _record_score(*records: Any) -> float | None:
 
 def sam_results_from(
     result: Any, decode_mask: Callable[[Any], Any], image_hw: tuple[int, int], photo: str, prompt: str,
+    *, box_tol_px: float,
 ) -> list[SamResult]:
     """Parsed segmentation records -> full-image boolean masks.
 
@@ -586,7 +704,11 @@ def sam_results_from(
     (174 x 203 for box 751..925 x 290..493), so a mask is read as a raster local to its box and
     placed at the box top-left. A mask the size of the whole image is used as it is. Any other
     size is an error, not a guess. The raster is read as row-major, any non-zero value is
-    foreground."""
+    foreground.
+
+    ``image_hw`` must be the shape of the pixels that were sent to SAM. A box that passes the
+    image by more than ``box_tol_px`` means the two frames differ (EXIF rotation, server-side
+    resize): that is an error, never a clip, since it would misplace the mask in mm silently."""
     height, width = image_hw
     boxes = {r.object_id: r for r in result.records if r.kind == "box"}
     out: list[SamResult] = []
@@ -598,6 +720,13 @@ def sam_results_from(
                            f"expected {mw} x {mh}.")
         raster = flat.reshape(mh, mw) > 0
         box = boxes.get(record.object_id)
+        if box is not None and (box.left < -box_tol_px or box.top < -box_tol_px
+                                or box.right > width + box_tol_px or box.bottom > height + box_tol_px):
+            raise ApiError(
+                f"{photo}: SAM box {record.object_id} for {prompt!r} is ({box.left:g}, {box.top:g}) to "
+                f"({box.right:g}, {box.bottom:g}), but the image is {width} x {height} px. The box and the "
+                "photo use different pixel frames (EXIF rotation or a resize on the server). The mask "
+                "would land in the wrong place, so no mask was used. Run 'sewtrace day1' and check the overlay.")
         full = np.zeros((height, width), bool)
         if (mw, mh) == (width, height):
             full = raster

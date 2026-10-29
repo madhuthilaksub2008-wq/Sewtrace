@@ -4,10 +4,14 @@ No test touches the network, needs a key or needs the ``meta_sam_parser`` packag
 module with the cookbook's attribute names stands in for it.
 """
 
+import http.client
 import json
+import socket
+import ssl
 import sys
 import tomllib
 import types
+import urllib.error
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -20,7 +24,10 @@ from sewtrace import cli
 from sewtrace.api import client as client_mod
 from sewtrace.api.client import (
     ApiError,
+    ApiNotSent,
     ApiTimeout,
+    ApiTransportError,
+    BudgetExceeded,
     MetaClient,
     SamResult,
     SegmentationFailed,
@@ -31,6 +38,7 @@ from sewtrace.api.client import (
     select_best,
     strict_json_schema,
     urllib_stream_transport,
+    urllib_transport,
     with_output_text_done,
 )
 from sewtrace.config import Settings, load_config
@@ -39,6 +47,7 @@ from sewtrace.reason.panels import PanelInference
 from sewtrace.reason.seams import ADJUST_SCHEMA
 
 KEY = "test-key-not-real"
+TOL = load_config().sam.box_overhang_tol_px
 H, W = 60, 80
 
 
@@ -98,9 +107,13 @@ class StreamTransport:
         return {"events": self.events}
 
 
+PANEL_ANSWER = {"front_neck_depth_mm": 45.0, "back_neck_depth_mm": 18.0,
+                "sleeve_cap": {"crown_run_mm": 30.0, "underarm_run_mm": 20.0}, "grain_line": "vertical"}
+
+
 class ChatTransport:
     def __init__(self, content=None):
-        self.content, self.calls = content or {"view": "front", "neck_visible": True}, []
+        self.content, self.calls = content or PANEL_ANSWER, []
 
     def __call__(self, url, headers, body, timeout_s):
         self.calls.append((url, headers, body, timeout_s))
@@ -235,7 +248,7 @@ def test_req_seg_01_box_local_mask_is_placed_at_the_box_top_left():
     """UNCONFIRMED layout (Day 1): the mask is as large as its box and sits at the box top-left."""
     data = [1, 0, 0, 1, 1, 1]  # 3 wide, 2 high: [[1,0,0],[1,1,1]]
     result = _result([_box("0", 10, 5, 13, 7), _mask("0", 3, 2, data)])
-    (res,) = sam_results_from(result, _decode, (H, W), "p.jpg", "t-shirt")
+    (res,) = sam_results_from(result, _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
     expected = np.zeros((H, W), bool)
     expected[5, 10] = True
     expected[6, 10:13] = True
@@ -245,31 +258,42 @@ def test_req_seg_01_box_local_mask_is_placed_at_the_box_top_left():
 
 def test_req_seg_01_cookbook_sizes_box_width_is_right_minus_left():
     result = _result([_box("0", 751, 290, 925, 493), _mask("0", 174, 203)])
-    (res,) = sam_results_from(result, _decode, (600, 1000), "ducks.jpg", "duck")
+    (res,) = sam_results_from(result, _decode, (600, 1000), "ducks.jpg", "duck", box_tol_px=TOL)
     assert res.mask.sum() == 174 * 203
     ys, xs = np.nonzero(res.mask)
     assert (xs.min(), xs.max(), ys.min(), ys.max()) == (751, 924, 290, 492)
 
 
-def test_req_seg_01_full_image_mask_is_used_as_is_and_box_past_edge_is_clipped():
+def test_req_seg_01_full_image_mask_is_used_as_is_and_box_within_one_px_is_clipped():
     full = _result([_mask("0", W, H)])
-    assert sam_results_from(full, _decode, (H, W), "p", "x")[0].mask.all()
-    clipped = _result([_box("0", W - 2, H - 1, W + 3, H + 2), _mask("0", 5, 3)])
-    (res,) = sam_results_from(clipped, _decode, (H, W), "p", "x")
+    assert sam_results_from(full, _decode, (H, W), "p", "x", box_tol_px=TOL)[0].mask.all()
+    # Rounding: a box 1 px past the edge is clipped, as before.
+    edge = _result([_box("0", W - 2, H - 1, W + 1, H + 1), _mask("0", 3, 2)])
+    (res,) = sam_results_from(edge, _decode, (H, W), "p", "x", box_tol_px=TOL)
     assert res.mask.sum() == 2 and res.mask[H - 1, W - 2:].all()
+
+
+def test_req_seg_01_box_past_the_image_by_more_than_one_px_is_an_error_not_a_clip():
+    """Stricter than the old clipping test: a box outside the frame means the frames differ."""
+    past = _result([_box("0", W - 2, H - 1, W + 3, H + 2), _mask("0", 5, 3)])
+    with pytest.raises(ApiError, match=r"p\.jpg.*different pixel frames"):
+        sam_results_from(past, _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
+    negative = _result([_box("0", -3, 0, 2, 2), _mask("0", 5, 2)])
+    with pytest.raises(ApiError, match="different pixel frames"):
+        sam_results_from(negative, _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
 
 
 def test_req_seg_01_unexpected_mask_size_is_an_error_not_a_guess():
     with pytest.raises(ApiError, match="neither the image"):
-        sam_results_from(_result([_box("0", 0, 0, 10, 10), _mask("0", 7, 7)]), _decode, (H, W), "p.jpg", "t-shirt")
+        sam_results_from(_result([_box("0", 0, 0, 10, 10), _mask("0", 7, 7)]), _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
     with pytest.raises(ApiError, match="decodes to"):
-        sam_results_from(_result([_mask("0", W, H, [1, 1])]), _decode, (H, W), "p.jpg", "t-shirt")
+        sam_results_from(_result([_mask("0", W, H, [1, 1])]), _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
 
 
 def test_req_seg_03_score_attribute_is_used_when_the_record_has_one():
     result = _result([_box("0", 0, 0, 5, 5), _mask("0", 5, 5, score=0.4),
                       _box("1", 20, 20, 30, 30), _mask("1", 10, 10, score=0.9)])
-    results = sam_results_from(result, _decode, (H, W), "p", "x")
+    results = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
     assert [r.score for r in results] == [0.4, 0.9]
     assert select_best(results).score == 0.9  # the higher score wins although its mask is bigger anyway
     small_but_sure = [SamResult(mask=np.ones((2, 2), bool), score=0.9), SamResult(mask=np.ones((9, 9), bool), score=0.5)]
@@ -486,7 +510,7 @@ def test_req_api_09_day1_refuses_in_mock_mode_even_with_the_flag(tmp_path, photo
 def test_req_api_09_day1_makes_exactly_one_call_to_each_model_and_reports_the_ledger(tmp_path, photo, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
     client = _client(tmp_path)
-    run_day1(photo, yes_spend=True, client=client)
+    run_day1(photo, yes_spend=True, client=client, out_dir=tmp_path / "o")
     assert len(client._stream_transport.calls) == 1 and len(client._transport.calls) == 1
     out = capsys.readouterr().out
     assert "SAM: model sam-3.1  input tokens 1234" in out
@@ -494,11 +518,278 @@ def test_req_api_09_day1_makes_exactly_one_call_to_each_model_and_reports_the_le
     assert "Ledger total before: $0.000000" in out and "Ledger total after:" in out
     assert "latency" in out and "cost $" in out
     # Run again: both answers come from the cache, nothing more is spent.
-    run_day1(photo, yes_spend=True, client=client)
+    run_day1(photo, yes_spend=True, client=client, out_dir=tmp_path / "o")
     assert len(client._stream_transport.calls) == 1 and len(client._transport.calls) == 1
     assert "nothing was spent" in capsys.readouterr().out
+
+
+def test_req_api_09_day1_sends_the_production_schema_and_prints_pass(tmp_path, photo, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    client = _client(tmp_path)
+    run_day1(photo, yes_spend=True, client=client, out_dir=tmp_path / "o")
+    _, _, body, _ = client._transport.calls[0]
+    sent = body["response_format"]["json_schema"]["schema"]
+    assert sent == strict_json_schema(PanelInference.model_json_schema())
+    for field in ("front_neck_depth_mm", "back_neck_depth_mm", "sleeve_cap", "grain_line"):
+        assert field in body["messages"][-1]["content"][0]["text"]
+    assert "Spark schema check: PASS" in capsys.readouterr().out
+
+
+def test_req_api_09_day1_prints_fail_when_the_answer_does_not_validate(tmp_path, photo, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    client = _client(tmp_path, chat=ChatTransport({"view": "front"}))
+    with pytest.raises(ApiError, match="PanelInference"):
+        run_day1(photo, yes_spend=True, client=client, out_dir=tmp_path / "o")
+    assert "Spark schema check: FAIL" in capsys.readouterr().out
+
+
+def test_req_seg_01_day1_prints_boxes_next_to_image_size_and_writes_overlay(tmp_path, photo, monkeypatch, capsys):
+    records = [_box("0", 10, 5, 30, 25), _mask("0", 20, 20)]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
+    run_day1(photo, yes_spend=True, client=_client(tmp_path), out_dir=tmp_path / "o")
+    out = capsys.readouterr().out
+    assert f"image {W} x {H} px" in out and "box 0: left 10  top 5  right 30  bottom 25" in out
+    overlay = cv2.imread(str(tmp_path / "o" / "p.sam_overlay.png"))
+    assert overlay.shape == (H, W, 3)
+    assert overlay[15, 20, 2] > overlay[15, 20, 0]  # mask area is shaded red
+
+
+def test_req_api_09_day1_prints_approximate_image_tokens(tmp_path, photo, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    run_day1(photo, yes_spend=True, client=_client(tmp_path), out_dir=tmp_path / "o")
+    out = capsys.readouterr().out
+    # ChatTransport bills 1700 input tokens; the day1 prompt is about 50 estimated text tokens.
+    assert "Spark: image tokens APPROXIMATELY 16" in out and "SAM: image tokens APPROXIMATELY 123" in out
 
 
 def test_req_api_09_day1_has_no_loop_over_calls():
     src = (Path(__file__).resolve().parent.parent / "sewtrace" / "day1.py").read_text()
     assert "while " not in src and "for _ in" not in src
+
+
+# ---- SAM input frame, cache keys, stream outcome (REQ-SEG, REQ-API-02, REQ-API-04) ------------------
+
+def _decode_data_url(url: str) -> np.ndarray:
+    import base64
+    raw = base64.b64decode(url.split(",", 1)[1])
+    return cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+
+
+def test_req_seg_01_sam_gets_the_decoded_pixels_reencoded_not_the_file_bytes(tmp_path, monkeypatch):
+    image = np.zeros((H, W, 3), np.uint8)  # smooth, like a photo: noise is the worst case for JPEG
+    image[..., 0], image[..., 1], image[..., 2] = np.arange(W) * 3, np.arange(H)[:, None] * 4, 90
+    path = tmp_path / "q.png"
+    cv2.imwrite(str(path), image)
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    stream = StreamTransport()
+    _client(tmp_path / "c", stream=stream).segment(path, "t-shirt")
+    url = stream.calls[0][2]["input"][0]["content"][1]["image_url"]
+    assert url.startswith("data:image/jpeg;base64,")  # re-encoded: the PNG file was not forwarded
+    sent = _decode_data_url(url)
+    assert sent.shape == image.shape and np.abs(sent.astype(int) - image).mean() < 3  # JPEG q95 noise only
+
+
+def test_req_api_02_sam_key_follows_the_pixels_not_the_file_bytes(tmp_path, monkeypatch):
+    image = np.random.default_rng(2).integers(0, 255, (H, W, 3), dtype=np.uint8)
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    cv2.imwrite(str(a), image, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    cv2.imwrite(str(b), image, [cv2.IMWRITE_PNG_COMPRESSION, 9])
+    assert a.read_bytes() != b.read_bytes()
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    client = _client(tmp_path / "c")
+    client.segment(a, "t-shirt")
+    client.segment(b, "t-shirt")  # same pixels: cache hit
+    assert len(client._stream_transport.calls) == 1
+    other = tmp_path / "o.png"
+    cv2.imwrite(str(other), 255 - image)
+    client.segment(other, "t-shirt")
+    assert len(client._stream_transport.calls) == 2
+
+
+def test_req_seg_01_unreadable_photo_is_an_error_before_any_call(tmp_path, monkeypatch):
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"not an image")
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([])))
+    client = _client(tmp_path)
+    with pytest.raises(ApiError, match="not a readable image"):
+        client.segment(bad, "t-shirt")
+    assert client._stream_transport.calls == [] and not client.ledger_path.exists()
+
+
+def test_req_seg_01_box_outside_the_sent_frame_stops_the_run(tmp_path, photo, monkeypatch):
+    records = [_box("0", 0, 0, W + 40, H + 40), _mask("0", W + 40, H + 40)]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
+    with pytest.raises(ApiError, match="different pixel frames"):
+        _client(tmp_path).segment(photo, "t-shirt")
+
+
+@pytest.mark.parametrize("tail", [
+    [{"type": "response.failed", "response": {"error": {"message": "overloaded"}}}],
+    [{"type": "response.created"}],
+])
+def test_req_api_02_stream_without_completed_is_billed_but_not_cached(tmp_path, photo, monkeypatch, tail):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    stream = StreamTransport(tail)
+    client = _client(tmp_path, stream=stream)
+    with pytest.raises(ApiError, match=rf"p\.jpg.*'t-shirt'.*without response\.completed.*Run the command again"):
+        client.segment(photo, "t-shirt")
+    assert not list(tmp_path.glob("*.events.json"))
+    assert len(client.ledger_path.read_text().splitlines()) == 2  # header + the billed attempt
+    stream.events = EVENTS  # the retry is a new, real attempt
+    assert client.segment(photo, "t-shirt").all()
+    assert len(stream.calls) == 2
+
+
+def test_req_api_02_decoder_version_reuses_events_and_redecodes(tmp_path, photo, monkeypatch):
+    seen: list[dict] = []
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10)]), seen))
+    client = _client(tmp_path)
+    with pytest.raises(ApiError, match="neither the image"):
+        client.segment(photo, "t-shirt")  # 10 x 10 mask without a box: decoder cannot place it
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    assert client.segment(photo, "t-shirt").all()
+    monkeypatch.setattr(client_mod, "SAM_DECODE_VERSION", client_mod.SAM_DECODE_VERSION + 1)
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H, [1, 0] * (W * H // 2))])))
+    redone = client.segment(photo, "t-shirt")  # new decoder version: decoded again from the same events
+    assert 0 < redone.sum() < W * H
+    assert len(client._stream_transport.calls) == 1
+
+
+def test_req_api_08_offline_redecodes_stored_events_and_misses_cleanly_without_them(tmp_path, photo, monkeypatch):
+    from sewtrace.api.client import CacheMiss
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10)])))
+    online = _client(tmp_path)
+    with pytest.raises(ApiError):
+        online.segment(photo, "t-shirt")  # events cached, mask not decodable yet
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+
+    def offline_client(folder):
+        settings = Settings(api_key="", mock=False, cache_dir=folder, offline=True,
+                            ledger_path=tmp_path / "ledger" / "ledger.csv", config=load_config())
+        return MetaClient(settings, transport=ChatTransport(), stream_transport=StreamTransport([]), sleep=lambda s: None)
+
+    assert offline_client(tmp_path).segment(photo, "t-shirt").all()
+    with pytest.raises(CacheMiss):
+        offline_client(tmp_path / "empty").segment(photo, "t-shirt")
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", None)
+    (tmp_path / "x").mkdir()
+    for f in tmp_path.glob("real-*.png"):
+        f.unlink()
+    for f in tmp_path.glob("real-*.score.json"):
+        f.unlink()
+    with pytest.raises(ApiError, match=r"pip install -e '\.\[real\]'"):
+        offline_client(tmp_path).segment(photo, "t-shirt")
+
+
+# ---- every failure after sending is ledgered (REQ-API-04, C-01) ---------------------------------
+
+class Raises:
+    def __init__(self, error):
+        self.error, self.calls = error, []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        raise self.error
+
+
+MID_STREAM_ERRORS = [
+    lambda: ApiError("stream event is not JSON: 'x'"),
+    lambda: http.client.IncompleteRead(b"par", 10),
+    lambda: ssl.SSLEOFError(8, "EOF occurred in violation of protocol"),
+    lambda: ValueError("anything else"),
+]
+
+
+def _one_estimated_row(client, model_id, **expected):
+    lines = client.ledger_path.read_text().splitlines()
+    assert len(lines) == 2, lines  # header + exactly one row
+    row = dict(zip(lines[0].split(","), lines[1].split(",")))
+    assert row["model"] == model_id and row["estimated"] == "1"
+    for key, value in expected.items():
+        assert row[key] == str(value)
+
+
+@pytest.mark.parametrize("make_error", MID_STREAM_ERRORS)
+def test_req_api_04_failure_in_the_sam_stream_logs_one_estimated_row(tmp_path, photo, monkeypatch, make_error):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([])))
+    client = _client(tmp_path, stream=Raises(make_error()))
+    with pytest.raises(ApiError):
+        client.segment(photo, "t-shirt")
+    _one_estimated_row(client, load_config().models.sam.id, images=1)
+    assert not list(tmp_path.glob("*.events.json"))
+
+
+@pytest.mark.parametrize("make_error", MID_STREAM_ERRORS)
+def test_req_api_04_failure_in_a_chat_answer_logs_one_estimated_row(tmp_path, photo, make_error):
+    client = _client(tmp_path, chat=Raises(make_error()))
+    with pytest.raises(ApiError):
+        client.reason("p", [photo])
+    _one_estimated_row(client, load_config().reasoning_model.id,
+                       output_tokens=load_config().reasoning.max_tokens)
+
+
+def test_req_api_04_failure_before_sending_logs_nothing(tmp_path, photo, monkeypatch):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([])))
+    client = _client(tmp_path, stream=Raises(ApiNotSent("dns")), chat=Raises(ApiNotSent("refused")))
+    with pytest.raises(ApiNotSent):
+        client.segment(photo, "t-shirt")
+    with pytest.raises(ApiNotSent):
+        client.reason("p", [photo])
+    assert not client.ledger_path.exists()
+    # Budget stop and a missing key come before the request: no row, no transport call.
+    tight = load_config()
+    tight = tight.model_copy(update={"api": tight.api.model_copy(update={"budget_limit_usd": 0.0001})})
+    chat = Raises(ApiError("must not be called"))
+    broke = _client(tmp_path / "b", chat=chat, config=tight)
+    with pytest.raises(BudgetExceeded):
+        broke.reason("p", [photo])
+    assert chat.calls == [] and not broke.ledger_path.exists()
+
+
+class _Body:
+    """A response whose body fails or is garbage. Works for ``read`` and for line iteration."""
+
+    def __init__(self, error=None, data=b""):
+        self.error, self.data = error, data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        if self.error:
+            raise self.error
+        return self.data
+
+    def __iter__(self):
+        yield b'data: {"type": "a"}\n'
+        if self.error:
+            raise self.error
+        yield b"data: {oops\n"
+
+
+@pytest.mark.parametrize("error", [http.client.IncompleteRead(b"x", 5), ssl.SSLEOFError(8, "EOF"),
+                                   http.client.RemoteDisconnected("closed")])
+@pytest.mark.parametrize("transport", [urllib_transport, urllib_stream_transport])
+def test_req_api_04_urllib_transports_map_broken_reads_to_transport_error(monkeypatch, transport, error):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda r, timeout: _Body(error))
+    with pytest.raises(ApiTransportError):
+        transport("https://x", {}, {}, 5.0)
+
+
+def test_req_api_04_urllib_bad_json_and_never_sent_errors(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda r, timeout: _Body(data=b"<html>gateway</html>"))
+    with pytest.raises(ApiTransportError, match="not JSON"):
+        urllib_transport("https://x", {}, {}, 5.0)
+    with pytest.raises(ApiError, match="not JSON"):  # stream: parse_sse error, billed by _paid
+        urllib_stream_transport("https://x", {}, {}, 5.0)
+
+    def refuse(request, timeout):
+        raise urllib.error.URLError(socket.gaierror("no such host"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    for transport in (urllib_transport, urllib_stream_transport):
+        with pytest.raises(ApiNotSent):
+            transport("https://x", {}, {}, 5.0)
