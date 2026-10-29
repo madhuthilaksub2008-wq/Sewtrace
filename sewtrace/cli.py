@@ -218,6 +218,9 @@ def _verify(photo: str, out: str | None, spec_arg: str | None = None) -> None:
             if result.neck_gap_flagged:
                 print(f"WARNING: the neck gap differs from the spec by more than {result.neck_gap_tol_mm:g} mm. "
                       "Check the neck depths of the cut paper against spec.json.")
+    if result.side_offset_mm is not None:
+        print(f"The gap is the same along the side ({result.side_offset_mm:.1f} mm). Check that the fold of the "
+              "paper is on the centre of the t-shirt. If it is, the paper is cut too wide or too narrow.")
     print(f"overlay {out_path}")
 
 

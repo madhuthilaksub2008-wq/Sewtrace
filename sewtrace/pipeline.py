@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
 from sewtrace.vision.measure import measure_tee
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -72,6 +75,8 @@ def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bo
         half = contour.body_half(contour.remove_sleeves(outline))
         return half, contour.label_body_edges(half)
     except contour.ShoulderPointNotClear as err:
+        # The numbers let refusals on real photos recalibrate contour.joints.shoulder_plateau_mm.
+        log.warning("shoulder point not clear: %s, spread %.1f mm, limit %.1f mm", photo, err.spread_mm, err.limit_mm)
         raise ContourFailed(f"{view} photo {photo}: {err}. Take the {view} photo again.") from err
     except ValueError as err:
         raise ContourFailed(

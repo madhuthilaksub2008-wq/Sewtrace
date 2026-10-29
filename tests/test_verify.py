@@ -13,7 +13,7 @@ from sewtrace.mock.proof import make_proof
 from sewtrace.vision.marker import photo_homography
 from sewtrace.config import get_config
 from sewtrace.vision import contour
-from sewtrace.vision.verify import (ProofResult, edge_gaps, find_fold_edge, gap_result, mask_outline_mm,
+from sewtrace.vision.verify import (PaperFoldNotStraight, ProofResult, edge_gaps, find_fold_edge, gap_result, mask_outline_mm,
                                     overlay_image, verify_proof)
 from sewtrace.types import Outline
 
@@ -307,6 +307,111 @@ def test_req_ver_02_fold_found_whole_and_cut_edge_next_to_it_keeps_its_gap(name,
     band = get_config().proof.fold_band_mm
     top = pts[np.isclose(pts[:, 1], 3.0)]
     assert top[:, 0].min() < 300 + 2 * band   # the cut edge right next to the fold is compared
+
+
+def _bow(sagitta_mm: float):
+    """A fold that bows by ``sagitta_mm`` in the middle (a parabola) and meets x = 300 at both ends."""
+    return lambda y: sagitta_mm * 4 * ((y - 3) / 694) * (1 - (y - 3) / 694)
+
+
+@pytest.mark.parametrize("sagitta_mm", [3.0, 5.0])
+def test_req_ver_02_a_small_bow_in_the_fold_is_absorbed_with_correct_gaps(sagitta_mm):
+    """REQ-VER-02: a fold that bows 3 or 5 mm stays inside the band: the whole fold is found and a
+    paper cut 3 mm too small shows 3 mm everywhere, also at the fold ends."""
+    paper, body = _rect_case(_bow(sagitta_mm))
+    p0, p1 = find_fold_edge(paper, body)
+    assert abs(np.linalg.norm(p1 - p0) - 694) < 8
+    _, d = edge_gaps(paper, body, fold=(p0, p1))
+    assert len(d) > 300 and np.allclose(d, 3.0, atol=0.2), f"max gap {d.max():.1f} mm"
+
+
+@pytest.mark.parametrize("sagitta_mm", [8.0, 12.0, -8.0])
+def test_req_ver_02_a_fold_that_bows_over_the_band_is_refused(sagitta_mm):
+    """REQ-VER-02: an 8 mm bow keeps only the straight part of the fold (556 mm of 700) and the rest
+    would count as cut edge (mean gap 7.6 mm). The user gets the action instead of a wrong gap."""
+    paper, body = _rect_case(_bow(sagitta_mm))
+    with pytest.raises(PaperFoldNotStraight, match=r"The paper fold is not straight\. Make the paper flat "
+                                                    r"on the t-shirt and take the proof photo again\."):
+        find_fold_edge(paper, body)
+
+
+def test_req_ver_02_cli_verify_names_the_photo_when_the_fold_is_not_straight(proofs, monkeypatch):
+    from sewtrace import cli
+    from sewtrace.vision import verify
+
+    def refuse(*_):
+        raise PaperFoldNotStraight("The paper fold is not straight. Make the paper flat on the t-shirt "
+                                   "and take the proof photo again.")
+
+    tee_dir, _ = proofs
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setattr(verify, "find_fold_edge", refuse)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["verify", str(tee_dir / "perfect.jpg")])
+    assert "perfect.jpg" in str(exc.value.code) and "take the proof photo again" in str(exc.value.code)
+
+
+def test_req_geo_01_cli_verify_tells_to_take_the_proof_photo_again_on_an_unclear_shoulder(proofs, monkeypatch, caplog):
+    """A ShoulderPointNotClear on the proof photo says which photo to take again, keeps the numbers
+    of the refusal, and logs them."""
+    from sewtrace import cli
+
+    def refuse(_):
+        raise contour.ShoulderPointNotClear("the shoulder point is not clear: x (spread 52 mm, limit 40 mm)", 52.0, 40.0)
+
+    tee_dir, _ = proofs
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setattr(contour, "cut_sleeves_flagged", refuse)
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit) as exc:
+        cli.main(["verify", str(tee_dir / "perfect.jpg")])
+    text = str(exc.value.code)
+    assert "perfect.jpg" in text and "spread 52 mm, limit 40 mm" in text and text.endswith("Take the proof photo again.")
+    assert "spread 52.0 mm" in caplog.text
+
+
+def test_req_ver_02_fold_band_and_end_margin_are_separate_settings():
+    """Nit: the width of the band and the margin at the fold ends are two settings with their own effect."""
+    proof_cfg = get_config().proof
+    assert proof_cfg.fold_band_mm > 0 and proof_cfg.fold_end_margin_mm >= 0
+    assert "fold_end_margin_mm" in type(proof_cfg).model_fields
+
+
+def _side_result(side_gap_of_y):
+    """Proof result for a half paper whose top edge is 3 mm inside the body and whose right side is
+    3 mm + ``side_gap_of_y`` mm inside it."""
+    ys = np.arange(3.0, 697.1, 2.0)
+    top = np.column_stack([np.arange(300, 597, 2.0), np.full(149, 3.0)])
+    points = np.vstack([top, np.column_stack([597 - side_gap_of_y(ys), ys])])
+    distances = np.concatenate([np.full(len(top), 3.0), 3.0 + side_gap_of_y(ys)])
+    return gap_result(points, distances, fold=(np.array([300.0, 3.0]), np.array([300.0, 697.0])))
+
+
+def test_req_ver_02_same_gap_along_the_side_gives_an_info_line_and_changes_no_number():
+    """A fold off the centre moves the whole side: a flat side gap. A gap that grows along the side
+    (a paper that is tilted) is not flat. Information only: the gap numbers are the same."""
+    flat = _side_result(lambda y: 0 * y + 5.0)
+    assert flat.side_offset_mm == pytest.approx(8.0, abs=0.1)
+    tilted = _side_result(lambda y: y / 100.0)
+    assert tilted.side_offset_mm is None
+    assert _side_result(lambda y: 0 * y - 2.0).side_offset_mm is None   # a flat gap of 1 mm: nothing to report
+    plain = gap_result(np.asarray(flat.points_mm), np.asarray(flat.distances_mm))
+    assert (flat.mean_mm, flat.max_mm, flat.p95_mm) == (plain.mean_mm, plain.max_mm, plain.p95_mm)
+
+
+def test_req_ver_02_cli_verify_prints_the_same_side_gap_hint_for_a_shifted_paper(proofs, tmp_path, monkeypatch, capsys):
+    from sewtrace import cli
+
+    tee_dir, _ = proofs
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setenv("SEWTRACE_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.chdir(tmp_path)
+    cli.main(["verify", str(tee_dir / "shifted.jpg"), "--out", str(tmp_path / "o.png")])
+    assert "The gap is the same along the side" in capsys.readouterr().out
+    cli.main(["verify", str(tee_dir / "perfect.jpg"), "--out", str(tmp_path / "o.png")])
+    assert "same along the side" not in capsys.readouterr().out
 
 
 def test_req_ver_02_fold_line_must_be_deep_inside_the_tee():

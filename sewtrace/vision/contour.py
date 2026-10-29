@@ -290,7 +290,15 @@ def _hinge_scan(run: np.ndarray, trim_start: float, trim_end: float) -> _HingeSc
 
 
 class ShoulderPointNotClear(ValueError):
-    """The sleeve top bends too little away from the shoulder seam to place the shoulder point."""
+    """The sleeve top bends too little away from the shoulder seam to place the shoulder point.
+
+    ``spread_mm`` is the measured joint plateau and ``limit_mm`` the config limit it passed. They
+    are kept so that refusals on real photos can be used to recalibrate the limit."""
+
+    def __init__(self, message: str, spread_mm: float, limit_mm: float) -> None:
+        super().__init__(message)
+        self.spread_mm = spread_mm
+        self.limit_mm = limit_mm
 
 
 def _joint_fit(a: _HingeScan, b: _HingeScan) -> tuple[np.ndarray, np.ndarray]:
@@ -329,7 +337,9 @@ def _joint_bend(a: _HingeScan, b: _HingeScan) -> tuple[int, int]:
     if spread > cfg.shoulder_plateau_mm:
         raise ShoulderPointNotClear(
             "the shoulder point is not clear: the sleeve top and the shoulder seam are nearly in line. "
-            "Let the sleeves hang down more, so the sleeve top bends clearly away from the shoulder line"
+            "Put each sleeve at an angle down from the shoulder. Keep a gap between the sleeve and the side "
+            f"of the t-shirt (spread {spread:.0f} mm, limit {cfg.shoulder_plateau_mm:g} mm)",
+            spread_mm=spread, limit_mm=cfg.shoulder_plateau_mm,
         )
     return i, int(partner[i])
 

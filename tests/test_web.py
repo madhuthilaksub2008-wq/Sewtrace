@@ -86,9 +86,11 @@ def test_req_cap_03_page_shows_capture_tips(client):
     html = client.get("/").text
     for tip in ("Tape the marker card flat to the surface.",
                 "Put the marker close to the t-shirt, near the middle of one side.",
-                "Hold the camera directly above the t-shirt. Put the t-shirt in the middle of the frame.",
+                "Hold the camera directly above the t-shirt.",
+                "Put the t-shirt in the middle of the frame.",
                 "Use the main lens. Do not use the wide-angle lens.",
-                "Let the sleeves hang down, so the sleeve top bends clearly away from the shoulder line."):
+                "Do not put the marker on the t-shirt.",
+                "Put each sleeve at an angle down from the shoulder. Keep a gap between the sleeve and the side of the t-shirt."):
         assert tip in html
     assert html.index("Tips for good photos") < html.index("Run with my photos")
     assert "\u2014" not in html[html.index("Tips for good photos") : html.index("<h3>The marker</h3>")]   # no em dash

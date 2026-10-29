@@ -125,4 +125,5 @@ def run_proof(ctx: Context, job: Job, photo: Path | None) -> dict:
                 "flagged": result.neck_gap_flagged, "tol_mm": result.neck_gap_tol_mm}
     return {"mean_mm": result.mean_mm, "max_mm": result.max_mm, "p95_mm": result.p95_mm,
             "pct_within": 100 * result.frac_within_tol, "tol_mm": result.tol_mm, "neck": neck,
+            "side_offset_mm": result.side_offset_mm,
             "overlay": "proof_overlay", "spec_source": ctx.last_source, "model_calls": ctx.client.calls - calls_before}

@@ -135,7 +135,7 @@ def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
     p = _tee(0)
     hp = _calm(0, kink_deg=(3.0, 3.0), corner_radius_mm=10.0)
     outline, _, _ = _joints(p, hp)
-    with pytest.raises(ValueError, match="shoulder point is not clear.*Let the sleeves hang down more"):
+    with pytest.raises(ValueError, match=r"shoulder point is not clear.*Put each sleeve at an angle down from the shoulder"):
         contour.find_sleeve_joints(outline)
 
 
@@ -156,8 +156,10 @@ def test_req_geo_01_two_faint_shoulders_are_refused():
     """REQ-GEO-01: both shoulders at 3 degrees: the joint fit is a plateau of 117 mm, refused
     (a truly ambiguous tee), with the action to take."""
     outline, _, _ = _joints(_tee(1), _calm(1, kink_deg=(3.0, 3.0), corner_radius_mm=8.0))
-    with pytest.raises(contour.ShoulderPointNotClear, match="Let the sleeves hang down more"):
+    with pytest.raises(contour.ShoulderPointNotClear, match=r"Put each sleeve at an angle down from the shoulder.*\(spread \d+ mm, limit 40 mm\)") as exc:
         contour.find_sleeve_joints(outline)
+    # The measured plateau is kept, so refusals on real photos can recalibrate the limit.
+    assert exc.value.spread_mm > exc.value.limit_mm == get_config().contour.joints.shoulder_plateau_mm
 
 
 def _peak_scores(positions: list[int], n: int = 400) -> np.ndarray:
@@ -242,7 +244,7 @@ def test_req_geo_04_hard_tee_measurements_and_seams(hard_dir, client, tmp_path, 
 def test_req_geo_01_hard_tee_with_faint_kink_names_the_photo(hard_dir, client, tmp_path):
     """REQ-GEO-01: tee1 (3 degree kink) is refused with ContourFailed that names the photo, says
     what to do and names the photo to take again."""
-    with pytest.raises(ContourFailed, match=r"front photo .*not clear.*Let the sleeves hang down more.*Take the front photo again"):
+    with pytest.raises(ContourFailed, match=r"front photo .*not clear.*Put each sleeve at an angle down from the shoulder.*spread \d+ mm, limit \d+ mm.*Take the front photo again"):
         run(hard_dir / "tee1", tmp_path / "out", client)
 
 

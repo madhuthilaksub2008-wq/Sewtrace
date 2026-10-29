@@ -67,10 +67,11 @@
       <h3>Tips for good photos</h3>
       <ul id="captureTips">
         <li>Tape the marker card flat to the surface.</li>
-        <li>Put the marker close to the t-shirt, near the middle of one side.</li>
-        <li>Hold the camera directly above the t-shirt. Put the t-shirt in the middle of the frame.</li>
+        <li>Put the marker close to the t-shirt, near the middle of one side. Do not put the marker on the t-shirt.</li>
+        <li>Hold the camera directly above the t-shirt.</li>
+        <li>Put the t-shirt in the middle of the frame.</li>
         <li>Use the main lens. Do not use the wide-angle lens.</li>
-        <li>Let the sleeves hang down, so the sleeve top bends clearly away from the shoulder line.</li>
+        <li>Put each sleeve at an angle down from the shoulder. Keep a gap between the sleeve and the side of the t-shirt.</li>
       </ul>
       <h3>The marker</h3>
       <ol>
@@ -280,6 +281,9 @@ function renderProof(id, r, box) {
     let t = `Neck (information, not in the mean): ${r.neck.points} points, mean gap ${r.neck.mean_mm.toFixed(1)} mm.`;
     if (r.neck.expected_mm !== null) t += ` Expected from the spec ${r.neck.expected_mm.toFixed(1)} mm, difference ${signed(r.neck.difference_mm)}.`;
     out.push(h("div", {class: "msg " + (r.neck.flagged ? "warn" : "info")}, t, r.neck.flagged ? ` WARNING: the difference is more than ${r.neck.tol_mm} mm. Check the neck depths of the cut paper against spec.json.` : ""));
+  }
+  if (r.side_offset_mm !== null && r.side_offset_mm !== undefined) {
+    out.push(h("div", {class: "msg info"}, `The gap is the same along the side (${r.side_offset_mm.toFixed(1)} mm). Check that the fold of the paper is on the centre of the t-shirt. If it is, the paper is cut too wide or too narrow.`));
   }
   out.push(h("p", {class: "small"}, "Checked against the pattern of " + (r.spec_source === "sample" ? "the sample tee run" : "run " + r.spec_source.slice(0, 8)) + "."));
   out.push(h("img", {src: file(id, r.overlay), alt: "proof overlay: green within tolerance, red elsewhere"}));

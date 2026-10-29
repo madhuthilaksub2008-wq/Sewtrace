@@ -185,7 +185,15 @@ neck_gap_tolerance_mm = 5.0
 # edge is not a cut edge, so it is left out of the gap, and each paper point is
 # compared with the body edge on its own side of the fold only.
 fold_straight_tol_mm = 2.0 # a paper edge is "straight" when it stays this close to a line
-fold_band_mm = 6.0         # along the fold, paper points this close to the fold line are fold, not cut edge: covers a mask wobble or a bulge of 3 to 4 mm. Also the length cut off each end of the fold for this rule
+fold_band_mm = 6.0         # width: paper points this close to the fold line are fold, not cut edge. Covers a mask wobble or a bulge of 3 to 4 mm
+fold_end_margin_mm = 6.0   # length cut off each end of the fold, so the cut edges (neck, hem) that start there keep their gap
+fold_parallel_deg = 30.0   # in the end margin, a paper point within the band is fold when the outline there runs within this angle of the fold line (a bowed fold), not across it (neck, hem)
+fold_bow_window_mm = 20.0  # a paper fold that bows out of the band: outline this close to the fold line (but outside the band) is counted, except the first window length at each end of the fold, where the neck and hem edges leave it
+fold_bow_limit_mm = 40.0   # the paper fold is "not straight" when more than this length of outline is counted. The synthetic proofs give 0; an 8 mm bow on a 700 mm fold gives about 100. NEEDS USER CONFIRMATION.
+side_offset_min_mm = 2.0   # info line "same gap along the side": the side gap must be at least this big
+side_offset_spread_mm = 1.0 # ... and most side points (next line) must be within this of the median side gap
+side_offset_min_share = 0.8 # ... at least this share of the side points
+side_offset_min_cover = 0.5 # ... over at least this fraction of the fold length
 fold_ransac_trials = 200   # random line candidates for the fold fit
 fold_min_inset_mm = 30.0   # the fold edge lies at least this far inside the t-shirt edge
 fold_exclude_mm = 1.5      # paper points this close to the fold line are always left out (the exact-gap oracle, mock/proof.py, uses it too)
