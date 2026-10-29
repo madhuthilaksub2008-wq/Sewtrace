@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +125,58 @@ def make_proof(
     return proof
 
 
+def make_proof_hard(
+    tee_dir: str | Path,
+    seed: int = 0,
+    scale: float = 1.0,
+    rotation_deg: float = 0.0,
+    offset_mm: tuple[float, float] = (0.0, 0.0),
+    name: str = "proof",
+    cut_wave_mm: float = 1.5,
+) -> dict:
+    """make_proof() for a hard tee (``synth --hard``): the paper is cut by hand (waves of
+    ``cut_wave_mm`` on every edge but the fold), a lifted paper edge casts a shadow, and the
+    photo has every fault of the tee (lens, tilt, light, noisy masks). The expected gap is
+    computed from the exact wavy paper and the exact, rounded, back-neck tee body."""
+    from sewtrace.mock import synth_hard
+
+    tee_dir = Path(tee_dir)
+    truth = json.loads((tee_dir / "truth.json").read_text())
+    hp = synth_hard.params_from_truth(truth)
+    p = synth.TeeParams(**dict(truth["params"], colour_bgr=tuple(truth["params"]["colour_bgr"])))
+    front = truth["photos"]["front"]
+    origin = np.asarray(front["origin_mm"], float)
+    half = np.asarray(front["half_outline_mm"], float)  # the pattern: front neck
+    visible = np.asarray(front["visible_half_outline_mm"], float)  # the mask: back neck
+    edges = {k: tuple(v) for k, v in front["edges"].items()}
+    regions = {k: np.asarray(v) for k, v in front["regions_mm"].items() if k != "sleeves"}
+    cut = synth_hard.wave_edges(half, edges, replace(hp, wave_mm=cut_wave_mm), view=3, side=0, skip=("fold",))
+    paper = paper_outline(cut, scale, rotation_deg, offset_mm) + origin
+    fold = (paper[edges["fold"][0]], paper[0])
+
+    rng = np.random.default_rng(seed)
+    photo, masks, H, marker_mm = synth_hard.render_hard(
+        {"body": [regions["body"]], "sleeve": [np.asarray(s) for s in front["regions_mm"]["sleeves"]]},
+        [regions["garment"]], p.colour_bgr, rng, hp, overlays={"paper": ([paper], PAPER_BGR)})
+    synth_hard.save(tee_dir, name, photo, masks, hp.jpeg_quality)
+    armhole = half[edges["armhole"][0] : edges["armhole"][1] + 1] + origin
+    neck = visible[edges["neck"][0] : edges["neck"][1] + 1] + origin
+    gaps, neck_gaps = expected_gaps(paper, regions["body_rounded"], fold, armhole, origin[0], neck=neck)
+    proof = {
+        "paper": {"scale": scale, "rotation_deg": rotation_deg, "offset_mm": list(offset_mm),
+                  "cut_wave_mm": cut_wave_mm},
+        "paper_outline_mm": paper.tolist(),
+        "fold_mm": [f.tolist() for f in fold],
+        "world_mm_to_photo_px": H.tolist(),
+        "marker_corners_mm": marker_mm.tolist(),
+        "expected_gap_mean_mm": float(gaps.mean()),
+        "expected_gap_max_mm": float(gaps.max()),
+        "expected_neck_gap_mean_mm": float(neck_gaps.mean()) if len(neck_gaps) else None,
+    }
+    (tee_dir / f"{name}.json").write_text(json.dumps(proof, indent=1))
+    return proof
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("tee_dir")
@@ -131,8 +184,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--rotation", type=float, default=0.0)
     ap.add_argument("--offset", type=float, nargs=2, default=(0.0, 0.0))
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--hard", action="store_true", help="tee_dir is a hard tee: hand-cut wavy paper, lift shadow")
     args = ap.parse_args(argv)
-    proof = make_proof(args.tee_dir, args.seed, args.scale, args.rotation, tuple(args.offset))
+    make = make_proof_hard if args.hard else make_proof
+    proof = make(args.tee_dir, args.seed, args.scale, args.rotation, tuple(args.offset))
     print(f"wrote {Path(args.tee_dir) / 'proof.jpg'}, expected mean gap {proof['expected_gap_mean_mm']:.2f} mm")
 
 

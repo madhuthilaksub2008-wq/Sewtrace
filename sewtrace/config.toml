@@ -80,6 +80,37 @@ garment = "t-shirt"        # front, back and the t-shirt in the proof photo
 sleeve = "sleeve"
 paper = "paper"
 
+[contour.mask]             # REQ-SEG-03: mask cleanup before the outline is traced
+# Holes and edge nicks up to this size are closed and whiskers up to this size are removed. The
+# largest connected piece is kept. A disc of this radius changes a 90 degree corner by at most
+# 0.41 times the radius, so keep it small. Rounded to whole pixels, at least 1 px.
+cleanup_mm = 0.5
+
+[contour.joints]           # REQ-GEO-01: shoulder and underarm points of a whole t-shirt outline
+# Corners are found where the outline turns over a chord of corner_window_mm either side. A sleeve
+# or neck corner rounded to a radius of 15 mm still turns 23 to 60 degrees over 8 mm (the neck is
+# the weakest, its scoop turns the other way next to it); a wave in the edge turns at most 22 and
+# 13 or less away from a corner. Measured on the hard synthetic set (sewtrace/mock/synth_hard.py),
+# 20 photos. NEEDS REAL PHOTOS to confirm.
+corner_window_mm = 8.0
+underarm_min_deg = 30.0    # the two sharpest concave corners must turn at least this much
+corner_min_deg = 10.0      # convex corners (sleeve hem, neck) are picked among the peaks above this
+# The six are chosen as three mirror pairs about the middle of the arc between the underarm points.
+# A pair may be this far (mm) from mirrored: sleeve length and left/right offset of real tees.
+pair_tol_mm = 25.0
+# The shoulder point is the bend of the sleeve top into the shoulder seam. The two shoulders of a
+# tee are about as far from the neck, so their bends are fitted together, and the two seam lengths
+# may differ by shoulder_symmetry_mm (hard set: 1 to 3 mm of left/right offset). A faint bend
+# (a few degrees) cannot be placed: edge waves of 1 to 2 mm move it by tens of mm. When the bends
+# that fit within 25 percent of the best fit spread over more than shoulder_plateau_mm, the photo
+# is refused. Hard set: 16 to 38 mm for a kink of 8 to 10 degrees, 48 to 220 mm for 3 to 6 degrees.
+shoulder_symmetry_mm = 8.0
+shoulder_plateau_mm = 40.0
+# A corner's rounding ends where the outline turns less than rounding_deg over a 4 mm chord. The
+# straight-line fits for the shoulder point start rounding_margin_mm past that.
+rounding_deg = 12.0
+rounding_margin_mm = 2.0
+
 [contour.armhole]          # default armhole between shoulder point and underarm point
 # A flat-lay photo hides the armhole under the sleeve, so only its two end points are
 # visible. The default is a cubic Bezier that leaves the shoulder seam and meets the
@@ -133,6 +164,7 @@ neck_gap_tolerance_mm = 5.0
 # edge is not a cut edge, so it is left out of the gap, and each paper point is
 # compared with the body edge on its own side of the fold only.
 fold_straight_tol_mm = 2.0 # a paper edge is "straight" when it stays this close to a line
+fold_smooth_mm = 5.0       # the paper outline is smoothed by a Gaussian of this sigma before the straight-edge search: a SAM mask edge wobbles by 1 to 2 mm, more than fold_straight_tol_mm, and would cut the fold edge in pieces
 fold_min_inset_mm = 30.0   # the fold edge lies at least this far inside the t-shirt edge
 fold_exclude_mm = 1.5      # paper points this close to the fold edge are left out
 centre_margin_mm = 10.0    # body edge this far past the fold line still counts as the same side

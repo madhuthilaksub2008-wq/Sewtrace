@@ -19,6 +19,7 @@ Photos are rendered top-down at PX_PER_MM, then warped by a small random
 camera homography (tilt, rotation, scale), so the marker step has real work.
 
     python -m sewtrace.mock.synth --out data/synth
+    python -m sewtrace.mock.synth --hard --out data/synth_hard   # the hard set, see synth_hard.py
 """
 
 from __future__ import annotations
@@ -351,12 +352,30 @@ def _save(out: Path, view: str, photo: np.ndarray, masks: dict[str, np.ndarray])
         cv2.imwrite(str(mdir / f"{name}.png"), m)
 
 
+def make_tee_hard(p: TeeParams, out: Path, seed: int, hard=None) -> dict:
+    """make_tee() with the faults of real photos (sewtrace/mock/synth_hard.py)."""
+    from sewtrace.mock import synth_hard  # lazy: synth_hard imports this module
+
+    return synth_hard.make_tee_hard(p, out, seed, hard)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--out", default="data/synth")
+    ap.add_argument("--out", default=None, help="default: data/synth, or data/synth_hard with --hard")
     ap.add_argument("--only", nargs="*", help="tee names, e.g. tee1")
+    ap.add_argument("--hard", action="store_true", help="write the hard set: wavy, rounded, distorted, noisy")
+    ap.add_argument("--count", type=int, default=10, help="number of hard tees (with --hard)")
+    ap.add_argument("--lens-scale", type=float, default=1.0, help="multiplier of the barrel distortion (with --hard)")
+    ap.add_argument("--curl-scale", type=float, default=1.0, help="multiplier of the marker card curl (with --hard)")
     args = ap.parse_args(argv)
-    out = Path(args.out)
+    if args.hard:
+        from sewtrace.mock import synth_hard
+
+        out = Path(args.out or "data/synth_hard")
+        for path in synth_hard.make_hard_set(out, args.count, args.only, args.lens_scale, args.curl_scale):
+            print(f"wrote {path}")
+        return
+    out = Path(args.out or "data/synth")
     for i, p in enumerate(TEES):
         if args.only and p.name not in args.only:
             continue
