@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "numpy",
   "scipy",
-  "opencv-contrib-python-headless>=4.7",
+  "opencv-contrib-python-headless==5.0.0.93",
   "shapely>=2",
   "pydantic>=2",
   "reportlab",

@@ -27,8 +27,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.datastructures import UploadFile
 
-from sewtrace.api.client import MetaClient
-from sewtrace.config import ROOT, Settings, resolve_ledger_path
+from sewtrace.api.client import LedgerMountError, MetaClient
+from sewtrace.config import ROOT, Settings
 from sewtrace.output.marker_pdf import marker_pdf_bytes
 from sewtrace.web import service
 from sewtrace.web.imagesize import image_size
@@ -37,7 +37,7 @@ from sewtrace.web.jobs import Busy, JobStore
 log = logging.getLogger(__name__)
 
 PASSWORD_ENV = "SEWTRACE_WEB_PASSWORD"
-REQUIRE_MOUNT_ENV = "SEWTRACE_REQUIRE_LEDGER_MOUNT"  # set to 1 in the Docker image
+MAX_PIXELS_ENV = "OPENCV_IO_MAX_IMAGE_PIXELS"
 CSRF_HEADER = "x-sewtrace"
 PAGE = Path(__file__).with_name("index.html")
 DOWNLOAD_NAMES = {"pdf", "svg", "dxf", "spec"}
@@ -72,28 +72,13 @@ def password_ok(header: str | None, password: str) -> bool:
     return hmac.compare_digest(_digest(given), _digest(password))
 
 
-def check_ledger_mount(settings: Settings) -> None:
-    """In the image, REAL mode needs the ledger folder on a mounted volume. A folder on the
-    container disk is wiped on restart, and the cache with it, so the budget guard would start
-    again at $0 without any other check noticing (REQ-API-04, C-01)."""
-    if settings.mock or settings.offline or os.environ.get(REQUIRE_MOUNT_ENV) != "1":
-        return
-    folder = (settings.ledger_path or resolve_ledger_path(settings.config)).parent
-    if not os.path.ismount(folder):
-        raise WebConfigError(
-            f"REAL mode spends money, and the ledger folder {folder} is not a mounted volume, so the spend "
-            f"total would restart at $0 after a restart or a redeploy. Attach a persistent volume at {folder} "
-            "and start again, or use mock mode (SEWTRACE_MOCK=1). See docs/DEPLOY.md, 'The ledger volume'."
-        )
-
-
 def _error(status: int, kind: str, title: str, message: str) -> JSONResponse:
     return JSONResponse({"error": {"kind": kind, "title": title, "message": message}}, status_code=status)
 
 
-async def _read_photo(upload: UploadFile | str | None, label: str, max_bytes: int, max_pixels: int) -> tuple[bytes | None, JSONResponse | None]:
-    """One uploaded photo as JPEG bytes, or the error response. A JPEG is kept as sent (EXIF
-    stays); a PNG becomes a JPEG, because the pipeline reads ``<view>.jpg``."""
+async def _take_photo(upload: UploadFile | str | None, label: str, max_bytes: int) -> tuple[bytes | None, JSONResponse | None]:
+    """The raw bytes of one uploaded photo, or the error response for a missing or oversize file.
+    Nothing is decoded here."""
     if not isinstance(upload, UploadFile) or not upload.filename:
         return None, _error(400, "PhotoMissing", "A photo is missing",
                             f"The {label} photo is missing. Choose all three photos, or use the sample tee.")
@@ -101,12 +86,24 @@ async def _read_photo(upload: UploadFile | str | None, label: str, max_bytes: in
     if len(data) > max_bytes:
         return None, _error(413, "PhotoTooLarge", "A photo is too large",
                             f"The {label} photo is larger than {max_bytes / 1024 / 1024:g} MB. Use a smaller file.")
+    return data, None
+
+
+def _check_photo(data: bytes, label: str, max_pixels: int) -> tuple[bytes | None, JSONResponse | None]:
+    """One photo as JPEG bytes, or the error response. A JPEG is kept as sent (EXIF stays); a PNG
+    becomes a JPEG, because the pipeline reads ``<view>.jpg``. The header size is checked before
+    the decode, and a header that cannot be read safely is refused without a decode."""
     size = image_size(data)
     if size is not None and size[0] * size[1] > max_pixels:
         return None, _error(413, "PhotoTooManyPixels", "A photo has too many pixels",
                             f"The {label} photo is {size[0] * size[1] / 1e6:.0f} MP. The limit is "
                             f"{max_pixels / 1e6:g} MP. Use a smaller photo.")
-    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) if size is not None else None
+    image = None
+    if size is not None:
+        try:
+            image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        except cv2.error:  # OpenCV's own pixel cap (OPENCV_IO_MAX_IMAGE_PIXELS) refuses the frame
+            image = None
     if image is None:
         return None, _error(415, "PhotoNotImage", "A photo is not an image",
                             f"The {label} photo is not a JPEG or PNG image. Choose a photo file.")
@@ -129,10 +126,15 @@ def create_app(
             f"REAL mode spends money, so the web page needs a password. Set {PASSWORD_ENV} and start again, "
             "or use mock mode (SEWTRACE_MOCK=1)."
         )
-    check_ledger_mount(settings)
     web = settings.config.web
     max_bytes, max_pixels = int(web.max_upload_mb * 1024 * 1024), web.max_pixels
-    client = MetaClient(settings)
+    # Defence in depth: OpenCV refuses a frame above this size even if a header trick fools the
+    # check in imagesize.py. OpenCV reads the variable once, at the first decode of the process.
+    os.environ[MAX_PIXELS_ENV] = str(max_pixels)
+    try:
+        client = MetaClient(settings)  # REAL mode in the image needs the ledger on a mounted volume
+    except LedgerMountError as err:
+        raise WebConfigError(str(err)) from err
     log.info("ledger %s, total $%.4f of $%.2f, mode %s, cache %s", client.ledger_path, client.ledger_total_usd(),
              settings.config.api.budget_limit_usd, mode_label(settings), client.cache_dir)
     sample_root = sample_root or ROOT / "data" / "synth"
@@ -207,14 +209,20 @@ def create_app(
         form = await request.form()
         if form.get("sample"):
             return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True))
-        uploads: dict[str, bytes] = {}
+        raw: dict[str, bytes] = {}
         for view in service.VIEWS:
-            data, err = await _read_photo(form.get(view), view, max_bytes, max_pixels)
+            data, err = await _take_photo(form.get(view), view, max_bytes)
             if err is not None:
                 return err
-            uploads[f"{view}.jpg"] = data  # type: ignore[assignment]
-        if mock_only_sample:
+            raw[view] = data  # type: ignore[assignment]
+        if mock_only_sample:  # before any decode: MOCK mode never works on real photos
             return _error(400, "MockMode", "Real photos need REAL mode", REAL_MODE_MESSAGE)
+        uploads: dict[str, bytes] = {}
+        for view, data in raw.items():
+            checked, err = _check_photo(data, view, max_pixels)
+            if err is not None:
+                return err
+            uploads[f"{view}.jpg"] = checked  # type: ignore[assignment]
         return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False), uploads)
 
     @app.post("/api/proof")
@@ -222,11 +230,14 @@ def create_app(
         form = await request.form()
         if form.get("sample"):
             return start("proof", lambda job: service.run_proof(ctx, job, None))
-        data, err = await _read_photo(form.get("photo"), "proof", max_bytes, max_pixels)
+        data, err = await _take_photo(form.get("photo"), "proof", max_bytes)
         if err is not None:
             return err
-        if mock_only_sample:
+        if mock_only_sample:  # before any decode
             return _error(400, "MockMode", "Real photos need REAL mode", REAL_MODE_MESSAGE)
+        data, err = _check_photo(data, "proof", max_pixels)  # type: ignore[arg-type]
+        if err is not None:
+            return err
         return start("proof", lambda job: service.run_proof(ctx, job, job.dir / "proof.jpg"), {"proof.jpg": data})  # type: ignore[dict-item]
 
     @app.get("/api/jobs/{job_id}")

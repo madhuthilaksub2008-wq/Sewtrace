@@ -217,7 +217,7 @@ def test_password_is_required_and_checked_when_set(tmp_path, sample_root):
 
 def test_upload_size_and_type_limits(tmp_path, sample_root):
     """Per-photo size limit from config [web], and only real images are accepted."""
-    client = make_client(tmp_path, sample_root, web={"max_upload_mb": 0.05})
+    client = make_client(tmp_path, sample_root, web={"max_upload_mb": 0.05}, mock=False, offline=True)  # MOCK refuses photos before decoding
     noise = np.random.default_rng(0).integers(0, 255, (250, 250, 3), dtype=np.uint8)
     jpg = cv2.imencode(".jpg", noise)[1].tobytes()
     assert 0.05 * 1024 * 1024 < len(jpg) < 150_000
@@ -447,7 +447,7 @@ def test_photo_pixel_cap_is_read_from_the_header_before_decoding(tmp_path, sampl
         raise AssertionError("decoded an image above the pixel cap")
 
     monkeypatch.setattr(cv2, "imdecode", no_decode)
-    client = make_client(tmp_path, sample_root)
+    client = make_client(tmp_path, sample_root, mock=False, offline=True)
     huge = ("f.png", _png_header(32000, 32000), "image/png")  # about 1 gigapixel
     res = client.post("/api/run", files={"front": huge, "back": huge, "sleeve": huge})
     assert res.status_code == 413 and res.json()["error"]["kind"] == "PhotoTooManyPixels"
@@ -464,7 +464,7 @@ def test_photo_pixel_cap_is_read_from_the_header_before_decoding(tmp_path, sampl
     monkeypatch.undo()
     jpg = photo_bytes(sample_root, "front")
     w, h = imagesize.image_size(jpg)
-    small = make_client(tmp_path / "small", sample_root, web={"max_pixels": w * h - 1})
+    small = make_client(tmp_path / "small", sample_root, web={"max_pixels": w * h - 1}, mock=False, offline=True)
     res = small.post("/api/proof", files={"photo": ("p.jpg", jpg, "image/jpeg")})
     assert res.status_code == 413
     ok = make_client(tmp_path / "ok", sample_root, web={"max_pixels": w * h}, mock=False, offline=True)
@@ -544,3 +544,133 @@ def test_job_store_deletes_stale_folders_of_earlier_processes(tmp_path):
     os.utime(old, (stamp, stamp))
     JobStore(root, retention_min=120)
     assert not old.exists() and young.exists()
+
+
+# ---- review of 0b697b9 ----------------------------------------------------------------------
+
+def _sof(width: int, height: int, marker: int = 0xC0) -> bytes:
+    return bytes([0xFF, marker, 0, 11, 8]) + height.to_bytes(2, "big") + width.to_bytes(2, "big") + b"\x01\x01\x11\x00"
+
+
+def _crafted_jpeg() -> bytes:
+    """SOI, FF 00 with a length field, an APP1 whose payload holds a fake 10x10 SOF, then the real
+    9000x9000 SOF. libjpeg skips FF 00 as garbage and the APP1 as a segment, so it decodes the real
+    frame. A parser that reads FF 00 as a segment with length 6 lands on the fake SOF."""
+    fake = _sof(10, 10)
+    app1 = b"\xff\xe1" + (2 + len(fake)).to_bytes(2, "big") + fake
+    return b"\xff\xd8\xff\x00\x00\x06" + app1 + _sof(9000, 9000)
+
+
+def test_req_api_08_crafted_jpeg_with_ff00_is_refused_without_decoding(tmp_path, sample_root, monkeypatch):
+    """Review minor 1: libjpeg scans past FF 00, so the parser must not read it as a segment."""
+    from sewtrace.web import imagesize
+
+    def no_decode(*a, **k):
+        raise AssertionError("decoded a photo whose header cannot be read safely")
+
+    monkeypatch.setattr(cv2, "imdecode", no_decode)
+    crafted = _crafted_jpeg()
+    assert imagesize.image_size(crafted) is None
+    client = make_client(tmp_path, sample_root, mock=False, offline=True)
+    ok = ("a.jpg", crafted, "image/jpeg")
+    res = client.post("/api/run", files={"front": ok, "back": ok, "sleeve": ok})
+    assert res.status_code == 415 and res.json()["error"]["kind"] == "PhotoNotImage"
+    assert client.post("/api/proof", files={"photo": ok}).status_code == 415
+
+
+def test_jpeg_header_edge_cases_fail_closed():
+    """FF 00 and reserved codes are refused; fill bytes and standalone markers are skipped."""
+    from sewtrace.web.imagesize import image_size
+    soi, sof = b"\xff\xd8", _sof(800, 600)
+    com = b"\xff\xfe\x00\x04hi"
+    assert image_size(soi + com + sof) == (800, 600)
+    assert image_size(soi + b"\xff\xff\xff" + com + b"\xff\xff" + sof) == (800, 600)  # fill bytes
+    assert image_size(soi + b"\xff\x01\xff\xd0\xff\xd7" + sof) == (800, 600)  # TEM, RST0, RST7 stand alone
+    for code in (0x00, 0x02, 0x7F, 0xBF, 0xD8, 0xD9, 0xDA):
+        assert image_size(soi + bytes([0xFF, code, 0, 2]) + sof) is None, hex(code)
+    assert image_size(soi + b"\xff\xff") is None  # fill bytes up to the end
+    assert image_size(soi + b"\xff\xfe\x00\x01" + sof) is None  # impossible length
+    assert image_size(soi + b"\xff\xc0\x00\x04\x08\x00") is None  # SOF too short
+    assert image_size(soi + _sof(800, 600, 0xC4)) is None  # DHT is not a frame; ends without SOF
+    assert image_size(soi + _sof(800, 600, 0xC2)) == (800, 600)
+
+
+def test_req_api_08_mock_refuses_real_photos_before_reading_them(tmp_path, sample_root, monkeypatch):
+    """Review minor 1c: in MOCK mode a photo is never decoded, not even to be refused."""
+    monkeypatch.setattr(cv2, "imdecode", lambda *a, **k: (_ for _ in ()).throw(AssertionError("decoded")))
+    client = make_client(tmp_path, sample_root)
+    jpg = ("a.jpg", b"\xff\xd8\xff" + b"0" * 50, "image/jpeg")
+    res = client.post("/api/run", files={"front": jpg, "back": jpg, "sleeve": jpg})
+    assert res.status_code == 400 and res.json()["error"]["kind"] == "MockMode"
+    assert client.post("/api/proof", files={"photo": jpg}).json()["error"]["kind"] == "MockMode"
+    missing = client.post("/api/run", files={"front": jpg})  # missing and oversize checks still come first
+    assert missing.status_code == 400 and missing.json()["error"]["kind"] == "PhotoMissing"
+
+
+def test_opencv_pixel_cap_env_applies_to_imdecode_and_is_set_by_the_app():
+    """Review minor 1b: OPENCV_IO_MAX_IMAGE_PIXELS stops cv2.imdecode in this OpenCV version.
+    A subprocess is needed, because OpenCV reads the variable once per process."""
+    import os
+    import subprocess
+    import sys
+    code = ("import cv2, numpy as np\n"
+            "j = cv2.imencode('.jpg', np.zeros((100, 100, 3), np.uint8))[1]\n"
+            "try:\n    cv2.imdecode(j, 1)\nexcept cv2.error:\n    print('refused')\n"
+            "else:\n    print('decoded')\n")
+    env = {**os.environ, "OPENCV_IO_MAX_IMAGE_PIXELS": "5000"}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "refused"
+    env["OPENCV_IO_MAX_IMAGE_PIXELS"] = "20000"
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "decoded"
+
+
+def test_req_api_08_app_sets_the_opencv_cap_from_config_and_the_image_matches(tmp_path, sample_root, monkeypatch):
+    monkeypatch.delenv("OPENCV_IO_MAX_IMAGE_PIXELS", raising=False)
+    make_client(tmp_path, sample_root, web={"max_pixels": 12_345_678})
+    import os
+    assert os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] == "12345678"
+    monkeypatch.delenv("OPENCV_IO_MAX_IMAGE_PIXELS")
+    docker = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
+    assert f"OPENCV_IO_MAX_IMAGE_PIXELS={get_config().web.max_pixels}" in docker
+
+
+def test_req_api_04_client_in_real_mode_refuses_an_unmounted_ledger_folder(tmp_path, monkeypatch):
+    """Review minor 2: `docker exec sewtrace run` makes a MetaClient in REAL mode without the web app."""
+    from sewtrace.api.client import LedgerMountError, MetaClient
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    monkeypatch.setattr("os.path.ismount", lambda p: False)
+    real = Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "ledger.csv")
+    with pytest.raises(LedgerMountError) as err:
+        MetaClient(real)
+    assert str(tmp_path) in str(err.value) and "persistent volume" in str(err.value)
+    for mock, offline in ((True, False), (False, True)):  # these spend nothing
+        assert MetaClient(dataclasses.replace(real, mock=mock, offline=offline))
+    monkeypatch.delenv("SEWTRACE_REQUIRE_LEDGER_MOUNT")
+    assert MetaClient(real)
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    monkeypatch.setattr("os.path.ismount", lambda p: True)
+    assert MetaClient(real)
+
+
+def test_req_api_04_cli_run_in_real_mode_stops_on_an_unmounted_ledger_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("META_API_KEY", "dummy-key-never-sent")
+    monkeypatch.setenv("SEWTRACE_MOCK", "0")
+    monkeypatch.setenv("SEWTRACE_REQUIRE_LEDGER_MOUNT", "1")
+    monkeypatch.delenv("SEWTRACE_OFFLINE", raising=False)
+    monkeypatch.setattr("os.path.ismount", lambda p: False)
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["run", str(tmp_path)])
+    assert stop.value.code == 1 and "persistent volume" in capsys.readouterr().err
+
+
+def test_req_api_08_muse_cache_key_uses_its_own_jpeg_quality(tmp_path):
+    """Nit: tuning SAM upload quality must not change Muse keys."""
+    from sewtrace.api.client import MetaClient
+    cfg = get_config()
+    assert cfg.reasoning.upload_jpeg_quality == cfg.sam.upload_jpeg_quality == 95
+    other = cfg.model_copy(update={"sam": cfg.sam.model_copy(update={"upload_jpeg_quality": 80})})
+    base = Settings(api_key="", mock=False, offline=True, cache_dir=tmp_path / "c", ledger_path=tmp_path / "l.csv")
+    a = MetaClient(base)
+    b = MetaClient(dataclasses.replace(base, config=other))
+    assert a.config.reasoning.upload_jpeg_quality == b.config.reasoning.upload_jpeg_quality == 95

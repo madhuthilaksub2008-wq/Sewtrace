@@ -7,7 +7,8 @@ ARG INSTALL_REAL=0
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 # The cache sits inside the one volume, so a redeploy keeps the answers that were paid for.
 # REAL mode refuses to start unless /app/data is a mount point (a wiped ledger resets the budget guard).
-ENV SEWTRACE_CACHE_DIR=/app/data/cache SEWTRACE_REQUIRE_LEDGER_MOUNT=1
+ENV SEWTRACE_CACHE_DIR=/app/data/cache SEWTRACE_REQUIRE_LEDGER_MOUNT=1 \
+    OPENCV_IO_MAX_IMAGE_PIXELS=50000000
 
 RUN useradd --create-home --uid 10001 sewtrace
 WORKDIR /app

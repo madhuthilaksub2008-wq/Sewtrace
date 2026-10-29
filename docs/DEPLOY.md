@@ -34,7 +34,7 @@ The web limits are in `sewtrace/config.toml` under `[web]`: `max_upload_mb`, `ma
 
 ## Access control
 
-The page uses HTTP Basic auth when `SEWTRACE_WEB_PASSWORD` is set. The browser asks for a password. Enter any user name and the password. The server compares the password in constant time. A wrong password waits `auth_fail_delay_s` (1 s) before the answer, which slows guessing. Use HTTPS on the host, because Basic auth sends the password with each request. The path `/healthz` has no password, so the host can check that the server is up.
+The page uses HTTP Basic auth when `SEWTRACE_WEB_PASSWORD` is set. The browser asks for a password. Enter any user name and the password. The server compares the password in constant time. A wrong password waits `auth_fail_delay_s` (1 s) before the answer. The wait slows one guess at a time. The long random password is the real defence. Use HTTPS on the host, because Basic auth sends the password with each request. The path `/healthz` has no password, so the host can check that the server is up.
 
 Every POST request needs the header `X-Sewtrace: 1`. The page sends it. A form on another site cannot send it, so it cannot start a paid run with the password that your browser remembers.
 
@@ -117,10 +117,11 @@ The code finds the ledger at `<repo root>/data/ledger.csv`. In the image the rep
 1. Create a persistent volume or disk on the host.
 2. Mount it at `/app/data`.
 3. Start the server in REAL mode.
-4. Read the first lines of the server log. Look for the line that starts with `ledger`. It shows the ledger path, the total spent and the cache folder. After a redeploy the total must be the same as before.
-5. Check the file `ledger.csv` after the first REAL run. It must still exist after a redeploy.
+4. Read the first lines of the server log. Find the log line that contains `sewtrace.web.app: ledger`. It shows the ledger path, the total spent and the cache folder.
+5. Compare the total after a redeploy. It must be the same as before.
+6. Check the file `ledger.csv` after the first REAL run. It must still exist after a redeploy.
 
-The mount check works like this. In the image, REAL mode calls `os.path.ismount("/app/data")`. If the answer is false, the server stops with the message "Attach a persistent volume". The check relies on the host showing the volume as a mount point. Render disks and Fly volumes should (this was not tested here). If your host mounts the volume in a different way, the server will refuse to start. Do not unset `SEWTRACE_REQUIRE_LEDGER_MOUNT` to get around this. Find out how the host mounts the volume instead. Outside Docker (`sewtrace serve` on your computer) the check is off.
+The mount check works like this. In the image, REAL mode calls `os.path.ismount("/app/data")`. If the answer is false, the server stops with the message "Attach a persistent volume". The check relies on the host showing the volume as a mount point. Render disks and Fly volumes show as mount points. This was not tested. If your host mounts the volume in a different way, the server refuses to start. Do not unset `SEWTRACE_REQUIRE_LEDGER_MOUNT` to get around this. Find out how the host mounts the volume instead. The same check runs when any REAL command starts in the container, for example `docker exec` with `sewtrace run`. Outside Docker (`sewtrace serve` on your computer) the check is off.
 
 Cached answers cost nothing to replay, and they let OFFLINE mode work after a redeploy. Never clear the cache to get a fresh result.
 

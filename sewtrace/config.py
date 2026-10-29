@@ -71,6 +71,7 @@ class ReasoningConfig(_Strict):
     max_tokens_param: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
     prompt_cache_key: str = Field(default="sewtrace-v1", min_length=1)
     est_image_tokens: int = Field(ge=0)
+    upload_jpeg_quality: int = Field(default=95, ge=1, le=100)  # own value, so tuning SAM does not change Muse cache keys
 
 
 class SamPrompts(_Strict):

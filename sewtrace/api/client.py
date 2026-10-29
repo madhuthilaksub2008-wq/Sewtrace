@@ -41,6 +41,7 @@ import hashlib
 import http.client
 import json
 import logging
+import os
 import socket
 import ssl
 import time
@@ -85,6 +86,13 @@ TRANSPORT_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
 
 class ApiError(RuntimeError):
     """A Meta API call failed after the allowed tries."""
+
+
+class LedgerMountError(ApiError):
+    """REAL mode in the image, and the ledger folder is not a mounted volume."""
+
+
+REQUIRE_MOUNT_ENV = "SEWTRACE_REQUIRE_LEDGER_MOUNT"  # set to 1 in the Docker image
 
 
 class ApiRequestRejected(ApiError):
@@ -245,10 +253,27 @@ class MetaClient:
         self.cache_dir = self.settings.cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = self.settings.ledger_path or resolve_ledger_path(self.config)
+        self._require_ledger_mount()
         self.calls = 0  # real or mocked calls that missed the cache
         self._transport = transport
         self._stream_transport = stream_transport
         self._sleep = sleep
+
+    def _require_ledger_mount(self) -> None:
+        """In the image, REAL mode needs the ledger folder on a mounted volume. A folder on the
+        container disk is wiped on restart, and the cache with it, so the budget guard would start
+        again at $0 without any other check noticing (REQ-API-04, C-01). This sits in the client,
+        not in the web app, so ``docker exec sewtrace run`` is covered too."""
+        settings = self.settings
+        if settings.mock or settings.offline or os.environ.get(REQUIRE_MOUNT_ENV) != "1":
+            return
+        folder = self.ledger_path.parent
+        if not os.path.ismount(folder):
+            raise LedgerMountError(
+                f"REAL mode spends money, and the ledger folder {folder} is not a mounted volume, so the spend "
+                f"total would restart at $0 after a restart or a redeploy. Attach a persistent volume at {folder} "
+                "and start again, or use mock mode (SEWTRACE_MOCK=1). See docs/DEPLOY.md, 'The ledger volume'."
+            )
 
     # ---- public API -------------------------------------------------------
 
@@ -334,7 +359,7 @@ class MetaClient:
             # Like SAM: the key follows the decoded pixels that are sent, not the file bytes.
             images = [_read_pixels(p) for p in paths]
             digests = [hashlib.sha256(i.tobytes()).hexdigest() for i in images]
-            params["upload_jpeg_quality"] = self.config.sam.upload_jpeg_quality
+            params["upload_jpeg_quality"] = self.config.reasoning.upload_jpeg_quality
             params["shapes"] = [list(i.shape) for i in images]
         key = self._key("reason", model.id, prompt, paths, params, image_digests=digests)
         cached = self._cache_file(key, ".json")
@@ -431,7 +456,7 @@ class MetaClient:
         """Muse chat completion, request shape as in the cookbook (01_api_fundamentals).
         ``images`` are decoded pixels, re-encoded here so no EXIF (GPS, camera) leaves the server."""
         reasoning = self.config.reasoning
-        quality = self.config.sam.upload_jpeg_quality
+        quality = reasoning.upload_jpeg_quality
         body = reasoning_request_body(
             model.id, prompt, [_jpeg_data_url(i, quality) for i in images], schema, instructions,
             effort=reasoning.effort, max_tokens=reasoning.max_tokens,
@@ -586,8 +611,9 @@ class MetaClient:
         in the key) and ``prompt_cache_key`` (only routes the provider's prompt cache) are left
         out on purpose, so renaming them does not pay for the same answer again.
 
-        Image content is the file bytes. For real SAM calls it is ``image_digests``: the hash of the
-        decoded pixels that are sent, so the key follows what the model sees (EXIF rotation applied)."""
+        Image content is the file bytes. For real SAM and Muse calls it is ``image_digests``: the
+        hash of the decoded pixels that are sent, so the key follows what the model sees (EXIF
+        rotation applied)."""
         digests = list(image_digests) if image_digests is not None else [
             hashlib.sha256(p.read_bytes()).hexdigest() for p in images]
         return _sha256_json({

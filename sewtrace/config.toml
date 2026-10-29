@@ -56,6 +56,8 @@ max_tokens_param = "max_tokens"
 # Sent as prompt_cache_key (cookbook 05_prompt_caching). One fixed value, so calls that share
 # the same developer message prefix hit the same cache.
 prompt_cache_key = "sewtrace-v1"
+upload_jpeg_quality = 95   # Muse is sent the decoded pixels re-encoded at this quality. Separate from [sam],
+                           # so tuning SAM does not invalidate the Muse cache keys.
 est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
 
 [sam]
@@ -146,4 +148,5 @@ job_retention_min = 120    # an uploaded job folder is deleted this long after i
 port = 8000
 max_pixels = 50_000_000    # per photo, width x height read from the file header before any decode. Phone
                            # photos are 12 to 48 MP; 50 MP leaves headroom and one decoded BGR copy is 150 MB.
-auth_fail_delay_s = 1.0    # a wrong password waits this long before the 401, which slows guessing
+auth_fail_delay_s = 1.0    # a wrong password waits this long before the 401. The wait slows one guess at a time.
+                           # The long random password is the real defence.
