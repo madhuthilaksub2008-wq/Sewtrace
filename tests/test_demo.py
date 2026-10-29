@@ -105,6 +105,7 @@ def test_c07_bundle_has_no_key_and_no_ledger(recorded):
 
 
 def test_manifest_lists_every_file_and_the_cache_keys_used(recorded):
+    """REQ-API-08."""
     manifest = demo.Manifest.model_validate_json((recorded["dir"] / "manifest.json").read_text())
     on_disk = {str(p.relative_to(recorded["dir"])) for p in recorded["dir"].rglob("*") if p.is_file()}
     assert set(manifest.files) == on_disk - {"manifest.json"}
@@ -115,7 +116,7 @@ def test_manifest_lists_every_file_and_the_cache_keys_used(recorded):
 @pytest.mark.parametrize("missing", ["spec.json", "masks.json", "placement.json", "proof_result.json",
                                      "front.jpg", "seam_log.json", "manifest.json"])
 def test_missing_file_gives_a_clear_error_naming_it(recorded, tmp_path, missing):
-    """T30: a bundle with a missing file fails with a message that names the file and says what to do."""
+    """REQ-API-08: T30: a bundle with a missing file fails with a message that names the file and says what to do."""
     root = _copy(recorded, tmp_path)
     (root / "tee1" / missing).unlink()
     with pytest.raises(demo.DemoError, match=missing.replace(".", r"\.")) as err:
@@ -124,6 +125,7 @@ def test_missing_file_gives_a_clear_error_naming_it(recorded, tmp_path, missing)
 
 
 def test_missing_cache_file_is_named_too(recorded, tmp_path):
+    """REQ-API-08."""
     root = _copy(recorded, tmp_path)
     victim = sorted((root / "tee1" / "cache").iterdir())[0]
     victim.unlink()
@@ -132,6 +134,7 @@ def test_missing_cache_file_is_named_too(recorded, tmp_path):
 
 
 def test_unknown_or_unsafe_name_is_refused(recorded):
+    """C-07."""
     with pytest.raises(demo.DemoError, match="not found"):
         demo.load_bundle("nope", recorded["root"])
     with pytest.raises(demo.DemoError, match="not allowed"):
@@ -153,6 +156,7 @@ def test_req_api_04_real_mode_record_refuses_without_yes_spend(tee, tmp_path, ca
 
 
 def test_worst_case_covers_sam_and_spark_calls(tee, tmp_path):
+    """REQ-API-04."""
     client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path))
     with_proof, without = demo.worst_case_usd(client, True), demo.worst_case_usd(client, False)
     cfg = client.config
@@ -161,6 +165,7 @@ def test_worst_case_covers_sam_and_spark_calls(tee, tmp_path):
 
 
 def test_cli_real_mode_without_yes_spend_exits_with_the_reason(tee, tmp_path, monkeypatch, capsys):
+    """REQ-API-04."""
     monkeypatch.setenv("META_API_KEY", SECRET)
     monkeypatch.setenv("SEWTRACE_MOCK", "0")
     monkeypatch.delenv("SEWTRACE_OFFLINE", raising=False)
@@ -174,6 +179,7 @@ def test_cli_real_mode_without_yes_spend_exits_with_the_reason(tee, tmp_path, mo
 
 
 def test_cli_record_and_play_check_round_trip(tee, tmp_path, monkeypatch, capsys):
+    """REQ-API-08."""
     monkeypatch.delenv("META_API_KEY", raising=False)
     monkeypatch.setenv("SEWTRACE_MOCK", "1")
     monkeypatch.setenv("SEWTRACE_CACHE_DIR", str(tmp_path / "cache"))
@@ -193,6 +199,7 @@ def test_cli_record_and_play_check_round_trip(tee, tmp_path, monkeypatch, capsys
 
 
 def test_force_replaces_a_bundle_and_a_failed_record_leaves_no_folder(tee, tmp_path):
+    """REQ-API-08."""
     client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "l.csv"))
     root = tmp_path / "demo"
     demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None)
@@ -287,6 +294,7 @@ def test_web_demo_page_has_the_controls_and_the_six_steps(recorded, tmp_path):
 
 
 def test_web_demo_files_are_whitelisted(recorded, tmp_path):
+    """C-07."""
     client = _app(recorded, tmp_path)
     for file in ("manifest.json", "spec.json", "../manifest.json", "ledger.csv", "cache"):
         assert client.get(f"/api/demo/tee1/files/{file}").status_code == 404, file
@@ -295,6 +303,7 @@ def test_web_demo_files_are_whitelisted(recorded, tmp_path):
 
 
 def test_web_demo_missing_file_gives_a_404_that_names_it(recorded, tmp_path):
+    """REQ-API-08."""
     root = _copy(recorded, tmp_path)
     (root / "tee1" / "placement.json").unlink()
     app = create_app(Settings(api_key="", mock=False, offline=True, cache_dir=tmp_path / "cache",
@@ -307,7 +316,7 @@ def test_web_demo_missing_file_gives_a_404_that_names_it(recorded, tmp_path):
 
 
 def test_eval_table_is_read_from_the_last_eval_results(tee, tmp_path):
-    """SPEC 15: the end card shows the six-measurement error table from the last eval."""
+    """REQ-API-08: SPEC 15: the end card shows the six-measurement error table from the last eval."""
     csv_file = tmp_path / "results.csv"
     cols = ["garment", "run", *[f"err_{k}" for k in demo.MEASUREMENT_KEYS], "mean_abs_err", "seams_ok", "model_calls", "error"]
     rows = [["tee1", "1", "0.1", "-0.2", "0.3", "0.0", "0.5", "-0.1", "0.2", "True", "0", ""],
@@ -327,7 +336,7 @@ def _dense(corners: np.ndarray, closed: bool) -> np.ndarray:
 
 
 def test_fit_rigid_recovers_a_known_placement():
-    """The placement fit finds a known rotation and shift of a half outline on a whole outline."""
+    """REQ-VER-02: The placement fit finds a known rotation and shift of a half outline on a whole outline."""
     half = _dense(np.array([[0, 0], [100, 0], [100, 300], [0, 300]], float)[:3], closed=False)  # fold edge left out
     whole = _dense(np.array([[-100, 0], [100, 0], [100, 300], [-100, 300]], float), closed=True)
     theta = np.radians(5.0)
@@ -349,6 +358,7 @@ def _jpeg_with_exif(tags: list[int], order: str = "little") -> bytes:
 
 @pytest.mark.parametrize("order", ["little", "big"])
 def test_gps_exif_is_detected_so_a_bundle_is_not_published_with_a_location(tee, tmp_path, order):
+    """C-07."""
     with_gps, without = tmp_path / "a.jpg", tmp_path / "b.jpg"
     with_gps.write_bytes(_jpeg_with_exif([0x0112, 0x8825], order))
     without.write_bytes(_jpeg_with_exif([0x0112], order))
@@ -390,6 +400,7 @@ def test_c07_gps_photo_is_refused_before_any_call_and_names_the_photo(tee, tmp_p
 
 
 def test_c07_proof_photo_with_gps_is_refused_and_allow_gps_proceeds(tee, tmp_path):
+    """C-07."""
     import shutil
     folder = tmp_path / "tee1"
     shutil.copytree(tee, folder)
@@ -414,10 +425,12 @@ def _write_eval_csv(path: Path, synthetic: str | None) -> Path:
 
 @pytest.mark.parametrize(("flag", "source"), [("True", "synthetic"), ("False", "real"), (None, "unknown")])
 def test_sec_10_1_eval_table_names_its_data_source(tmp_path, flag, source):
+    """REQ-API-08: SPEC 10.1, the demo end card names the data source."""
     assert demo.read_eval(_write_eval_csv(tmp_path / "r.csv", flag)).data_source == source
 
 
 def test_sec_10_1_eval_rows_carry_the_synthetic_flag(tee, tmp_path):
+    """REQ-API-08: SPEC 10.1, the demo end card names the data source."""
     from sewtrace import eval as eval_mod
     assert eval_mod.is_synthetic(tee)
     real = tmp_path / "tee9"
@@ -427,11 +440,13 @@ def test_sec_10_1_eval_rows_carry_the_synthetic_flag(tee, tmp_path):
 
 
 def test_sec_10_1_truth_json_fallback_is_marked_synthetic(recorded):
+    """REQ-API-08: SPEC 10.1, the demo end card names the data source."""
     table = demo.load_bundle("tee1", recorded["root"]).eval
     assert table.data_source == "synthetic"
 
 
 def test_sec_10_1_real_recording_refuses_a_synthetic_table_before_any_call(tee, tmp_path):
+    """REQ-API-04: SPEC 10.1, the demo end card names the data source."""
     def transport(*args, **kwargs):
         raise AssertionError("a paid call was made")
 
@@ -444,6 +459,7 @@ def test_sec_10_1_real_recording_refuses_a_synthetic_table_before_any_call(tee, 
 
 
 def test_sec_10_1_real_card_table_rules(tmp_path):
+    """REQ-API-08: SPEC 10.1, the demo end card names the data source."""
     synthetic = demo.read_eval(_write_eval_csv(tmp_path / "s.csv", "True"))
     unknown = demo.read_eval(_write_eval_csv(tmp_path / "u.csv", None))
     real = demo.read_eval(_write_eval_csv(tmp_path / "r.csv", "False"))
@@ -455,12 +471,14 @@ def test_sec_10_1_real_card_table_rules(tmp_path):
 
 
 def test_sec_10_1_end_card_shows_the_data_source(recorded):
+    """REQ-API-08: SPEC 10.1, the demo end card names the data source."""
     html = (Path(demo.__file__).parent / "web" / "demo.html").read_text()
     assert "Synthetic t-shirts (best case)" in html and "Real t-shirts" in html
     assert demo.payload(demo.load_bundle("tee1", recorded["root"]))["eval"]["data_source"] == "synthetic"
 
 
 def test_second_recording_of_the_same_photos_changes_no_file(tee, tmp_path):
+    """REQ-API-08."""
     client = _mock_client(tmp_path)
     root = tmp_path / "demo"
     first = demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None)
@@ -478,6 +496,7 @@ def test_second_recording_of_the_same_photos_changes_no_file(tee, tmp_path):
 
 
 def test_manifest_created_is_the_newest_photo_time_not_the_clock(tee, tmp_path):
+    """REQ-API-08."""
     import datetime as dt
     out = demo.record(tee, "a", client=_mock_client(tmp_path), demo_dir=tmp_path / "demo", eval_csv=None)
     created = dt.datetime.fromisoformat(demo.load_bundle("a", tmp_path / "demo").manifest.created)

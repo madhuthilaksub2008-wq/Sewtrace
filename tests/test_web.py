@@ -158,7 +158,7 @@ def test_req_cap_01_upload_with_missing_photo_names_it(client, sample_root):
 
 
 def test_mock_mode_refuses_real_photos_with_a_clear_message(client, sample_root):
-    """Mock SAM has no mask for an upload: say so instead of failing."""
+    """C-08: Mock SAM has no mask for an upload: say so instead of failing."""
     files = {v: (f"{v}.jpg", photo_bytes(sample_root, v), "image/jpeg") for v in ("front", "back", "sleeve")}
     res = client.post("/api/run", files=files)
     assert res.status_code == 400
@@ -196,7 +196,7 @@ def test_c_01_second_concurrent_run_is_rejected(client, monkeypatch):
 
 
 def test_real_mode_without_password_refuses_to_start(tmp_path, sample_root, monkeypatch, capsys):
-    """Real mode spends money: no password, no server."""
+    """REQ-API-04: Real mode spends money: no password, no server."""
     monkeypatch.delenv("SEWTRACE_WEB_PASSWORD", raising=False)
     with pytest.raises(WebConfigError, match="SEWTRACE_WEB_PASSWORD"):
         make_client(tmp_path, sample_root, mock=False, api_key="k")
@@ -212,7 +212,7 @@ def test_real_mode_without_password_refuses_to_start(tmp_path, sample_root, monk
 
 
 def test_password_is_required_and_checked_when_set(tmp_path, sample_root):
-    """HTTP Basic over the whole app; /healthz stays open for the host's health check."""
+    """REQ-API-04: HTTP Basic over the whole app; /healthz stays open for the host's health check."""
     client = make_client(tmp_path, sample_root, password="s3cret é")
 
     def auth(user, pw):
@@ -231,7 +231,7 @@ def test_password_is_required_and_checked_when_set(tmp_path, sample_root):
 
 
 def test_upload_size_and_type_limits(tmp_path, sample_root):
-    """Per-photo size limit from config [web], and only real images are accepted."""
+    """REQ-API-04: Per-photo size limit from config [web], and only real images are accepted."""
     client = make_client(tmp_path, sample_root, web={"max_upload_mb": 0.05}, mock=False, offline=True)  # MOCK refuses photos before decoding
     noise = np.random.default_rng(0).integers(0, 255, (250, 250, 3), dtype=np.uint8)
     jpg = cv2.imencode(".jpg", noise)[1].tobytes()
@@ -282,7 +282,7 @@ def test_req_ver_03_sample_proof_returns_gap_stats_and_overlay(client):
     RuntimeError("secret internal detail"),
 ])
 def test_error_mapping_never_shows_a_traceback(err):
-    """Every pipeline error becomes a short message with a title; unknown errors stay generic."""
+    """C-07: Every pipeline error becomes a short message with a title; unknown errors stay generic."""
     out = describe_error(err, scrub=["/srv/jobs/abc/"])
     assert out["kind"] == type(err).__name__ and out["title"] and out["message"]
     assert "Traceback" not in out["message"] and "File \"" not in out["message"]
@@ -293,6 +293,7 @@ def test_error_mapping_never_shows_a_traceback(err):
 
 
 def test_failed_jobs_show_the_step_error_and_scrub_server_paths(client, monkeypatch):
+    """REQ-CAP-02."""
     def fail(garment_dir, *args, **kwargs):
         raise MarkerNotFound(f"front photo {garment_dir}/front.jpg: the whole marker is not in the photo.")
 
@@ -307,7 +308,7 @@ def test_failed_jobs_show_the_step_error_and_scrub_server_paths(client, monkeypa
 
 
 def test_status_bar_and_no_key_leak(tmp_path, sample_root):
-    """Status shows mode, reasoning model and ledger vs limit, never the key."""
+    """C-07: Status shows mode, reasoning model and ledger vs limit, never the key."""
     key = "sk-test-secret-key-123"
     ledger = tmp_path / "ledger.csv"
     ledger.write_text("time,model,input_tokens,cached_tokens,output_tokens,images,cost_usd,estimated\n"
@@ -325,7 +326,7 @@ def test_status_bar_and_no_key_leak(tmp_path, sample_root):
 
 
 def test_job_folders_are_deleted_after_the_retention_time(tmp_path):
-    """Uploads do not stay on the server."""
+    """C-07: Uploads do not stay on the server."""
     store = JobStore(tmp_path / "jobs", retention_min=1)
     done = threading.Event()
     job = store.start("run", lambda j: done.set() or {}, {"front.jpg": b"x"})
@@ -341,7 +342,7 @@ def test_job_folders_are_deleted_after_the_retention_time(tmp_path):
 
 
 def test_uploads_are_stored_per_job_as_jpeg(tmp_path, sample_root, monkeypatch):
-    """Outside mock mode an upload reaches the pipeline as <job folder>/<view>.jpg; a PNG is converted."""
+    """REQ-CAP-01: Outside mock mode an upload reaches the pipeline as <job folder>/<view>.jpg; a PNG is converted."""
     from sewtrace.web import service
 
     seen = {}
@@ -417,7 +418,7 @@ def test_req_api_02_image_sets_the_cache_folder_inside_the_one_volume():
 
 
 def test_proof_names_its_pattern_and_a_failed_run_clears_it(client, monkeypatch):
-    """A proof is never checked against a pattern of an earlier run without saying so."""
+    """REQ-VER-02: A proof is never checked against a pattern of an earlier run without saying so."""
     assert run_sample(client)["state"] == "done"
     proof = wait_job(client, client.post("/api/proof", data={"sample": "1"}).json()["id"])
     assert proof["result"]["spec_source"] == "sample"
@@ -430,7 +431,7 @@ def test_proof_names_its_pattern_and_a_failed_run_clears_it(client, monkeypatch)
 
 
 def test_post_without_the_sewtrace_header_is_refused(tmp_path, sample_root):
-    """A cross-site form cannot set a custom header, so it cannot start a run with cached credentials."""
+    """REQ-API-04: A cross-site form cannot set a custom header, so it cannot start a run with cached credentials."""
     client = make_client(tmp_path, sample_root, csrf=False)
     for path in ("/api/run", "/api/proof"):
         res = client.post(path, data={"sample": "1"})
@@ -443,6 +444,7 @@ def test_post_without_the_sewtrace_header_is_refused(tmp_path, sample_root):
 
 
 def test_post_without_content_length_gets_411(client):
+    """REQ-API-04."""
     res = client.post("/api/run", content=iter([b"sample=1"]),
                       headers={"Content-Type": "application/x-www-form-urlencoded"})
     assert res.status_code == 411 and res.json()["error"]["kind"] == "LengthRequired"
@@ -455,7 +457,7 @@ def _png_header(width: int, height: int) -> bytes:
 
 
 def test_photo_pixel_cap_is_read_from_the_header_before_decoding(tmp_path, sample_root, monkeypatch):
-    """A small file can declare a gigapixel image. Refuse it by its header, never call imdecode."""
+    """REQ-API-04: A small file can declare a gigapixel image. Refuse it by its header, never call imdecode."""
     from sewtrace.web import imagesize
 
     def no_decode(*a, **k):
@@ -488,7 +490,7 @@ def test_photo_pixel_cap_is_read_from_the_header_before_decoding(tmp_path, sampl
 
 
 def test_error_messages_hide_server_folders(client, monkeypatch):
-    """The ledger, cache, repo root and sample folders never reach the page."""
+    """C-07: The ledger, cache, repo root and sample folders never reach the page."""
     from sewtrace.config import ROOT
     ctx = client.app.state.ctx
     secrets = [str(ctx.client.ledger_path), str(ctx.client.cache_dir), str(ROOT / "data" / "synth" / "tee1"),
@@ -506,7 +508,7 @@ def test_error_messages_hide_server_folders(client, monkeypatch):
 
 
 def test_wrong_password_waits_before_the_401(tmp_path, sample_root):
-    """A failed Basic auth waits auth_fail_delay_s. No header at all (the first browser prompt) does not."""
+    """REQ-API-04: A failed Basic auth waits auth_fail_delay_s. No header at all (the first browser prompt) does not."""
     client = make_client(tmp_path, sample_root, password="pw", web={"auth_fail_delay_s": 0.3})
     t0 = time.monotonic()
     assert client.get("/").status_code == 401
@@ -524,7 +526,7 @@ def test_wrong_password_waits_before_the_401(tmp_path, sample_root):
 @pytest.mark.parametrize("name", ["..%2F..%2Fetc%2Fpasswd", "%2e%2e%2f%2e%2e%2fetc%2fpasswd", "%2e%2e%5c%2e%2e%5cetc",
                                   "..%252f..%252fetc%252fpasswd", "mask_front%00.jpg", "%2Fetc%2Fpasswd"])
 def test_file_route_refuses_encoded_traversal(client, name):
-    """The route serves only names in the job's file table. httpx would flatten literal ``..``, so
+    """C-07: The route serves only names in the job's file table. httpx would flatten literal ``..``, so
     the dot segments are percent-encoded and sent as they are."""
     jid = run_sample(client)["id"]
     res = client.get(f"/api/jobs/{jid}/files/{name}")
@@ -533,7 +535,7 @@ def test_file_route_refuses_encoded_traversal(client, name):
 
 
 def test_overlays_make_no_model_call(client, monkeypatch):
-    """The mask overlays re-use the cached masks: client.calls does not move after pipeline.run."""
+    """C-08: The mask overlays re-use the cached masks: client.calls does not move after pipeline.run."""
     seen = {}
     real_run = pipeline.run
 
@@ -549,6 +551,7 @@ def test_overlays_make_no_model_call(client, monkeypatch):
 
 
 def test_job_store_deletes_stale_folders_of_earlier_processes(tmp_path):
+    """C-07."""
     root = tmp_path / "jobs"
     old, young = root / "old", root / "young"
     for folder in (old, young):
@@ -594,7 +597,7 @@ def test_req_api_08_crafted_jpeg_with_ff00_is_refused_without_decoding(tmp_path,
 
 
 def test_jpeg_header_edge_cases_fail_closed():
-    """FF 00 and reserved codes are refused; fill bytes and standalone markers are skipped."""
+    """REQ-API-04: FF 00 and reserved codes are refused; fill bytes and standalone markers are skipped."""
     from sewtrace.web.imagesize import image_size
     soi, sof = b"\xff\xd8", _sof(800, 600)
     com = b"\xff\xfe\x00\x04hi"
@@ -623,7 +626,7 @@ def test_req_api_08_mock_refuses_real_photos_before_reading_them(tmp_path, sampl
 
 
 def test_opencv_pixel_cap_env_applies_to_imdecode_and_is_set_by_the_app():
-    """Review minor 1b: OPENCV_IO_MAX_IMAGE_PIXELS stops cv2.imdecode in this OpenCV version.
+    """REQ-API-04: Review minor 1b: OPENCV_IO_MAX_IMAGE_PIXELS stops cv2.imdecode in this OpenCV version.
     A subprocess is needed, because OpenCV reads the variable once per process."""
     import os
     import subprocess

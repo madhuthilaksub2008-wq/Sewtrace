@@ -126,7 +126,7 @@ def test_req_geo_04_synthetic_truth_is_independent_of_measure_code():
 
 @pytest.mark.parametrize("name", TEE_NAMES)
 def test_neck_point_search_is_not_clamped_at_the_window_edge(halves, tees, name):
-    """The shoulder-line search starts at the neck end of the shoulder, so the neck point lies inside the
+    """REQ-GEO-04: The shoulder-line search starts at the neck end of the shoulder, so the neck point lies inside the
     window (it was clamped at the window edge on all 5 tees) and no corner fallback is needed."""
     from sewtrace.config import get_config
     from sewtrace.vision.measure import _edge, _neck_point, _neck_point_fit
@@ -142,7 +142,7 @@ def test_neck_point_search_is_not_clamped_at_the_window_edge(halves, tees, name)
 
 
 def test_neck_point_falls_back_to_the_corner_when_the_window_misses_it():
-    """If the curve meets the shoulder line outside the window, the tangent corner is used."""
+    """REQ-GEO-04: If the curve meets the shoulder line outside the window, the tangent corner is used."""
     from sewtrace.vision.measure import _neck_point, _neck_point_fit
     shoulder = np.c_[np.linspace(60.0, 200.0, 60), np.linspace(0.0, 12.0, 60)]
     far = np.c_[np.full(30, 120.0) + np.linspace(0, 0.5, 30), np.linspace(40.0, 0.0, 30)[::-1]]  # x near 120, far away

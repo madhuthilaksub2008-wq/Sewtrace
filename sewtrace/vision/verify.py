@@ -92,7 +92,7 @@ class ProofResult(BaseModel):
         direction = (p1 - p0) / length
         xy = np.asarray(self.points_mm, float)
         out = np.abs((xy - p0) @ np.array([-direction[1], direction[0]]))
-        side = out >= 0.8 * out.max()
+        side = out >= cfg.side_offset_band_frac * out.max()
         gaps = np.asarray(self.distances_mm)[side]
         median = float(np.median(gaps))
         flat = np.abs(gaps - median) <= cfg.side_offset_spread_mm
@@ -157,7 +157,7 @@ def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarra
 
     A fold that bows more than the band keeps only its straight part, and the rest would count
     as cut edge. So the outline that lies near the line but outside the band is measured; more
-    than ``fold_bow_limit_mm`` of it raises PaperFoldNotStraight."""
+    than ``fold_bow_limit_frac`` of the fold length raises PaperFoldNotStraight."""
     cfg = get_config().proof
     dense = np.asarray(shapely.segmentize(shapely.LinearRing(paper_mm), 1.0).coords)[:-1]
     inset = shapely.distance(shapely.points(dense), shapely.LinearRing(body_mm))
@@ -196,7 +196,8 @@ def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarra
     near = resid <= cfg.fold_bow_window_mm
     ends = along_all[near].min() + cfg.fold_bow_window_mm, along_all[near].max() - cfg.fold_bow_window_mm
     bowed_mm = float((near & (resid > cfg.fold_band_mm) & (along_all > ends[0]) & (along_all < ends[1])).sum())  # 1 mm per point
-    if bowed_mm > cfg.fold_bow_limit_mm:
+    fold_length_mm = float(along_all[near].max() - along_all[near].min())
+    if bowed_mm > cfg.fold_bow_limit_frac * fold_length_mm:
         raise PaperFoldNotStraight(
             "The paper fold is not straight. Make the paper flat on the t-shirt and take the proof photo again."
         )

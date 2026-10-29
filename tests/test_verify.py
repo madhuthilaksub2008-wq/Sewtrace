@@ -287,13 +287,13 @@ def test_req_ver_02_cli_verify_prints_expected_neck_gap_and_flags_a_difference(p
 
 # ---- fold edge: bulge, wobble, cut edge next to it (REQ-VER-02) ----------------------
 
-def _rect_case(fold_shape):
-    """Body 600 x 700 mm; half paper cut 3 mm inside the body edge on three sides; its fold on
+def _rect_case(fold_shape, height_mm: float = 700.0):
+    """Body 600 x ``height_mm``; half paper cut 3 mm inside the body edge on three sides; its fold on
     x = 300 follows ``fold_shape(y)`` (mm off the line, towards the left)."""
-    body = np.asarray(shapely.segmentize(shapely.box(0, 0, 600, 700), 1.0).exterior.coords)[:-1]
-    ys = np.arange(697.0, 2.9, -1.0)
+    body = np.asarray(shapely.segmentize(shapely.box(0, 0, 600, height_mm), 1.0).exterior.coords)[:-1]
+    ys = np.arange(height_mm - 3.0, 2.9, -1.0)
     fold = np.column_stack([300 - fold_shape(ys), ys])
-    paper = np.vstack([[[300, 3.0], [597, 3.0], [597, 697.0]], fold])
+    paper = np.vstack([[[300, 3.0], [597, 3.0], [597, height_mm - 3.0]], fold])
     return paper, body
 
 
@@ -316,27 +316,35 @@ def test_req_ver_02_fold_found_whole_and_cut_edge_next_to_it_keeps_its_gap(name,
     assert top[:, 0].min() < 300 + 2 * band   # the cut edge right next to the fold is compared
 
 
-def _bow(sagitta_mm: float):
+def _bow(sagitta_mm: float, height_mm: float = 700.0):
     """A fold that bows by ``sagitta_mm`` in the middle (a parabola) and meets x = 300 at both ends."""
-    return lambda y: sagitta_mm * 4 * ((y - 3) / 694) * (1 - (y - 3) / 694)
+    span = height_mm - 6.0
+    return lambda y: sagitta_mm * 4 * ((y - 3) / span) * (1 - (y - 3) / span)
 
 
+# Fold lengths: a kid tee (320, 480 mm) and the adult-size case (700 mm).
+FOLD_HEIGHTS_MM = [326.0, 486.0, 700.0]
+
+
+@pytest.mark.parametrize("height_mm", FOLD_HEIGHTS_MM)
 @pytest.mark.parametrize("sagitta_mm", [3.0, 5.0])
-def test_req_ver_02_a_small_bow_in_the_fold_is_absorbed_with_correct_gaps(sagitta_mm):
+def test_req_ver_02_a_small_bow_in_the_fold_is_absorbed_with_correct_gaps(sagitta_mm, height_mm):
     """REQ-VER-02: a fold that bows 3 or 5 mm stays inside the band: the whole fold is found and a
-    paper cut 3 mm too small shows 3 mm everywhere, also at the fold ends."""
-    paper, body = _rect_case(_bow(sagitta_mm))
+    paper cut 3 mm too small shows 3 mm everywhere, also at the fold ends. Fold of 320, 480, 700 mm."""
+    paper, body = _rect_case(_bow(sagitta_mm, height_mm), height_mm)
     p0, p1 = find_fold_edge(paper, body)
-    assert abs(np.linalg.norm(p1 - p0) - 694) < 8
+    assert abs(np.linalg.norm(p1 - p0) - (height_mm - 6.0)) < 8
     _, d = edge_gaps(paper, body, fold=(p0, p1))
-    assert len(d) > 300 and np.allclose(d, 3.0, atol=0.2), f"max gap {d.max():.1f} mm"
+    assert len(d) > 100 and np.allclose(d, 3.0, atol=0.2), f"max gap {d.max():.1f} mm"
 
 
+@pytest.mark.parametrize("height_mm", FOLD_HEIGHTS_MM)
 @pytest.mark.parametrize("sagitta_mm", [8.0, 12.0, -8.0])
-def test_req_ver_02_a_fold_that_bows_over_the_band_is_refused(sagitta_mm):
-    """REQ-VER-02: an 8 mm bow keeps only the straight part of the fold (556 mm of 700) and the rest
-    would count as cut edge (mean gap 7.6 mm). The user gets the action instead of a wrong gap."""
-    paper, body = _rect_case(_bow(sagitta_mm))
+def test_req_ver_02_a_fold_that_bows_over_the_band_is_refused(sagitta_mm, height_mm):
+    """REQ-VER-02: an 8 mm bow or more keeps only the straight part of the fold and the rest would
+    count as cut edge (700 mm fold: mean gap 7.6 mm). The user gets the action instead of a wrong
+    gap. The limit scales with the fold length, so it holds for 320, 480 and 700 mm folds."""
+    paper, body = _rect_case(_bow(sagitta_mm, height_mm), height_mm)
     with pytest.raises(PaperFoldNotStraight, match=r"The paper fold is not straight\. Make the paper flat "
                                                     r"on the t-shirt and take the proof photo again\."):
         find_fold_edge(paper, body)

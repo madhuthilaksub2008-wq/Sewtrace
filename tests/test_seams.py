@@ -396,7 +396,7 @@ def test_req_rsn_03_rejected_request_stops_the_seam_loop(tees, tmp_path):
 
 
 def test_seam_log_marks_underarm_pair_equal_by_construction(tees, client):
-    """The sleeve underarm is compared with its own mirror image: always 0, so the log says so."""
+    """REQ-SEW-05: The sleeve underarm is compared with its own mirror image: always 0, so the log says so."""
     _, log = adjust_loop(client, truth_spec(tees[0]))
     assert log[0]["equal_by_construction"] == ["sleeve.underarm~sleeve.underarm:mirror"]
 

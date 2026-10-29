@@ -45,7 +45,7 @@ All numbers below come from synthetic t-shirts (`sewtrace/mock/synth.py`).
 The synthetic t-shirts have known geometry. In mock mode the SAM masks and the model answers are stand-ins.
 So these numbers test the geometry code. They do not test SAM or Muse Spark.
 
-**Synthetic clean set** (5 t-shirts, `sewtrace eval`, mock mode, 0 model calls):
+**Synthetic clean set** (5 t-shirts, `sewtrace eval`, mock mode, 0 paid calls):
 
 | Garment | Mean absolute error (mm) | Seams |
 | --- | --- | --- |
@@ -74,7 +74,7 @@ The shoulder width error is the weak point on hard tees.
 
 - A perfect paper gives a mean edge gap of 0.08 mm (tee1) and 0.04 mm (tee3).
 - Tests check that a paper that is 2% too big, or shifted by 4 mm, reads within 0.5 mm of the exact gap.
-- Sewtrace refuses a paper fold that bows 8 mm or more (tested at 8 and 12 mm). It asks you to take the proof photo again. Bows of 3 and 5 mm are absorbed.
+- Sewtrace refuses a paper fold that bows 8 mm or more. It asks you to take the proof photo again. Bows of 3 and 5 mm are absorbed. Tested on folds of 320, 480 and 700 mm, at bows of 3, 5, 8, 12 mm (and 8 mm bowed the other way). The limit is a share of the fold length (`fold_bow_limit_frac`, to be confirmed).
 
 **Real t-shirt results: pending (Oct 31).** No real t-shirt has been measured yet.
 Real SAM edges, fabric that is not flat and lens distortion will add error.
@@ -91,7 +91,17 @@ sewtrace eval                   # error table in out/eval/results.md
 pytest
 ```
 
-Check a proof photo: `sewtrace verify data/synth/tee1/proof.jpg`.
+Check a proof photo. `sewtrace run` first, so that `verify` finds the pattern in `out/tee1`.
+Then make a synthetic proof photo and check it:
+
+```bash
+sewtrace run data/synth/tee1                 # skip if you did it above
+python -m sewtrace.mock.proof data/synth/tee1   # writes data/synth/tee1/proof.jpg
+sewtrace verify data/synth/tee1/proof.jpg
+```
+
+The proof photo is a paper half front, cut exactly on the stitch line (scale 1.0, no shift), laid on the t-shirt.
+The mean edge gap is under 0.1 mm. Add `--scale 1.02` to cut the paper 2% too big.
 
 Open the test page with `sewtrace serve`. Then open `http://127.0.0.1:8000`. To deploy it, read `docs/DEPLOY.md`.
 In mock mode, the page works with the sample tee only.

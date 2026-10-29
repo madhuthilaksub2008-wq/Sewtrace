@@ -136,7 +136,7 @@ paid charges start when credits run out. Develop on Spark, cache every call,
 images and JSON only. Checkpoints: over \$40 by Oct 29 or over \$75 by Oct 31
 means Spark only plus cached results.
 
-## Where we are (Oct 28)
+## Where we are (Oct 29)
 
 Built and tested on **synthetic** tees (`sewtrace/mock/synth.py` renders
 known geometry with the marker and camera tilt; SAM and the model are mocked):
@@ -155,6 +155,22 @@ known geometry with the marker and camera tilt; SAM and the model are mocked):
 | T8/T9 real SAM and Muse calls | **next**: needs API access (Day 1 tests) |
 | T23/T29/T30 web UI, wow sequence, offline mode | done, mock-tested (demo bundles replay offline) |
 | Real captures and tape-measure ground truth | waiting on tees and marker |
+
+**Status, Oct 29:** the whole pipeline is built and tested on synthetic tees
+(mock mode, no paid call yet): capture check, scale, contours, measurements,
+panel inference, seam loop, A4 PDF, SVG and DXF, proof overlay, web page, demo
+replay, eval (mean error 0.36 mm, all seams pass). CI runs the tests with no key.
+
+**Not met yet:**
+
+- `REQ-RSN-01`, `REQ-RSN-06`, `REQ-API-09`: need the paid Day 1 run (one real call to each model, token and cost record).
+- `REQ-VER-01`: the real proof photo is due on Oct 31.
+- `REQ-SEG-03`, `REQ-SEG-04`: partly. No SAM score field has been seen yet, so the score rule is untested on a real answer.
+
+**Values that need your confirmation** (marked in `sewtrace/config.toml`):
+
+- NEEDS USER CONFIRMATION: `[inference]` `front_minus_back_min_mm`, `fallback_front_minus_back_mm`; `[proof]` `neck_gap_tolerance_mm`, `fold_bow_limit_frac`.
+- NEEDS REAL PHOTOS: `[contour.joints]` `corner_window_mm`, `pair_tol_hem_mm`, `pair_tol_neck_mm`, `shoulder_plateau_mm`; `[contour.labels]` `corner_window_mm`.
 
 The synthetic numbers are a best case. Real SAM edges, fabric that isn't
 perfectly flat and lens distortion will add error; the real proof number comes

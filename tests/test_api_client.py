@@ -563,7 +563,7 @@ def _contributor_config():
 
 
 def test_spec_4_3_contributor_refuses_real_photo(tmp_path, photo):
-    """SPEC 4.3 item 5: a photo with no synthetic truth.json never goes to the contributor model."""
+    """REQ-MOD-01: SPEC 4.3 item 5: a photo with no synthetic truth.json never goes to the contributor model."""
     from sewtrace.api.client import PolicyViolation
     transport = FakeTransport(_answer())
     client, _ = _client(tmp_path, transport, config=_contributor_config())
@@ -576,6 +576,7 @@ def test_spec_4_3_contributor_refuses_real_photo(tmp_path, photo):
 
 
 def test_spec_4_3_contributor_accepts_synthetic_photos_and_text_only(tmp_path, photo):
+    """REQ-MOD-01."""
     from sewtrace.mock import synth
     tee = tmp_path / "tee"
     synth.make_tee(synth.TEES[0], tee, seed=0)
@@ -658,6 +659,7 @@ def test_req_api_02_answer_without_message_is_an_api_error_and_stored_as_rejecte
 
 @pytest.mark.parametrize("hw", [(40, 40), (3000, 4000), (4000, 3000), (5000, 7), (1999, 2001)])
 def test_fitted_hw_matches_the_shape_of_the_resized_image(hw):
+    """REQ-API-03."""
     from sewtrace.api.client import _fit_long_side, _fitted_hw
     image = np.zeros((*hw, 3), np.uint8)
     assert _fitted_hw(*hw, 1568) == _fit_long_side(image, 1568).shape[:2]

@@ -295,7 +295,7 @@ class ShoulderPointNotClear(ValueError):
     ``spread_mm`` is the measured joint plateau and ``limit_mm`` the config limit it passed. They
     are kept so that refusals on real photos can be used to recalibrate the limit."""
 
-    def __init__(self, message: str, spread_mm: float, limit_mm: float) -> None:
+    def __init__(self, message: str, spread_mm: float = float("nan"), limit_mm: float = float("nan")) -> None:
         super().__init__(message)
         self.spread_mm = spread_mm
         self.limit_mm = limit_mm

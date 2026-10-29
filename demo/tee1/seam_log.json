@@ -3,10 +3,11 @@
   "iteration": 0,
   "source": "initial",
   "applied": [],
+  "stored_rejected_replayed": false,
   "diffs": {
-   "front.shoulder~back.shoulder": -0.5,
-   "front.side~back.side": -0.53,
-   "front.armhole+back.armhole~sleeve.cap": 5.3,
+   "front.shoulder~back.shoulder": -0.91,
+   "front.side~back.side": -0.47,
+   "front.armhole+back.armhole~sleeve.cap": 4.98,
    "sleeve.underarm~sleeve.underarm:mirror": 0.0
   },
   "failing": [],

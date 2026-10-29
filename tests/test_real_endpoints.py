@@ -381,13 +381,14 @@ def test_req_api_02_raw_events_are_cached_so_a_decoding_error_is_not_paid_twice(
 
 
 def test_real_sam_module_is_not_imported_at_load():
-    """The parser is a lazy import: mock mode and the tests do not need it."""
+    """C-08: The parser is a lazy import: mock mode and the tests do not need it."""
     src = Path(client_mod.__file__).read_text().splitlines()
     top = [ln for ln in src if ln.startswith(("import meta_sam_parser", "from meta_sam_parser"))]
     assert top == []
 
 
 def test_pyproject_has_real_extra_with_the_parser():
+    """C-08."""
     root = Path(__file__).resolve().parent.parent
     extras = tomllib.loads((root / "pyproject.toml").read_text())["project"]["optional-dependencies"]
     assert extras["real"] == ["meta_sam_parser"]
