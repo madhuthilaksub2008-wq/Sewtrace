@@ -54,13 +54,15 @@ def _report(label: str, rows: list[dict[str, str]], seconds: float, text: str) -
         estimated = r["estimated"] == "1"
         print(f"{label}: model {r['model']}  input tokens {r['input_tokens']}  cached {r['cached_tokens']}  "
               f"output tokens {r['output_tokens']}  latency {seconds:.1f} s  cost ${float(r['cost_usd']):.6f}"
-              f"{'  (ESTIMATED, the call failed or timed out)' if estimated else ''}")
-        if not estimated:
-            # Input tokens minus the text we sent (4 characters per token). The schema and the
-            # system overhead are counted as image tokens, so the number is an upper bound.
-            image_tokens = int(r["input_tokens"]) - len(text) // CHARS_PER_TOKEN
-            print(f"{label}: image tokens APPROXIMATELY {image_tokens} "
-                  "(input tokens minus estimated text tokens). Use it to update reasoning.est_image_tokens.")
+              f"{'  (ESTIMATED: the call failed, timed out or reported no usage)' if estimated else ''}")
+        if estimated or int(r["input_tokens"]) == 0:
+            print(f"{label}: image tokens unknown (no usage reported)")
+            continue
+        # Input tokens minus the text we sent (4 characters per token). The schema and the
+        # system overhead are counted as image tokens, so the number is an upper bound.
+        image_tokens = int(r["input_tokens"]) - len(text) // CHARS_PER_TOKEN
+        print(f"{label}: image tokens APPROXIMATELY {image_tokens} "
+              "(input tokens minus estimated text tokens). Use it to update reasoning.est_image_tokens.")
 
 
 def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarray, out_dir: Path) -> Path:

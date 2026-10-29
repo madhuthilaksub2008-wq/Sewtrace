@@ -474,3 +474,24 @@ def test_req_rsn_03_degenerate_draft_neck_is_a_clean_cli_error(tmp_path, monkeyp
         cli.main(["run", str(tee), "--out", str(tmp_path / "out")])
     assert exc.value.code == 1
     assert "panel inference" in capsys.readouterr().err
+
+
+def test_req_api_04_infer_panels_does_not_retry_a_code_bug_in_the_transport(tees, tmp_path):
+    """A TypeError in the transport is billed once and propagates: no second worst-case model call."""
+    from sewtrace.config import load_config
+
+    class Buggy:
+        calls = 0
+
+        def __call__(self, *args):
+            Buggy.calls += 1
+            raise TypeError("code bug")
+
+    settings = Settings(api_key="k" * 8, mock=False, cache_dir=tmp_path, offline=False,
+                        ledger_path=tmp_path / "ledger.csv", config=load_config())
+    real = MetaClient(settings, transport=Buggy(), sleep=lambda s: None)
+    tee = tees[0]
+    with pytest.raises(TypeError):
+        infer_panels(real, photo_set(tee), draft_spec(*measured(tee)), meas(tee))
+    assert Buggy.calls == 1
+    assert len(real.ledger_path.read_text().splitlines()) == 2  # header + one row

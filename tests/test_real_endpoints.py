@@ -4,6 +4,7 @@ No test touches the network, needs a key or needs the ``meta_sam_parser`` packag
 module with the cookbook's attribute names stands in for it.
 """
 
+import asyncio
 import http.client
 import json
 import socket
@@ -696,7 +697,7 @@ MID_STREAM_ERRORS = [
     lambda: ApiError("stream event is not JSON: 'x'"),
     lambda: http.client.IncompleteRead(b"par", 10),
     lambda: ssl.SSLEOFError(8, "EOF occurred in violation of protocol"),
-    lambda: ValueError("anything else"),
+    lambda: json.JSONDecodeError("bad body", "x", 0),
 ]
 
 
@@ -736,7 +737,7 @@ def test_req_api_04_failure_before_sending_logs_nothing(tmp_path, photo, monkeyp
     with pytest.raises(ApiNotSent):
         client.reason("p", [photo])
     assert not client.ledger_path.exists()
-    # Budget stop and a missing key come before the request: no row, no transport call.
+    # The budget stop comes before the request: no row, no transport call.
     tight = load_config()
     tight = tight.model_copy(update={"api": tight.api.model_copy(update={"budget_limit_usd": 0.0001})})
     chat = Raises(ApiError("must not be called"))
@@ -744,6 +745,85 @@ def test_req_api_04_failure_before_sending_logs_nothing(tmp_path, photo, monkeyp
     with pytest.raises(BudgetExceeded):
         broke.reason("p", [photo])
     assert chat.calls == [] and not broke.ledger_path.exists()
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), asyncio.CancelledError()])
+def test_req_api_04_interrupt_after_sending_logs_one_estimated_row_and_propagates(tmp_path, photo, monkeypatch, error):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([])))
+    client = _client(tmp_path, stream=Raises(error))
+    with pytest.raises(type(error)) as caught:
+        client.segment(photo, "t-shirt")
+    assert caught.value is error  # re-raised unchanged
+    _one_estimated_row(client, load_config().models.sam.id, images=1)
+
+
+@pytest.mark.parametrize("error", [TypeError("code bug"), KeyError("k")])
+def test_req_api_04_code_bug_after_sending_is_billed_but_not_made_retryable(tmp_path, photo, error):
+    """Only OSError, HTTPException and JSONDecodeError count as transport errors (TRANSPORT_ERRORS)."""
+    client = _client(tmp_path, chat=Raises(error))
+    with pytest.raises(type(error)) as caught:
+        client.reason("p", [photo])
+    assert caught.value is error and not isinstance(error, ApiError)
+    _one_estimated_row(client, load_config().reasoning_model.id)
+
+
+def _ledger_row(client):
+    lines = client.ledger_path.read_text().splitlines()
+    assert len(lines) == 2, lines
+    return dict(zip(lines[0].split(","), lines[1].split(",")))
+
+
+@pytest.mark.parametrize("events", [
+    [{"type": "response.created"}, {"type": "response.completed", "response": {}}],
+    [{"type": "response.created"}, {"type": "response.completed", "response": {"usage": None}}],
+])
+def test_req_api_04_sam_answer_without_usage_is_flagged_estimated(tmp_path, photo, monkeypatch, events):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    client = _client(tmp_path, stream=StreamTransport(events))
+    client.segment(photo, "t-shirt")
+    row = _ledger_row(client)
+    assert row["estimated"] == "1" and row["images"] == "1" and float(row["cost_usd"]) > 0
+
+
+def test_req_api_04_usage_parse_failure_is_flagged_estimated(tmp_path, photo, monkeypatch):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    bad = [{"type": "response.completed", "response": {"usage": {"input_tokens": "many"}}}]
+    client = _client(tmp_path, stream=StreamTransport(bad))
+    client.segment(photo, "t-shirt")
+    assert _ledger_row(client)["estimated"] == "1"
+
+
+def test_req_api_04_reported_usage_is_not_flagged_estimated(tmp_path, photo, monkeypatch):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    client = _client(tmp_path)
+    client.segment(photo, "t-shirt")
+    assert _ledger_row(client)["estimated"] == "0"
+
+
+def test_req_api_09_day1_says_image_tokens_unknown_when_usage_is_estimated(tmp_path, photo, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    no_usage = [{"type": "response.completed", "response": {}}]
+    run_day1(photo, yes_spend=True, client=_client(tmp_path, stream=StreamTransport(no_usage)),
+             out_dir=tmp_path / "o")
+    out = capsys.readouterr().out
+    assert "SAM: image tokens unknown (no usage reported)" in out
+    assert "SAM: image tokens APPROXIMATELY" not in out and "Spark: image tokens APPROXIMATELY" in out
+
+
+def test_req_api_08_offline_replay_of_stored_sam_events_is_not_counted_as_a_call(tmp_path, photo, monkeypatch):
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
+    online = _client(tmp_path)
+    online.segment(photo, "t-shirt")
+    assert online.calls == 1
+    for f in tmp_path.glob("real-*.png"):  # drop the decoded mask, keep the raw events
+        f.unlink()
+    for f in tmp_path.glob("real-*.score.json"):
+        f.unlink()
+    settings = Settings(api_key="", mock=False, cache_dir=tmp_path, offline=True,
+                        ledger_path=online.ledger_path, config=load_config())
+    offline = MetaClient(settings)
+    offline.segment(photo, "t-shirt")
+    assert offline.calls == 0
 
 
 class _Body:

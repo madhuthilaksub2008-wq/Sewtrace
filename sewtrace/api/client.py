@@ -78,6 +78,12 @@ PARSER_MISSING = (
 )
 
 
+# Failures of the connection itself. Only these become ApiTransportError, which callers may retry.
+# OSError covers ConnectionError, socket.timeout, ssl.SSLError and urllib.error.URLError.
+# Anything else (TypeError, KeyError, KeyboardInterrupt, CancelledError) keeps its type.
+TRANSPORT_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
+
+
 class ApiError(RuntimeError):
     """A Meta API call failed after the allowed tries."""
 
@@ -274,7 +280,8 @@ class MetaClient:
                       and self._cache_file(self._sam_key(image_path, prompt, decoded=False), ".events.json").exists())
             if not replay:
                 self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
-            self.calls += 1
+            if not replay:  # a replay makes no call, so eval must not count one
+                self.calls += 1
             if self.settings.mock:
                 results = _mock_segment(image_path, prompt, self.config.sam.prompts.garment)
             else:
@@ -499,12 +506,13 @@ class MetaClient:
                 raise ApiRequestRejected(
                     f"{model.id} call was rejected: {e}. Check the model ID, the request parameters and "
                     "META_API_KEY in config.toml and the environment. Nothing was retried.") from e
-            except Exception as e:  # noqa: BLE001 (any other failure after sending may be billed)
-                # E.g. a stream event that is not JSON, or an error nobody mapped. Bill the worst
-                # case, then re-raise: never leave a possibly paid call without a row (REQ-API-04).
+            except BaseException as e:  # noqa: BLE001 (any failure after sending may be billed)
+                # E.g. a stream event that is not JSON, Ctrl-C or a cancelled task during a long
+                # stream, or an error nobody mapped. Bill the worst case, then re-raise: never leave
+                # a possibly paid call without a row (REQ-API-04). One row per failure.
                 self._append_ledger(model, estimate, estimated=True)
-                if isinstance(e, ApiError):
-                    raise
+                if isinstance(e, ApiError) or not isinstance(e, TRANSPORT_ERRORS):
+                    raise  # interrupts and code bugs keep their type, so callers do not retry them
                 raise ApiTransportError(
                     f"{model.id} call failed after the request was sent: {e!r}. "
                     "The ledger holds the worst-case cost of this call.") from e
@@ -515,7 +523,8 @@ class MetaClient:
             # The money is spent whatever the answer looks like: bill the estimate, never skip the row.
             log.exception("%s: usage missing or malformed in the answer; the ledger holds the estimate", model.id)
             usage = estimate
-        self._append_ledger(model, usage)
+        # ``usage_from`` returns the estimate object itself when the answer reports no usage.
+        self._append_ledger(model, usage, estimated=usage is estimate)
         return response
 
     def _require_ledger(self) -> None:
@@ -835,7 +844,9 @@ def _sam_usage(response: dict[str, Any], estimate: Usage) -> Usage:
     has them (UNCONFIRMED: Day 1 shows where the API puts the image token count)."""
     for event in reversed(response.get("events", [])):
         if event.get("type") == "response.completed":
-            u = (event.get("response") or {}).get("usage") or {}
+            u = (event.get("response") or {}).get("usage")
+            if not u:
+                return estimate  # no usage reported: the row is flagged as estimated
             details = u.get("input_tokens_details") or {}
             return Usage(input_tokens=int(u.get("input_tokens", 0)), cached_tokens=int(details.get("cached_tokens", 0)),
                          output_tokens=int(u.get("output_tokens", 0)), images=estimate.images)
