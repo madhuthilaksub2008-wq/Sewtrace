@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from shapely.geometry import LineString, Point as SPoint, Polygon, box
+from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import Point as SPoint
 from shapely.ops import polylabel, unary_union
 
 from sewtrace.types import Panel, PanelSpec

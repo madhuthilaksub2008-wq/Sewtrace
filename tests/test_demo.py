@@ -1,6 +1,5 @@
 """T29, T30: demo bundles and the demo page. All mock, no network, no API key."""
 
-import dataclasses
 import json
 import shutil
 import socket

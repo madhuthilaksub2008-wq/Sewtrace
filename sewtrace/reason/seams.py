@@ -28,9 +28,7 @@ from functools import partial
 import numpy as np
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from sewtrace.api.client import (
-    ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation,
-)
+from sewtrace.api.client import ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation
 from sewtrace.config import get_config
 from sewtrace.reason.reshape import SleeveCap, cap_width_mm, fit_cap, scale_cap_to_length, with_sleeve_cap
 from sewtrace.types import Panel, PanelSpec, Seam

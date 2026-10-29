@@ -17,9 +17,9 @@ from sewtrace import pipeline
 from sewtrace.api.client import MetaClient
 from sewtrace.mock import proof as mock_proof
 from sewtrace.mock import synth
+from sewtrace.output.layout import render_preview
 from sewtrace.reason.seams import seam_name
 from sewtrace.types import MEASUREMENT_KEYS, PanelSpec
-from sewtrace.output.layout import render_preview
 from sewtrace.vision.marker import photo_homography
 from sewtrace.vision.verify import overlay_image, verify_proof
 from sewtrace.web.jobs import Job

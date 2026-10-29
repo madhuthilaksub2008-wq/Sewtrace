@@ -1,9 +1,5 @@
 import numpy as np
 import pytest
-
-from sewtrace.mock import synth
-from sewtrace.types import MEASUREMENT_KEYS, Edge, Outline
-from sewtrace.vision.measure import measure_tee
 from test_contour import (  # noqa: F401  (shared session fixtures)
     TEE_NAMES,
     extract,
@@ -13,6 +9,10 @@ from test_contour import (  # noqa: F401  (shared session fixtures)
     tees,
     truth_homography,
 )
+
+from sewtrace.mock import synth
+from sewtrace.types import MEASUREMENT_KEYS, Edge, Outline
+from sewtrace.vision.measure import measure_tee
 
 TOL_MM = 2.0
 

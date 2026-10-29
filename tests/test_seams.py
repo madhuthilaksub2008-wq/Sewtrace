@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from perturb import bulge_edge, set_edge_length
 
 from sewtrace.api.client import MetaClient
 from sewtrace.config import Settings, get_config
@@ -10,8 +11,7 @@ from sewtrace.mock import synth
 from sewtrace.mock.fixtures import truth_spec
 from sewtrace.reason import seams
 from sewtrace.reason.reshape import cap_width_mm, fit_cap, scale_cap_to_length
-from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, check_seams, edge_length, seam_name
-from perturb import bulge_edge, set_edge_length
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, check_seams, edge_length, require_seams_ok, seam_name
 from sewtrace.types import Panel, PanelSpec, Seam
 
 MAX_ADJUST_CALLS = get_config().seam.max_adjust_calls
@@ -384,8 +384,9 @@ def test_req_sew_03_budget_cache_policy_errors_propagate(tees, client):
 
 def test_req_rsn_03_rejected_request_stops_the_seam_loop(tees, tmp_path):
     """REQ-API-06: a mocked HTTP 400 is not a skipped answer: it propagates after one call."""
-    from sewtrace.api.client import ApiRequestRejected, HttpError
     from test_api_client import FakeTransport
+
+    from sewtrace.api.client import ApiRequestRejected, HttpError
     transport = FakeTransport(HttpError(400, "unknown parameter"))
     real = MetaClient(Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", config=get_config(),
                                ledger_path=tmp_path / "ledger.csv"), transport=transport, sleep=lambda s: None)

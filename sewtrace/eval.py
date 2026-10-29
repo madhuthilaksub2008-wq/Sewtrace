@@ -21,9 +21,8 @@ from sewtrace.api.client import MetaClient, SegmentationFailed
 from sewtrace.config import get_config
 from sewtrace.pipeline import ContourFailed, PhotoMissing, run
 from sewtrace.reason.seams import SeamCheckFailed, seam_name
-from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
 from sewtrace.types import MEASUREMENT_KEYS
-
+from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
 
 log = logging.getLogger(__name__)
 

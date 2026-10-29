@@ -7,15 +7,22 @@ import pytest
 import shapely
 
 from sewtrace.api.client import MetaClient
-from sewtrace.config import Settings
+from sewtrace.config import Settings, get_config
 from sewtrace.mock import synth
 from sewtrace.mock.proof import make_proof
-from sewtrace.vision.marker import photo_homography
-from sewtrace.config import get_config
-from sewtrace.vision import contour
-from sewtrace.vision.verify import (PaperFoldNotStraight, ProofResult, edge_gaps, find_fold_edge, gap_result, mask_outline_mm,
-                                    overlay_image, verify_proof)
 from sewtrace.types import Outline
+from sewtrace.vision import contour
+from sewtrace.vision.marker import photo_homography
+from sewtrace.vision.verify import (
+    PaperFoldNotStraight,
+    ProofResult,
+    edge_gaps,
+    find_fold_edge,
+    gap_result,
+    mask_outline_mm,
+    overlay_image,
+    verify_proof,
+)
 
 CASES = {
     "perfect": {},

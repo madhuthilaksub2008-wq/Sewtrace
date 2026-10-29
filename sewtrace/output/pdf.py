@@ -10,7 +10,16 @@ from reportlab.lib.utils import simpleSplit
 from reportlab.pdfgen.canvas import Canvas
 
 from sewtrace.output.layout import (
-    A4_MM, BRAND, MARGIN_MM, OVERLAP_MM, PanelArt, Sheet, Text, cut_label, layout, tile_label,
+    A4_MM,
+    BRAND,
+    MARGIN_MM,
+    OVERLAP_MM,
+    PanelArt,
+    Sheet,
+    Text,
+    cut_label,
+    layout,
+    tile_label,
 )
 from sewtrace.types import PanelSpec
 

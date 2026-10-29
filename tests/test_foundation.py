@@ -1,8 +1,7 @@
 import json
-
-import cv2
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 

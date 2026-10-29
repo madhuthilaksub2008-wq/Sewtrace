@@ -252,8 +252,8 @@ def hard_body_sides(p: synth.TeeParams, hp: HardParams, view: int, back_neck: bo
 
 def _full_ring(right: np.ndarray, left: np.ndarray, fold_start: int) -> np.ndarray:
     """Closed outline of a whole body from its two halves, without the fold sliver."""
-    r, l = right[: fold_start + 1], left[: fold_start + 1][::-1] * [-1, 1]
-    return np.vstack([r, l[1:-1]])
+    r, lft = right[: fold_start + 1], left[: fold_start + 1][::-1] * [-1, 1]
+    return np.vstack([r, lft[1:-1]])
 
 
 def silhouette(body: np.ndarray, sleeves: list[np.ndarray], corners: list[tuple[np.ndarray, float]],

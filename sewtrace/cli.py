@@ -178,8 +178,8 @@ def _verify(photo: str, out: str | None, spec_arg: str | None = None) -> None:
     """SPEC 9.4 step 5. Masks come from MetaClient (mock or cache by the usual rules)."""
     import cv2
 
-    from sewtrace.types import PanelSpec
     from sewtrace.api.client import MetaClient, SegmentationFailed
+    from sewtrace.types import PanelSpec
     from sewtrace.vision.marker import MarkerNotFound, MarkerRejected, photo_homography
     from sewtrace.vision.verify import overlay_image, verify_proof
 

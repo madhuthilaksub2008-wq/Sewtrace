@@ -75,10 +75,10 @@ def test_req_geo_04_eval_stops_before_any_run_when_truth_is_missing(tmp_path, mo
 def test_req_sew_04_eval_records_failed_tee_and_continues(tmp_path, monkeypatch):
     """REQ-SEW-04: one tee that fails its seam check gets a failed row; the others still run."""
     from sewtrace import eval as eval_mod
-    from sewtrace.pipeline import ContourFailed
-    from sewtrace.reason.seams import SeamCheckFailed
     from sewtrace.api.client import MetaClient
     from sewtrace.config import Settings
+    from sewtrace.pipeline import ContourFailed
+    from sewtrace.reason.seams import SeamCheckFailed
     raw = tmp_path / "synth"
     for i in range(3):
         synth.make_tee(synth.TEES[i], raw / synth.TEES[i].name, seed=i)

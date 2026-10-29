@@ -2,15 +2,15 @@ import json
 from pathlib import Path
 
 import pytest
+from perturb import set_edge_length
 
+from sewtrace import cli, pipeline
 from sewtrace.api.client import MetaClient
 from sewtrace.config import Settings
 from sewtrace.mock import synth
-from sewtrace import cli, pipeline
 from sewtrace.pipeline import run
 from sewtrace.reason import seams
 from sewtrace.reason.seams import SeamCheckFailed
-from perturb import set_edge_length
 from sewtrace.types import MEASUREMENT_KEYS
 
 

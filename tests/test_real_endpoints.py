@@ -632,7 +632,7 @@ def test_req_api_02_stream_without_completed_is_billed_but_not_cached(tmp_path, 
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
     stream = StreamTransport(tail)
     client = _client(tmp_path, stream=stream)
-    with pytest.raises(ApiError, match=rf"p\.jpg.*'t-shirt'.*without response\.completed.*Run the command again"):
+    with pytest.raises(ApiError, match=r"p\.jpg.*'t-shirt'.*without response\.completed.*Run the command again"):
         client.segment(photo, "t-shirt")
     assert not list(tmp_path.glob("*.events.json"))
     assert len(client.ledger_path.read_text().splitlines()) == 2  # header + the billed attempt

@@ -39,3 +39,21 @@ sewtrace = ["config.toml", "web/index.html", "web/demo.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["data", "out", "demo", ".claude", "cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501: 44 existing lines are 121 to 181 characters long (long messages, asserts, test names).
+# Wrapping them is a style change with no effect on behaviour, so it is left out of this step.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Keep short import lists on one line, as the code already does.
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+# test_measure imports pytest fixtures from test_contour and uses them as test arguments.
+"tests/test_measure.py" = ["F811"]

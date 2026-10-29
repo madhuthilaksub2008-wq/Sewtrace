@@ -24,7 +24,7 @@ from scipy.spatial import cKDTree
 from sewtrace.config import get_config
 from sewtrace.types import TEE_EDGES, Edge, Outline
 from sewtrace.vision.marker import Homography
-from sewtrace.vision.measure import _corner, _fit_line
+from sewtrace.vision.measure import _corner
 
 UPSAMPLE = 2           # mask upsampling before tracing, for a sub-pixel edge
 CORNER_DEG = 30.0      # turning angle that counts as a corner

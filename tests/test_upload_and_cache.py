@@ -11,12 +11,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
-from test_panels import measured, meas, photo_set
+from test_panels import meas, measured, photo_set
 from test_real_endpoints import (
     TOL,
     H,
-    W,
     StreamTransport,
+    W,
     _box,
     _chat_body,
     _client,

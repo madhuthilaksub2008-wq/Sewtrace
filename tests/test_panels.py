@@ -10,7 +10,13 @@ from sewtrace.mock import synth
 from sewtrace.mock.fixtures import truth_spec
 from sewtrace.reason import panels
 from sewtrace.reason.panels import (
-    PanelInference, apply_answer, build_prompt, draft_spec, estimate_tokens, infer_panels, measured_changes,
+    PanelInference,
+    apply_answer,
+    build_prompt,
+    draft_spec,
+    estimate_tokens,
+    infer_panels,
+    measured_changes,
     validate_spec,
 )
 from sewtrace.reason.reshape import neck_depth_mm
@@ -420,8 +426,9 @@ def test_req_rsn_04_prompt_gives_no_draft_value_for_the_front_neck(tees):
 
 
 def _real_client_with_400(tmp_path):
-    from sewtrace.api.client import HttpError
     from test_api_client import FakeTransport
+
+    from sewtrace.api.client import HttpError
     transport = FakeTransport(HttpError(400, "unknown parameter reasoning_effort"))
     settings = Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "ledger.csv")
     return MetaClient(settings, transport=transport, sleep=lambda s: None), transport

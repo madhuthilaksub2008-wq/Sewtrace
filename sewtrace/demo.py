@@ -30,8 +30,8 @@ from scipy.spatial import cKDTree
 from sewtrace import pipeline
 from sewtrace.api.client import ApiError, MetaClient, SegmentationFailed, Usage, cost_usd
 from sewtrace.config import ROOT, get_config
-from sewtrace.output.layout import layout, panel_art, render_preview
 from sewtrace.eval import is_synthetic
+from sewtrace.output.layout import layout, panel_art, render_preview
 from sewtrace.reason.panels import INFER_ATTEMPTS
 from sewtrace.reason.seams import seam_name
 from sewtrace.types import MEASUREMENT_KEYS, Panel, PanelSpec, Point

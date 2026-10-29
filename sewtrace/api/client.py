@@ -301,7 +301,6 @@ class MetaClient:
         records. When the masks carry no score, the largest mask wins and the min_score check
         is skipped with a warning. It is never faked as 1.0."""
         image_path = Path(image_path)
-        model = self.config.models.sam
         key = self._sam_key(image_path, prompt, decoded=True)
         cached, cached_score = self._cache_file(key, ".png"), self._cache_file(key, ".score.json")
         if cached.exists() and cached_score.exists():
