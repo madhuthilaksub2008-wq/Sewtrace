@@ -30,7 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shapely.geometry import LineString, Polygon
 
 from sewtrace.api.client import (
-    ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation,
+    ApiError, ApiRequestRejected, BudgetExceeded, CacheMiss, MetaClient, PolicyViolation, StoredAnswerRejected,
 )
 from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
@@ -143,7 +143,9 @@ def infer_panels(
             raise  # stop the run: more calls are not allowed, not possible, or the request itself is wrong
         except ApiError as exc:  # truncated at max_tokens, not JSON, timeout, HTTP 429/5xx after retries (REQ-RSN-06)
             log.warning("infer_panels attempt %d: the model call failed: %s", attempt, exc)
-            answer, spec, problems = None, None, [f"the model call failed: {exc}"]
+            # The prompt of the retry embeds this text; a replay must give the same text as the live run.
+            reason = exc.base_message if isinstance(exc, StoredAnswerRejected) else exc
+            answer, spec, problems = None, None, [f"the model call failed: {reason}"]
         else:
             spec, problems = apply_answer(answer, draft)
         record = {"attempt": attempt, "new_call": client.calls > calls, "problems": problems,

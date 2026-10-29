@@ -102,6 +102,7 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
     calls, source, applied = 0, "initial", []
     max_fix_mm = client.config.seam.measured_pair_max_fix_mm
     pairs_tried = False
+    replayed = False
     while True:
         seams = check_seams(spec)
         spec = spec.model_copy(update={"seams": seams})
@@ -110,6 +111,8 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             "iteration": len(history),
             "source": source,
             "applied": applied,
+            # True on the fallback row that follows a stored rejected answer: no model call was made.
+            "stored_rejected_replayed": replayed,
             "diffs": {seam_name(s): round(s.diff_mm, 2) for s in seams},
             "failing": [seam_name(s) for s in failing],
             # Same edge on both sides: the diff is 0 by construction and proves nothing.
@@ -132,16 +135,26 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             break
         if calls < max_calls:
             instructions, prompt = build_adjust_messages(spec, fixable)
-            calls += 1  # a failed call still counts toward the limit of REQ-SEW-02
+            calls_before = client.calls
             try:
                 answer = client.reason(prompt, [], mock=partial(_mock_adjust, spec, fixable), schema=ADJUST_SCHEMA,
                                        instructions=instructions)
             except (BudgetExceeded, CacheMiss, PolicyViolation, ApiRequestRejected):
                 raise
             except ApiError as exc:  # no usable answer: same as an answer that is skipped
+                if client.calls == calls_before:
+                    # A stored rejected answer: the spec is unchanged, so every later call would replay
+                    # it for free and count as a model call that never happened. Go to the code fix.
+                    log.warning("adjust_loop: stored rejected answer replayed, no new call: %s", exc)
+                    replayed = True
+                    spec, applied = fallback_fix(spec)
+                    source = "fallback"
+                    continue
+                calls += 1  # a failed call still counts toward the limit of REQ-SEW-02
                 log.warning("adjust_loop: model call %d failed, answer skipped: %s", calls, exc)
                 applied = []
             else:
+                calls += 1
                 spec, applied = apply_adjustment(spec, answer)
             source = "model"
         else:

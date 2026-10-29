@@ -392,6 +392,9 @@ def _install(tmp: Path, target: Path) -> None:
     """Move a finished bundle into place. A file with the same bytes is left alone, so a second
     recording of the same input leaves no change in git."""
     target.mkdir(exist_ok=True)
+    # The manifest goes first and returns last: a copy that stops half way leaves a bundle
+    # without manifest, which `demo play --check` refuses.
+    (target / "manifest.json").unlink(missing_ok=True)
     fresh = {p.relative_to(tmp) for p in tmp.rglob("*") if p.is_file()}
     for old in sorted(target.rglob("*"), reverse=True):
         rel = old.relative_to(target)
@@ -399,7 +402,7 @@ def _install(tmp: Path, target: Path) -> None:
             old.unlink()
         elif old.is_dir() and not any(old.iterdir()):
             old.rmdir()
-    for rel in sorted(fresh):
+    for rel in sorted(fresh, key=lambda r: r == Path("manifest.json")):  # False sorts first
         src, dst = tmp / rel, target / rel
         if dst.is_file() and dst.read_bytes() == src.read_bytes():
             continue

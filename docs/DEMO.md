@@ -28,7 +28,7 @@ A bundle never holds the API key or the ledger. A test checks this.
 
 Before you commit a real bundle:
 
-1. Know that `sewtrace demo record` stops if a photo has GPS data in its EXIF header. It stops before any call and names the photo. Turn off location tags in the camera app and take the photo again. Use `--allow-gps` only for a bundle that you will never commit.
+1. Note: `sewtrace demo record` stops if a photo has GPS data in its EXIF header. It stops before any call and names the photo. Turn off location tags in the camera app and take the photo again. Use `--allow-gps` only for a bundle that you will never commit.
 2. Make sure that no person or face is in a photo.
 3. Run `du -sh demo/<name>`. Keep the bundle under 25 MB. If it is larger, take the photos at a lower resolution and record again.
 
@@ -40,19 +40,21 @@ The ledger `data/ledger.csv` and the folder `cache/` in the repository root stay
 2. Read the ledger total. Stop if it is near a checkpoint in SPEC 8.3.
 3. Make the error table for the end card. The card names its data source.
 4. For a synthetic bundle, run the synthetic eval. It costs nothing in mock mode: `python -m sewtrace.cli eval`. The card says "Synthetic t-shirts (best case)".
-5. For a real bundle, run the eval on the real tees with their tape measure files in `data/ground_truth/`: `python -m sewtrace.cli eval data/raw`. This makes paid calls in REAL mode, so get approval first. The card says "Real t-shirts".
-6. Know that a REAL recording stops, before any call, if the table holds only synthetic tees. Add `--allow-synthetic-eval` to show the synthetic table anyway. The card then says that the tees are synthetic.
-7. Put the proof photo in the garment folder as `proof.jpg`.
-8. Record in mock mode first. This is free: `python -m sewtrace.cli demo record data/synth/tee1`.
-9. Open the page: `python -m sewtrace.cli demo play tee1`.
-10. Watch the whole demo.
-11. For real photos, ask the project owner to approve the cost.
-12. Run the command with the worst-case cost shown: `python -m sewtrace.cli demo record data/raw/tee1 --name real1 --yes-spend`.
-13. Run it once. If a call fails, read the error before you run it again.
-14. Know that the cache keeps every answer that was paid for. A second run does not pay twice.
-15. Use `--force` to replace a bundle of the same name. Without it, the command stops.
-16. Know that a second recording of the same photos does not change a file that has the same content.
-17. Commit the bundle if the checks above pass.
+5. For a real bundle, get approval first. The eval makes paid calls in REAL mode.
+6. Run the eval on the real tees with their tape measure files in `data/ground_truth/`: `python -m sewtrace.cli eval data/raw`. The card says "Real t-shirts".
+7. Note: a REAL recording stops, before any call, if the table holds only synthetic tees.
+8. To show the synthetic table anyway, add `--allow-synthetic-eval`. The card then says that the tees are synthetic.
+9. Put the proof photo in the garment folder as `proof.jpg`.
+10. Record in mock mode first. This is free: `python -m sewtrace.cli demo record data/synth/tee1`.
+11. Open the page: `python -m sewtrace.cli demo play tee1`.
+12. Watch the whole demo.
+13. For real photos, ask the project owner to approve the cost.
+14. Run the command with the worst-case cost shown: `python -m sewtrace.cli demo record data/raw/tee1 --name real1 --yes-spend`.
+15. Run it once. If a call fails, read the error before you run it again.
+16. Note: the cache keeps every answer that was paid for. A second run does not pay twice.
+17. Use `--force` to replace a bundle of the same name. Without it, the command stops.
+18. Note: a second recording of the same photos does not change a file that has the same content.
+19. Commit the bundle if the checks above pass.
 
 ## Play the demo at the finals
 
@@ -104,14 +106,17 @@ Do this the day before, and again on the finals laptop.
 
 1. Pull the repository.
 2. Check that `demo/<name>/manifest.json` exists.
-3. Run `python -m sewtrace.cli demo play <name> --check`. It must print one line and no error.
-4. Turn off Wi-Fi and unplug the network cable.
-5. Unset the key: `unset META_API_KEY`.
-6. Run `SEWTRACE_OFFLINE=1 python -m sewtrace.cli demo play <name>`.
-7. Open the page and play all six steps.
-8. Look for a broken image or a blank frame.
-9. Run the pipeline replay from the section above. Check that it prints the six measurements.
-10. Set the screen to 1920 x 1080.
-11. Press H to hide the controls. Check that the text is readable.
-12. Keep a screen recording of the full demo as the last backup.
-13. Turn the network on again only after the test is done.
+3. Run `python -m sewtrace.cli demo play <name> --check`.
+4. Make sure it prints one line and no error.
+5. Turn off Wi-Fi and unplug the network cable.
+6. Unset the key: `unset META_API_KEY`.
+7. Run `SEWTRACE_OFFLINE=1 python -m sewtrace.cli demo play <name>`.
+8. Open the page and play all six steps.
+9. Look for a broken image or a blank frame.
+10. Run the pipeline replay from the section above.
+11. Check that it prints the six measurements.
+12. Set the screen to 1920 x 1080.
+13. Press H to hide the controls.
+14. Check that the text is readable.
+15. Keep a screen recording of the full demo as the last backup.
+16. Turn the network on again only after the test is done.

@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import shutil
 import socket
 import subprocess
 from pathlib import Path
@@ -507,3 +508,30 @@ def test_req_api_08_committed_bundle_has_every_manifest_file_tracked():
     cache_file = next(f for f in sorted(wanted) if f.startswith("demo/tee1/cache/"))
     assert _git("check-ignore", "-q", cache_file).returncode == 1  # 1: not ignored
     assert _git("check-ignore", "-q", "cache/anything.json").returncode == 0  # the root cache stays ignored
+    # The Docker cache folder holds real-photo answers: never committed by `git add -A`.
+    assert _git("check-ignore", "-q", "data/cache/x.json").returncode == 0
+
+
+def test_req_api_08_interrupted_install_leaves_a_bundle_that_fails_check(tee, tmp_path, monkeypatch):
+    """REQ-API-08: the manifest is removed first and written last, so a half copy is refused."""
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "l.csv"))
+    root = tmp_path / "demo"
+    demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None)
+    real, copied = shutil.copyfile, []
+
+    def dying(src, dst, *a, **k):
+        if ".a.tmp" in str(src):  # only the copy into the installed bundle dies, not the build of the temp one
+            copied.append(dst)
+        if len(copied) == 3:
+            raise OSError("disk full")
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(demo.shutil, "copyfile", dying)
+    # Change one file so that _install has something to copy before it dies.
+    (root / "a" / "spec.json").write_text("{}")
+    (root / "a" / "measurements.json").write_text("{}")
+    with pytest.raises(OSError, match="disk full"):
+        demo.record(tee, "a", client=client, demo_dir=root, eval_csv=None, force=True)
+    assert not (root / "a" / "manifest.json").exists()
+    with pytest.raises(demo.DemoError):
+        demo.load_bundle("a", root)

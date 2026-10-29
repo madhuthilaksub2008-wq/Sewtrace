@@ -89,6 +89,16 @@ class ApiError(RuntimeError):
     """A Meta API call failed after the allowed tries."""
 
 
+class StoredAnswerRejected(ApiError):
+    """Replay of a stored paid answer that was cut off or not JSON. ``base_message`` is the text
+    of the live failure; callers that put the error into a prompt use it, so the prompt (and its
+    cache key) is the same for the live run and every replay."""
+
+    def __init__(self, base_message: str, stored_name: str) -> None:
+        super().__init__(f"{base_message} (stored paid answer {stored_name}; delete it to pay for a new attempt)")
+        self.base_message = base_message
+
+
 class LedgerMountError(ApiError):
     """REAL mode in the image, and the ledger folder is not a mounted volume."""
 
@@ -372,7 +382,11 @@ class MetaClient:
         if rejected.exists():
             # A paid answer that was cut off or not JSON. Judged by the same code as live, so it fails
             # the same way and the caller's retry or fallback runs without a second payment.
-            return _answer_from_choice(model.id, json.loads(rejected.read_text()), reasoning)
+            try:
+                return _answer_from_choice(model.id, json.loads(rejected.read_text()), reasoning)
+            except ApiError as e:
+                # Same text on every replay, so the retry prompt that embeds it keeps one cache key.
+                raise StoredAnswerRejected(str(e), rejected.name) from e
         self._require_online(f"reasoning call to {model.id}")
         self.calls += 1
         if self.settings.mock:
@@ -399,7 +413,7 @@ class MetaClient:
         The parser is checked before the paid call, and the raw events are cached right
         after it, so a decoding problem never makes a second paid call necessary."""
         parser, image, result = self._sam_parsed(image_path, prompt)
-        sent_hw = _fit_long_side(image, self.config.sam.max_upload_px).shape[:2]
+        sent_hw = _fitted_hw(*image.shape[:2], self.config.sam.max_upload_px)
         return sam_results_from(result, parser.decode_mask_to_raster, sent_hw, image_path.name, prompt,
                                 box_tol_px=self.config.sam.box_overhang_tol_px, full_hw=image.shape[:2])
 
@@ -412,7 +426,7 @@ class MetaClient:
         if not self._events_file(image_path, prompt).exists():
             raise CacheMiss(f"no stored SAM answer for {image_path.name!r} with prompt {prompt!r}; segment it first.")
         _, image, result = self._sam_parsed(image_path, prompt)
-        sent_h, sent_w = _fit_long_side(image, self.config.sam.max_upload_px).shape[:2]
+        sent_h, sent_w = _fitted_hw(*image.shape[:2], self.config.sam.max_upload_px)
         sx, sy = image.shape[1] / sent_w, image.shape[0] / sent_h
         boxes = [(str(r.object_id), float(r.left) * sx, float(r.top) * sy, float(r.right) * sx, float(r.bottom) * sy)
                  for r in result.records if r.kind == "box"]
@@ -484,7 +498,8 @@ class MetaClient:
             images=len(images),
         )
         response = self._paid(model, "/chat/completions", body, estimate)
-        choice = response["choices"][0]
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else {}
         try:
             return _answer_from_choice(model.id, choice, reasoning)
         except ApiError:
@@ -652,6 +667,8 @@ def _answer_from_choice(model_id: str, choice: dict[str, Any], reasoning: Any) -
         )
     try:
         return json.loads(choice["message"]["content"])
+    except (KeyError, IndexError):
+        raise ApiError(f"{model_id} answer has no message content (empty choices or no message).") from None
     except (json.JSONDecodeError, TypeError) as e:
         raise ApiError(f"{model_id} answer is not valid JSON: {e}") from e
 
@@ -670,12 +687,19 @@ def _fit_long_side(image: np.ndarray, max_px: int) -> np.ndarray:
     already fits. Both sides are rounded, so a caller maps coordinates back with the per-axis
     factors ``original / sent``, not one scale."""
     height, width = image.shape[:2]
+    sent_h, sent_w = _fitted_hw(height, width, max_px)
+    if (sent_h, sent_w) == (height, width):
+        return image
+    return cv2.resize(image, (sent_w, sent_h), interpolation=cv2.INTER_AREA)
+
+
+def _fitted_hw(height: int, width: int, max_px: int) -> tuple[int, int]:
+    """``(height, width)`` that ``_fit_long_side`` sends; one rounding rule for both."""
     long_side = max(height, width)
     if long_side <= max_px:
-        return image
+        return height, width
     scale = max_px / long_side
-    size = (max(1, round(width * scale)), max(1, round(height * scale)))
-    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
+    return max(1, round(height * scale)), max(1, round(width * scale))
 
 
 def _jpeg_data_url(image: np.ndarray, quality: int, max_px: int) -> str:

@@ -623,3 +623,41 @@ def test_req_api_02_muse_images_are_reencoded_without_exif(tmp_path):
     _jpeg_with_exif(other, 90)
     client.reason("p", [other])
     assert len(transport.calls) == 2
+
+
+def test_req_api_02_replayed_rejected_answer_says_it_is_stored_and_how_to_pay_again(tmp_path):
+    """REQ-API-02: the replay text is the live text plus a hint, and it is the same on every replay."""
+    transport = FakeTransport(_answer(finish="length"))
+    client, _ = _client(tmp_path, transport)
+    with pytest.raises(ApiError) as live:
+        client.reason("p")
+    assert "stored paid answer" not in str(live.value)
+    texts = []
+    for _ in range(2):
+        with pytest.raises(ApiError, match=r"stored paid answer .*\.rejected\.json; delete it") as replay:
+            client.reason("p")
+        texts.append(str(replay.value))
+    assert texts[0] == texts[1] and texts[0].startswith(str(live.value))
+    assert len(transport.calls) == 1
+    assert replay.value.base_message == str(live.value)
+
+
+@pytest.mark.parametrize("response", [{"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                                      {"choices": [{"finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}])
+def test_req_api_02_answer_without_message_is_an_api_error_and_stored_as_rejected(tmp_path, response):
+    """A completed paid call with no choice or no message is a bad answer, not a KeyError."""
+    transport = FakeTransport(response)
+    client, _ = _client(tmp_path, transport)
+    with pytest.raises(ApiError, match="no message content"):
+        client.reason("p")
+    assert len(list(tmp_path.glob("*.rejected.json"))) == 1
+    with pytest.raises(ApiError, match="stored paid answer"):
+        client.reason("p")
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("hw", [(40, 40), (3000, 4000), (4000, 3000), (5000, 7), (1999, 2001)])
+def test_fitted_hw_matches_the_shape_of_the_resized_image(hw):
+    from sewtrace.api.client import _fit_long_side, _fitted_hw
+    image = np.zeros((*hw, 3), np.uint8)
+    assert _fitted_hw(*hw, 1568) == _fit_long_side(image, 1568).shape[:2]

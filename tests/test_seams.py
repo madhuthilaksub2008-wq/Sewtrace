@@ -360,6 +360,7 @@ class _FailingClient:
 
     def reason(self, *a, **k):
         self.reason_calls += 1
+        self.client.calls += 1  # a live call that fails was sent, so the real client counts it
         raise self.error
 
 
@@ -397,3 +398,21 @@ def test_seam_log_marks_underarm_pair_equal_by_construction(tees, client):
     """The sleeve underarm is compared with its own mirror image: always 0, so the log says so."""
     _, log = adjust_loop(client, truth_spec(tees[0]))
     assert log[0]["equal_by_construction"] == ["sleeve.underarm~sleeve.underarm:mirror"]
+
+
+def test_req_sew_02_03_stored_rejected_answer_goes_straight_to_the_code_fix(tees, client, monkeypatch):
+    """REQ-SEW-02, REQ-SEW-03: a replay of a stored rejected answer is not a model call; no more replays."""
+    from sewtrace.api.client import StoredAnswerRejected
+    attempts: list[int] = []
+
+    def replay(*a, **k):
+        attempts.append(1)
+        raise StoredAnswerRejected("not valid JSON", "k.rejected.json")  # client.calls does not move
+
+    monkeypatch.setattr(client, "reason", replay)
+    spec = _longer_front_armhole(truth_spec(tees[0]), 10.0)
+    out, log = adjust_loop(client, spec)
+    assert len(attempts) == 1 and client.calls == 0
+    assert [r["source"] for r in log] == ["initial", "fallback"]
+    assert [r["stored_rejected_replayed"] for r in log] == [False, True]
+    assert log[-1]["failing"] == [] and all(s.ok for s in check_seams(out))

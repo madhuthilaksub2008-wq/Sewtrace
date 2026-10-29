@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .env
 /cache/
+data/cache/
 data/raw/
 data/synth/
 data/runs/

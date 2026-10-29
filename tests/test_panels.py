@@ -495,3 +495,24 @@ def test_req_api_04_infer_panels_does_not_retry_a_code_bug_in_the_transport(tees
         infer_panels(real, photo_set(tee), draft_spec(*measured(tee)), meas(tee))
     assert Buggy.calls == 1
     assert len(real.ledger_path.read_text().splitlines()) == 2  # header + one row
+
+
+def test_req_api_02_retry_prompt_is_the_same_for_a_live_failure_and_a_stored_replay(tees, client):
+    """REQ-API-02: the retry prompt embeds the error text, so a replay must not change it."""
+    from sewtrace.api.client import ApiError, StoredAnswerRejected
+    tee = tees[0]
+    draft = draft_spec(*measured(tee))
+
+    def second_prompt(error):
+        seen: list[str] = []
+
+        class Stub(_FailingClient):
+            def reason(self, prompt, *a, **k):
+                seen.append(prompt)
+                return super().reason(prompt, *a, **k)
+
+        infer_panels(Stub(client, error), photo_set(tee), draft, meas(tee))
+        return seen[1]
+
+    live = second_prompt(ApiError("cut off at max_tokens"))
+    assert second_prompt(StoredAnswerRejected("cut off at max_tokens", "k.rejected.json")) == live
