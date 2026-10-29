@@ -94,8 +94,25 @@ class ArmholeConfig(_Strict):
     underarm_handle: float = Field(gt=0, lt=1)
 
 
+class MaskConfig(_Strict):
+    cleanup_mm: float = Field(gt=0)
+
+
+class JointsConfig(_Strict):
+    corner_window_mm: float = Field(gt=0)
+    underarm_min_deg: float = Field(gt=0, lt=180)
+    corner_min_deg: float = Field(gt=0, lt=180)
+    pair_tol_mm: float = Field(gt=0)
+    shoulder_symmetry_mm: float = Field(gt=0)
+    shoulder_plateau_mm: float = Field(gt=0)
+    rounding_deg: float = Field(gt=0, lt=180)
+    rounding_margin_mm: float = Field(ge=0)
+
+
 class ContourConfig(_Strict):
     armhole: ArmholeConfig
+    mask: MaskConfig
+    joints: JointsConfig
 
 
 class InferenceConfig(_Strict):
@@ -142,6 +159,7 @@ class PatternConfig(_Strict):
 class ProofConfig(_Strict):
     gap_tolerance_mm: float = Field(gt=0)
     fold_straight_tol_mm: float = Field(gt=0)
+    fold_smooth_mm: float = Field(gt=0)
     fold_min_inset_mm: float = Field(gt=0)
     fold_exclude_mm: float = Field(gt=0)
     centre_margin_mm: float = Field(ge=0)

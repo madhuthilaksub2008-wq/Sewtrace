@@ -32,9 +32,9 @@ CORNER_WINDOW_MM = 4.0
 SMOOTH_SIGMA_MM = 1.5
 FOLD_TOL_MM = 1.0
 JOINT_SPACING_MM = 1.0   # outline spacing for the sleeve joint search
-JOINT_TRIM_MM = 4.0      # ends of the sleeve-top run ignored by the line fits (corner rounding)
-JOINT_MARGIN_MM = 4.0    # points this close to the split are ignored by both line fits
+JOINT_TRIM_MM = 4.0      # least length of a sleeve-top or shoulder run ignored at its ends by the fit
 JOINT_MIN_RUN_MM = 15.0  # shortest straight run on each side of the shoulder point
+JOINT_NEAR_BEST = 1.25   # a bend whose fit is within this factor of the best fit counts as possible
 JOINT_REACH_MM = 20.0    # tangent fit length at the underarm point
 
 
@@ -112,12 +112,48 @@ def _orient_like_synth(pts: np.ndarray) -> np.ndarray:
 
 # ---- public API -------------------------------------------------------------
 
+def _px_per_mm(homography: Homography, at: np.ndarray) -> float:
+    """Photo pixels per mm near the pixel ``at`` (x, y)."""
+    step = 10.0
+    mm = homography.px_to_mm(np.array([at, at + [step, 0.0], at + [0.0, step]]))
+    return step / float(np.mean(np.linalg.norm(mm[1:] - mm[0], axis=1)))
+
+
+def clean_mask(mask: np.ndarray, px_per_mm: float) -> np.ndarray:
+    """Binary mask -> its largest piece with holes filled and nicks and whiskers up to
+    ``contour.mask.cleanup_mm`` closed or removed (REQ-SEG-03). A real SAM mask has small
+    holes, edge nicks and stray blobs that must not turn into corners of the outline."""
+    mask = (np.asarray(mask) > 0).astype(np.uint8)
+    radius = max(int(round(get_config().contour.mask.cleanup_mm * px_per_mm)), 1)
+    pad = radius + 2
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        raise ValueError("empty mask")
+    y0, x0 = max(ys.min() - pad, 0), max(xs.min() - pad, 0)
+    crop = np.pad(mask[y0 : ys.max() + pad + 1, x0 : xs.max() + pad + 1], pad)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+
+    def largest_filled(m: np.ndarray) -> np.ndarray:
+        found, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        out = np.zeros_like(m)
+        cv2.drawContours(out, [max(found, key=cv2.contourArea)], -1, 1, cv2.FILLED)
+        return out
+
+    crop = largest_filled(cv2.morphologyEx(largest_filled(crop), cv2.MORPH_OPEN, kernel))  # whiskers first: closing would thicken them
+    crop = largest_filled(cv2.morphologyEx(crop, cv2.MORPH_CLOSE, kernel))
+    out = np.zeros_like(mask)
+    out[y0 : y0 + crop.shape[0] - 2 * pad, x0 : x0 + crop.shape[1] - 2 * pad] = crop[pad:-pad, pad:-pad]
+    return out
+
+
 def mask_to_outline(mask: np.ndarray, homography: Homography) -> Outline:
     """Largest external contour of a boolean mask, in the marker mm frame."""
     mask = np.asarray(mask).astype(np.uint8)
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         raise ValueError("empty mask")
+    mask = clean_mask(mask, _px_per_mm(homography, np.array([xs.mean(), ys.mean()])))
+    ys, xs = np.nonzero(mask)
     pad = 4
     x0, y0 = max(xs.min() - pad, 0), max(ys.min() - pad, 0)
     crop = mask[y0 : ys.max() + pad + 1, x0 : xs.max() + pad + 1] * 255
@@ -201,44 +237,84 @@ class _Joints:
     side_dir_b: np.ndarray
 
 
-def _line_ssr(pts: np.ndarray) -> float:
-    c, d = _fit_line(pts)
-    r = (pts - c) - ((pts - c) @ d)[:, None] * d
-    return float((r**2).sum())
+@dataclass(frozen=True)
+class _HingeScan:
+    """Broken-stick fits of one sleeve-top-plus-shoulder run, one per candidate bend position."""
+
+    origin: np.ndarray
+    e: np.ndarray           # unit vector along the chord of the fitted part
+    n: np.ndarray           # unit normal
+    bend: np.ndarray        # candidate bend positions along the chord, mm
+    seam_mm: np.ndarray     # shoulder seam length (bend to neck corner) for each candidate
+    ssr: np.ndarray         # sum of squared residuals of each fit
+    coef: np.ndarray        # (candidates, 3): offset, slope, slope change
+
+    def at(self, i: int) -> tuple[np.ndarray, np.ndarray]:
+        """Shoulder point and unit direction of the shoulder seam (towards the neck) for candidate i."""
+        c0, c1, c2 = self.coef[i]
+        point = self.origin + self.bend[i] * self.e + (c0 + c1 * self.bend[i]) * self.n
+        d = self.e + (c1 + c2) * self.n
+        d /= np.linalg.norm(d)
+        return point, d
 
 
-def _breakpoint(run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Shoulder point on the run from the sleeve's outer hem corner to the neck corner.
+def _hinge_scan(run: np.ndarray, trim_start: float, trim_end: float) -> _HingeScan:
+    """Fit the run from a sleeve's top hem corner to the neck corner (REQ-GEO-01).
 
-    The run is two straight lines (sleeve top, shoulder seam) that meet at a kink of
-    only 10 to 25 degrees, too soft for a corner detector. Find the split that makes
-    both lines fit best, then intersect the two fitted lines. Returns the point and
-    the unit direction of the shoulder seam (towards the neck).
+    The run is two straight lines (sleeve top, shoulder seam) that meet at a kink of only
+    a few degrees (3 to 25), too soft for a corner detector, and the sleeve end is rounded
+    by up to 15 mm. Fit a broken stick through the run, with the ends that the rounding
+    covers left out: one line that bends once, continuous at the bend (fewer parameters
+    than two free lines, so a faint kink cannot throw the bend point far).
     """
     s = _cumlen(run)
-    lo, hi = JOINT_TRIM_MM + JOINT_MIN_RUN_MM, s[-1] - JOINT_TRIM_MM - JOINT_MIN_RUN_MM
-    best: tuple[float, int] | None = None
-    for i in np.nonzero((s >= lo) & (s <= hi))[0]:
-        left = run[(s >= JOINT_TRIM_MM) & (s <= s[i] - JOINT_MARGIN_MM)]
-        right = run[(s >= s[i] + JOINT_MARGIN_MM) & (s <= s[-1] - JOINT_TRIM_MM)]
-        cost = _line_ssr(left) + _line_ssr(right)
-        if best is None or cost < best[0]:
-            best = (cost, int(i))
-    if best is None:
+    keep = (s >= trim_start) & (s <= s[-1] - trim_end)
+    pts = run[keep]
+    if len(pts) < 2 * JOINT_MIN_RUN_MM / JOINT_SPACING_MM or np.ptp(s[keep]) < 2 * JOINT_MIN_RUN_MM:
         raise ValueError("sleeve top and shoulder seam are too short to find the shoulder point")
-    split = best[1]
-    c1, d1 = _fit_line(run[(s >= JOINT_TRIM_MM) & (s <= s[split] - JOINT_MARGIN_MM)])
-    c2, d2 = _fit_line(run[(s >= s[split] + JOINT_MARGIN_MM) & (s <= s[-1] - JOINT_TRIM_MM)])
-    point = run[split]
-    A = np.c_[d1, -d2]
-    if abs(np.linalg.det(A)) > 1e-3:
-        t = np.linalg.solve(A, c2 - c1)
-        crossing = c1 + t[0] * d1
-        if np.linalg.norm(crossing - point) <= 2 * JOINT_MARGIN_MM:  # else the lines are near parallel
-            point = crossing
-    if d2 @ (run[-1] - run[0]) < 0:
-        d2 = -d2
-    return point, d2
+    chord = pts[-1] - pts[0]
+    e = chord / np.linalg.norm(chord)
+    n = np.array([-e[1], e[0]])
+    u, v = (pts - pts[0]) @ e, (pts - pts[0]) @ n
+    bend = np.arange(u[0] + JOINT_MIN_RUN_MM, u[-1] - JOINT_MIN_RUN_MM + 1e-9, JOINT_SPACING_MM / 2)
+    coefs, ssrs = [], []
+    for u0 in bend:
+        design = np.c_[np.ones_like(u), u, np.maximum(u - u0, 0.0)]
+        coef, *_ = np.linalg.lstsq(design, v, rcond=None)
+        coefs.append(coef)
+        ssrs.append(float(((design @ coef - v) ** 2).sum()))
+    return _HingeScan(pts[0], e, n, bend, (u[-1] - bend) + trim_end, np.array(ssrs), np.array(coefs))
+
+
+def _joint_bend(a: _HingeScan, b: _HingeScan) -> tuple[int, int]:
+    """Best pair of bend positions (i, j), one per shoulder, with the two shoulder seams
+    within ``contour.joints.shoulder_symmetry_mm`` of each other in length. A tee is nearly
+    symmetric, so the two runs give independent evidence for one seam length: a faint kink on
+    one side is placed by the other."""
+    tol = get_config().contour.joints.shoulder_symmetry_mm
+    best: tuple[float, int, int] | None = None
+    for i in range(len(a.bend)):
+        near = np.nonzero(np.abs(b.seam_mm - a.seam_mm[i]) <= tol)[0]
+        if len(near) == 0:
+            continue
+        j = int(near[np.argmin(b.ssr[near])])
+        cost = a.ssr[i] + b.ssr[j]
+        if best is None or cost < best[0]:
+            best = (cost, i, j)
+    if best is None:
+        raise ValueError("the two shoulder seams are not about equally long: is the whole t-shirt in the mask?")
+    _, i, j = best
+    plateau = get_config().contour.joints.shoulder_plateau_mm
+    for scan, k in ((a, i), (b, j)):
+        # Bend positions that fit nearly as well as the best one: a wide spread means the kink is faint.
+        spread = float(np.ptp(scan.seam_mm[scan.ssr <= JOINT_NEAR_BEST * scan.ssr[k]]))
+        if spread > plateau:
+            raise ValueError(
+                f"the shoulder point is not clear: the sleeve top and the shoulder seam are nearly in line, "
+                f"so it could be anywhere over {spread:.0f} mm (at most {plateau:g} mm). "
+                "Lay the sleeves out at a wider angle to the shoulders"
+            )
+    return i, j
 
 
 def _ring_run(pts: np.ndarray, first: int, last: int) -> np.ndarray:
@@ -247,36 +323,94 @@ def _ring_run(pts: np.ndarray, first: int, last: int) -> np.ndarray:
     return pts[np.arange(first, last + 1 + (n if last < first else 0)) % n]
 
 
+def _net_turning(pts: np.ndarray, first: int, last: int) -> float:
+    """Total turning (deg) of a closed polyline over the vertices strictly between first and last,
+    walking forward. Unlike a corner count it does not change when a corner is rounded."""
+    n = len(pts)
+    v_in = pts - np.roll(pts, 1, axis=0)
+    v_out = np.roll(pts, -1, axis=0) - pts
+    turn = np.degrees(np.arctan2(v_in[:, 0] * v_out[:, 1] - v_in[:, 1] * v_out[:, 0], (v_in * v_out).sum(axis=1)))
+    return float(turn[np.arange(first + 1, last + (n if last < first else 0)) % n].sum())
+
+
+def _rounding_trim(turn_fine: np.ndarray, corner: int, direction: int, limit_mm: float) -> float:
+    """Arc length (mm, at JOINT_SPACING_MM) from a corner to the end of its rounding, walking
+    ``direction`` (+1 or -1): where the outline turns less than ``contour.joints.rounding_deg``
+    over the fine chord. At least JOINT_TRIM_MM, at most ``limit_mm``."""
+    cfg = get_config().contour.joints
+    n = len(turn_fine)
+    steps = int(limit_mm / JOINT_SPACING_MM)
+    run = 0
+    for i in range(1, steps + 1):
+        if turn_fine[(corner + direction * i) % n] < cfg.rounding_deg:
+            break
+        run = i
+    return max(run * JOINT_SPACING_MM + cfg.rounding_margin_mm, JOINT_TRIM_MM)
+
+
+def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int]:
+    """The six convex corners of the top arc (``other`` .. ``n``): sleeve hem bottom and top and
+    neck, left and right. The strongest peaks are candidates, and the six are chosen to be
+    mirror pairs about the middle of the arc (outer pair: sleeve hem bottoms, then sleeve hem
+    tops, then the neck corners), because a corner that is rounded or beside a scoop can be
+    weaker than a wiggle in the edge, but a wiggle is not mirrored by another one."""
+    cfg = get_config().contour.joints
+    cands = sorted(_peaks(score, cfg.corner_min_deg, radius)[:12])
+    arc = n - other
+    tol = cfg.pair_tol_mm / JOINT_SPACING_MM
+    pairs = [(i, j) for ii, i in enumerate(cands) for j in cands[ii + 1 :]
+             if abs((i - other) + (j - other) - arc) <= tol]
+    best: tuple[float, list[int]] | None = None
+    for p0 in pairs:
+        for p1 in pairs:
+            if not p0[0] < p1[0] < p1[1] < p0[1]:
+                continue
+            for p2 in pairs:
+                if not p1[0] < p2[0] < p2[1] < p1[1]:
+                    continue
+                strength = sum(min(score[i], score[j]) for i, j in (p0, p1, p2))
+                if best is None or strength > best[0]:
+                    best = (strength, [p0[0], p1[0], p2[0], p2[1], p1[1], p0[1]])
+    if best is None:
+        raise ValueError(
+            f"found {len(cands)} convex corners over the sleeves and neck, but no 6 that mirror each other "
+            "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask, neck up?"
+        )
+    return best[1]
+
+
 def _find_joints(outline: Outline) -> _Joints:
     """Shoulder and underarm points of a whole t-shirt outline (REQ-GEO-01).
 
-    Underarm points are the two sharpest concave corners. They split the outline into
-    the hem arc (two body hem corners) and the top arc (neck corners and the sleeve
-    hem corners: six in all). The shoulder point of each sleeve lies on the run between
-    its outer hem corner and the neck corner.
+    Underarm points are the two sharpest concave corners. They split the outline into the
+    hem arc and the top arc; the top arc is the one that turns more (sleeves and neck add
+    about 140 degrees over the hem and its two corners), a total that rounding a corner
+    does not change. The top arc holds six convex corners: the strongest six found over a
+    chord that is long enough for rounded corners (``contour.joints``). Their order is fixed:
+    sleeve hem (2), neck (2) ... The shoulder point of each sleeve lies on the run between its
+    top hem corner and the neck corner. A different count or order is a ValueError that says so.
     """
+    cfg = get_config().contour.joints
     pts = _resample_closed(_orient_like_synth(outline.array()), JOINT_SPACING_MM)
     n = len(pts)
-    k = max(int(round(CORNER_WINDOW_MM / JOINT_SPACING_MM)), 1)
+    k = max(int(round(cfg.corner_window_mm / JOINT_SPACING_MM)), 1)
     turn = gaussian_filter1d(_signed_turning(pts, k), k / 2, mode="wrap")
-    convex = sorted(_peaks(turn, CORNER_DEG, 2 * k))
-    concave = sorted(_peaks(-turn, CORNER_DEG, 2 * k)[:2])
+    concave = sorted(_peaks(-turn, cfg.underarm_min_deg, 2 * k)[:2])
     if len(concave) < 2:
         raise ValueError("found no underarm corners: is the whole t-shirt, with both sleeves, in the mask?")
     u1, u2 = concave
-    between = [c for c in convex if u1 < c < u2]
-    outside = [c for c in convex if not u1 < c < u2]
-    start, other_abs = (u1, u2) if len(between) < len(outside) else (u2, u1)
+    # The arc u1 -> u2 is the hem arc when it turns less than the other one.
+    start, other_abs = (u1, u2) if _net_turning(pts, u1, u2) < _net_turning(pts, u2, u1) else (u2, u1)
     pts = np.roll(pts, -start, axis=0)
+    turn = np.roll(turn, -start)
     other = (other_abs - start) % n
-    convex = sorted((c - start) % n for c in convex)
+
+    # Two peaks of one rounded corner can be 17 mm apart, so suppress over 3 windows.
+    convex = sorted(_peaks(turn, cfg.corner_min_deg, 3 * k))
     hem = [c for c in convex if 0 < c < other]
-    top = [c for c in convex if c > other]
-    if len(top) != 6:
-        raise ValueError(
-            f"found {len(top)} convex corners over the sleeves and neck, expected 6 "
-            "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask?"
-        )
+    inner = np.full(n, -np.inf)
+    inner[other + k : n - k] = turn[other + k : n - k]
+    top = _six_corners(inner, other, n, 3 * k)
     c0, c1, c2, c3, c4, c5 = top
     reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
     h = hem[0] if hem else other // 2
@@ -288,14 +422,30 @@ def _find_joints(outline: Outline) -> _Joints:
     under_a = underarm(other - min(reach, other - prev - 2), other, other, other + min(reach, c0 - other - 2))
     under_b = underarm(n - min(reach, n - c5 - 2), n, 0, min(reach, h - 2))
 
-    shoulder_a, dir_a = _breakpoint(pts[c1 : c2 + 1])
-    shoulder_b, dir_b = _breakpoint(pts[c3 : c4 + 1][::-1])  # walked from the sleeve to the neck
+    fine = gaussian_filter1d(_signed_turning(pts, max(int(round(4.0 / JOINT_SPACING_MM)), 1)), 2, mode="wrap")
+    fine = np.abs(fine)
+
+    scan_a = _shoulder_scan(pts, fine, sleeve=c1, neck=c2)
+    scan_b = _shoulder_scan(pts, fine, sleeve=c4, neck=c3)
+    i, j = _joint_bend(scan_a, scan_b)
+    shoulder_a, dir_a = scan_a.at(i)
+    shoulder_b, dir_b = scan_b.at(j)
     ia = c1 + int(np.argmin(np.linalg.norm(pts[c1 : c2 + 1] - shoulder_a, axis=1)))
     ib = c3 + int(np.argmin(np.linalg.norm(pts[c3 : c4 + 1] - shoulder_b, axis=1)))
     side_a = pts[max(other - reach, 0)] - under_a
     side_b = pts[min(reach, other)] - under_b
     return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib, c2, c3,
                    dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b))
+
+
+def _shoulder_scan(pts: np.ndarray, fine: np.ndarray, sleeve: int, neck: int) -> _HingeScan:
+    """_hinge_scan of the run between a sleeve top hem corner and the neck corner, walked from
+    the sleeve. ``fine`` is the turning over a short chord: the rounding at each end is left out."""
+    forward = sleeve < neck
+    run = pts[sleeve : neck + 1] if forward else pts[neck : sleeve + 1][::-1]
+    span = abs(neck - sleeve) * JOINT_SPACING_MM / 3
+    step = 1 if forward else -1
+    return _hinge_scan(run, _rounding_trim(fine, sleeve, step, span), _rounding_trim(fine, neck, -step, span))
 
 
 def find_sleeve_joints(outline: Outline) -> tuple[np.ndarray, np.ndarray]:
@@ -528,7 +678,7 @@ def label_body_edges(half: Outline) -> list[Edge]:
     """Edges in TEE_EDGES["front"] order: neck, shoulder, armhole, side, hem, fold."""
     pts = half.array()
     n = len(pts)
-    k = max(int(round(CORNER_WINDOW_MM / _spacing(pts))), 1)
+    k = max(int(round(get_config().contour.joints.corner_window_mm / _spacing(pts))), 1)
     turn = _turning(pts, k)
     top = int(np.argmin(pts[:, 1]))  # neck point is the highest point; snap to the sharpest corner near it
     near = np.arange(max(top - k - 1, 1), top + k + 2)
@@ -544,7 +694,7 @@ def label_sleeve_edges(half: Outline) -> list[Edge]:
     """Edges in TEE_EDGES["sleeve"] order: cap, underarm, hem, fold."""
     pts = half.array()
     n = len(pts)
-    k = max(int(round(CORNER_WINDOW_MM / _spacing(pts))), 1)
+    k = max(int(round(get_config().contour.joints.corner_window_mm / _spacing(pts))), 1)
     turn = _turning(pts, k)
     hem_fold = _bottom_fold_corner(pts)
     inner = np.full(n, -np.inf)

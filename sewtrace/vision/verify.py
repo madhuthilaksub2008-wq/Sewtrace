@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 import shapely
 from pydantic import BaseModel
+from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
 
 from sewtrace.api.client import MetaClient
@@ -95,11 +96,42 @@ def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
     return homography.px_to_mm(biggest.reshape(-1, 2).astype(float))
 
 
+def _smoothed_ring(ring_mm: np.ndarray, sigma_mm: float) -> np.ndarray:
+    """Closed outline resampled every mm and smoothed along itself (corners shrink a little)."""
+    dense = np.asarray(shapely.segmentize(shapely.LinearRing(ring_mm), 1.0).coords)[:-1]
+    return gaussian_filter1d(dense, sigma_mm, axis=0, mode="wrap")
+
+
+def _refit_fold(paper_mm: np.ndarray, a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fold edge end points from the unsmoothed outline: the smoothed ring found where the fold
+    is, but smoothing pulls a line towards the inside and shortens it at its corners. Fit a line
+    to the paper points that lie near the found segment, dropping outliers (the first points of
+    the edges that meet the fold), then end it at the first and last of those points."""
+    tol = get_config().proof.fold_straight_tol_mm
+    dense = np.asarray(shapely.segmentize(shapely.LinearRing(paper_mm), 1.0).coords)[:-1]
+    d = (b - a) / np.linalg.norm(b - a)
+    normal = np.array([-d[1], d[0]])
+    reach = get_config().proof.fold_smooth_mm
+    near = (np.abs((dense - a) @ normal) <= 2 * tol) & ((dense - a) @ d >= -reach) & ((dense - b) @ d <= reach)
+    pts = dense[near]
+    for _ in range(3):
+        centre = pts.mean(axis=0)
+        direction = np.linalg.svd(pts - centre)[2][0]
+        resid = np.abs((pts - centre) @ np.array([-direction[1], direction[0]]))
+        keep = resid <= max(2 * np.median(resid), 0.05)
+        if keep.all() or keep.sum() < 10:
+            break
+        pts = pts[keep]
+    along = (pts - centre) @ direction
+    return centre + along.min() * direction, centre + along.max() * direction
+
+
 def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """End points of the paper's fold edge: its long straight edge that lies deepest inside
     the t-shirt outline (the centre line is about half a chest away from any t-shirt edge)."""
     cfg = get_config().proof
-    simple = np.asarray(shapely.simplify(shapely.LinearRing(paper_mm), cfg.fold_straight_tol_mm).coords)
+    simple = np.asarray(shapely.simplify(shapely.LinearRing(_smoothed_ring(paper_mm, cfg.fold_smooth_mm)),
+                                         cfg.fold_straight_tol_mm).coords)
     body_ring = shapely.LinearRing(body_mm)
     min_length = 0.5 * float(np.ptp(paper_mm, axis=0).max())
     best: tuple[float, np.ndarray, np.ndarray] | None = None
@@ -114,7 +146,7 @@ def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarra
         raise ValueError(
             "No fold edge found on the paper: put the fold of the half panel on the centre of the t-shirt (SPEC 9.4)"
         )
-    return best[1], best[2]
+    return _refit_fold(paper_mm, best[1], best[2])
 
 
 def _body_side_runs(body_mm: np.ndarray, keep: np.ndarray) -> shapely.Geometry:
