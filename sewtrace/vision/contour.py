@@ -34,7 +34,6 @@ FOLD_TOL_MM = 1.0
 JOINT_SPACING_MM = 1.0   # outline spacing for the sleeve joint search
 JOINT_TRIM_MM = 4.0      # least length of a sleeve-top or shoulder run ignored at its ends by the fit
 JOINT_MIN_RUN_MM = 15.0  # shortest straight run on each side of the shoulder point
-JOINT_NEAR_BEST = 1.25   # a bend whose fit is within this factor of the best fit counts as possible
 JOINT_REACH_MM = 20.0    # tangent fit length at the underarm point
 
 
@@ -112,7 +111,7 @@ def _orient_like_synth(pts: np.ndarray) -> np.ndarray:
 
 # ---- public API -------------------------------------------------------------
 
-def _px_per_mm(homography: Homography, at: np.ndarray) -> float:
+def px_per_mm(homography: Homography, at: np.ndarray) -> float:
     """Photo pixels per mm near the pixel ``at`` (x, y)."""
     step = 10.0
     mm = homography.px_to_mm(np.array([at, at + [step, 0.0], at + [0.0, step]]))
@@ -139,8 +138,10 @@ def clean_mask(mask: np.ndarray, px_per_mm: float) -> np.ndarray:
         cv2.drawContours(out, [max(found, key=cv2.contourArea)], -1, 1, cv2.FILLED)
         return out
 
-    crop = largest_filled(cv2.morphologyEx(largest_filled(crop), cv2.MORPH_OPEN, kernel))  # whiskers first: closing would thicken them
-    crop = largest_filled(cv2.morphologyEx(crop, cv2.MORPH_CLOSE, kernel))
+    # Whiskers first: closing would thicken them. Close before the largest piece is taken, so a
+    # crack of a pixel or two across a sleeve seam is bridged and the sleeve stays part of the tee.
+    opened = cv2.morphologyEx(crop, cv2.MORPH_OPEN, kernel)
+    crop = largest_filled(cv2.morphologyEx(opened, cv2.MORPH_CLOSE, kernel))
     out = np.zeros_like(mask)
     out[y0 : y0 + crop.shape[0] - 2 * pad, x0 : x0 + crop.shape[1] - 2 * pad] = crop[pad:-pad, pad:-pad]
     return out
@@ -152,7 +153,7 @@ def mask_to_outline(mask: np.ndarray, homography: Homography) -> Outline:
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         raise ValueError("empty mask")
-    mask = clean_mask(mask, _px_per_mm(homography, np.array([xs.mean(), ys.mean()])))
+    mask = clean_mask(mask, px_per_mm(homography, np.array([xs.mean(), ys.mean()])))
     ys, xs = np.nonzero(mask)
     pad = 4
     x0, y0 = max(xs.min() - pad, 0), max(ys.min() - pad, 0)
@@ -286,35 +287,49 @@ def _hinge_scan(run: np.ndarray, trim_start: float, trim_end: float) -> _HingeSc
     return _HingeScan(pts[0], e, n, bend, (u[-1] - bend) + trim_end, np.array(ssrs), np.array(coefs))
 
 
-def _joint_bend(a: _HingeScan, b: _HingeScan) -> tuple[int, int]:
-    """Best pair of bend positions (i, j), one per shoulder, with the two shoulder seams
-    within ``contour.joints.shoulder_symmetry_mm`` of each other in length. A tee is nearly
-    symmetric, so the two runs give independent evidence for one seam length: a faint kink on
-    one side is placed by the other."""
+class ShoulderPointNotClear(ValueError):
+    """The sleeve top bends too little away from the shoulder seam to place the shoulder point."""
+
+
+def _joint_fit(a: _HingeScan, b: _HingeScan) -> tuple[np.ndarray, np.ndarray]:
+    """For each bend position i of the first shoulder: the best partner j of the second one (the
+    shoulder seams within ``contour.joints.shoulder_symmetry_mm`` of each other in length) and the
+    joint cost ssr_a[i] + ssr_b[j] (inf when no partner is that close)."""
     tol = get_config().contour.joints.shoulder_symmetry_mm
-    best: tuple[float, int, int] | None = None
+    cost = np.full(len(a.bend), np.inf)
+    partner = np.zeros(len(a.bend), int)
     for i in range(len(a.bend)):
         near = np.nonzero(np.abs(b.seam_mm - a.seam_mm[i]) <= tol)[0]
         if len(near) == 0:
             continue
-        j = int(near[np.argmin(b.ssr[near])])
-        cost = a.ssr[i] + b.ssr[j]
-        if best is None or cost < best[0]:
-            best = (cost, i, j)
-    if best is None:
+        partner[i] = near[np.argmin(b.ssr[near])]
+        cost[i] = a.ssr[i] + b.ssr[partner[i]]
+    return cost, partner
+
+
+def _joint_bend(a: _HingeScan, b: _HingeScan) -> tuple[int, int]:
+    """Best pair of bend positions (i, j), one per shoulder, from _joint_fit(). A tee is nearly
+    symmetric, so the two runs give independent evidence for one seam length: a faint kink on
+    one side is placed by the other.
+
+    The pair is refused when the fit is a plateau: the pairs that fit nearly as well as the best
+    one (``contour.joints.near_best``) put the shoulder seam at lengths that spread over more
+    than ``contour.joints.shoulder_plateau_mm``. The spread is measured on the joint cost, the
+    one that was fitted, not on each side alone: one faint side that the other side places
+    well is not a plateau."""
+    cfg = get_config().contour.joints
+    cost, partner = _joint_fit(a, b)
+    if not np.isfinite(cost).any():
         raise ValueError("the two shoulder seams are not about equally long: is the whole t-shirt in the mask?")
-    _, i, j = best
-    plateau = get_config().contour.joints.shoulder_plateau_mm
-    for scan, k in ((a, i), (b, j)):
-        # Bend positions that fit nearly as well as the best one: a wide spread means the kink is faint.
-        spread = float(np.ptp(scan.seam_mm[scan.ssr <= JOINT_NEAR_BEST * scan.ssr[k]]))
-        if spread > plateau:
-            raise ValueError(
-                f"the shoulder point is not clear: the sleeve top and the shoulder seam are nearly in line, "
-                f"so it could be anywhere over {spread:.0f} mm (at most {plateau:g} mm). "
-                "Lay the sleeves out at a wider angle to the shoulders"
-            )
-    return i, j
+    i = int(np.argmin(cost))
+    possible = np.nonzero(cost <= cfg.near_best * cost[i])[0]
+    spread = max(float(np.ptp(a.seam_mm[possible])), float(np.ptp(b.seam_mm[partner[possible]])))
+    if spread > cfg.shoulder_plateau_mm:
+        raise ShoulderPointNotClear(
+            "the shoulder point is not clear: the sleeve top and the shoulder seam are nearly in line. "
+            "Let the sleeves hang down more, so the sleeve top bends clearly away from the shoulder line"
+        )
+    return i, int(partner[i])
 
 
 def _ring_run(pts: np.ndarray, first: int, last: int) -> np.ndarray:
@@ -353,19 +368,23 @@ def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int
     neck, left and right. The strongest peaks are candidates, and the six are chosen to be
     mirror pairs about the middle of the arc (outer pair: sleeve hem bottoms, then sleeve hem
     tops, then the neck corners), because a corner that is rounded or beside a scoop can be
-    weaker than a wiggle in the edge, but a wiggle is not mirrored by another one."""
+    weaker than a wiggle in the edge, but a wiggle is not mirrored by another one. The two hem
+    pairs may be off from mirrored by ``pair_tol_hem_mm``, the neck pair by ``pair_tol_neck_mm``:
+    the neck pair also carries the difference of the two sleeve tops, on top of the difference of
+    the two sleeve lengths, so it can be off by more."""
     cfg = get_config().contour.joints
     cands = sorted(_peaks(score, cfg.corner_min_deg, radius)[:12])
     arc = n - other
-    tol = cfg.pair_tol_mm / JOINT_SPACING_MM
-    pairs = [(i, j) for ii, i in enumerate(cands) for j in cands[ii + 1 :]
-             if abs((i - other) + (j - other) - arc) <= tol]
+    hem_tol, neck_tol = cfg.pair_tol_hem_mm / JOINT_SPACING_MM, cfg.pair_tol_neck_mm / JOINT_SPACING_MM
+    pairs = [(i, j, abs((i - other) + (j - other) - arc)) for ii, i in enumerate(cands) for j in cands[ii + 1 :]]
+    hem_pairs = [(i, j) for i, j, off in pairs if off <= hem_tol]
+    neck_pairs = [(i, j) for i, j, off in pairs if off <= neck_tol]
     best: tuple[float, list[int]] | None = None
-    for p0 in pairs:
-        for p1 in pairs:
+    for p0 in hem_pairs:
+        for p1 in hem_pairs:
             if not p0[0] < p1[0] < p1[1] < p0[1]:
                 continue
-            for p2 in pairs:
+            for p2 in neck_pairs:
                 if not p1[0] < p2[0] < p2[1] < p1[1]:
                     continue
                 strength = sum(min(score[i], score[j]) for i, j in (p0, p1, p2))
@@ -678,7 +697,7 @@ def label_body_edges(half: Outline) -> list[Edge]:
     """Edges in TEE_EDGES["front"] order: neck, shoulder, armhole, side, hem, fold."""
     pts = half.array()
     n = len(pts)
-    k = max(int(round(get_config().contour.joints.corner_window_mm / _spacing(pts))), 1)
+    k = max(int(round(get_config().contour.labels.corner_window_mm / _spacing(pts))), 1)
     turn = _turning(pts, k)
     top = int(np.argmin(pts[:, 1]))  # neck point is the highest point; snap to the sharpest corner near it
     near = np.arange(max(top - k - 1, 1), top + k + 2)
@@ -694,7 +713,7 @@ def label_sleeve_edges(half: Outline) -> list[Edge]:
     """Edges in TEE_EDGES["sleeve"] order: cap, underarm, hem, fold."""
     pts = half.array()
     n = len(pts)
-    k = max(int(round(get_config().contour.joints.corner_window_mm / _spacing(pts))), 1)
+    k = max(int(round(get_config().contour.labels.corner_window_mm / _spacing(pts))), 1)
     turn = _turning(pts, k)
     hem_fold = _bottom_fold_corner(pts)
     inner = np.full(n, -np.inf)

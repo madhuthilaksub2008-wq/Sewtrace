@@ -96,20 +96,41 @@ corner_window_mm = 8.0
 underarm_min_deg = 30.0    # the two sharpest concave corners must turn at least this much
 corner_min_deg = 10.0      # convex corners (sleeve hem, neck) are picked among the peaks above this
 # The six are chosen as three mirror pairs about the middle of the arc between the underarm points.
-# A pair may be this far (mm) from mirrored: sleeve length and left/right offset of real tees.
-pair_tol_mm = 25.0
+# A pair may be this far (mm) from mirrored. The two sleeve hem pairs are off by the difference of
+# the sleeve lengths: 0 to 23 mm on 40 hard photos (10 tees, front and back, with and without lens
+# and curl). The neck pair is off by that and by the difference of the two sleeve tops: 7 to 27 mm.
+# So the neck tolerance is larger. The hem value is unchanged. The neck value is 1.5 times the
+# largest measured offset. NEEDS REAL PHOTOS.
+pair_tol_hem_mm = 25.0
+pair_tol_neck_mm = 40.0
 # The shoulder point is the bend of the sleeve top into the shoulder seam. The two shoulders of a
 # tee are about as far from the neck, so their bends are fitted together, and the two seam lengths
 # may differ by shoulder_symmetry_mm (hard set: 1 to 3 mm of left/right offset). A faint bend
-# (a few degrees) cannot be placed: edge waves of 1 to 2 mm move it by tens of mm. When the bends
-# that fit within 25 percent of the best fit spread over more than shoulder_plateau_mm, the photo
-# is refused. Hard set: 16 to 38 mm for a kink of 8 to 10 degrees, 48 to 220 mm for 3 to 6 degrees.
+# (a few degrees) cannot be placed: edge waves of 1 to 2 mm move it by tens of mm.
+# Plateau gate: take the pairs of bend positions whose joint cost (the one that is fitted, both
+# shoulders together) is within near_best times the best cost. When their shoulder seam lengths
+# spread over more than shoulder_plateau_mm, the photo is refused.
+# NEEDS REAL PHOTOS. Measured on the hard set (10 tees, front and back, no lens, no curl), joint
+# plateau in mm / worst shoulder point error in mm: 11 photos at 40 mm or less (18 to 37.5 mm) have
+# errors of 0.2 to 9.9 mm. 9 photos above 40 mm (43 to 166.5 mm) have errors of 2.0 to 99 mm: 6 of
+# them 2.0 to 10.2 mm (tee1 front, tee2 front, tee4, tee9) and 3 of them 16.2 mm or more (tee1 back,
+# tee6). The plateau does not separate good from bad photos cleanly, so 40 mm is a judgement. The old
+# per-side gate refused photos with one clear and one faint shoulder (side plateau up to 132 mm,
+# joint plateau 28 to 35 mm, error 3.3 to 8.6 mm).
 shoulder_symmetry_mm = 8.0
 shoulder_plateau_mm = 40.0
+near_best = 1.25           # a bend whose joint fit is within this factor of the best fit counts as possible
 # A corner's rounding ends where the outline turns less than rounding_deg over a 4 mm chord. The
 # straight-line fits for the shoulder point start rounding_margin_mm past that.
 rounding_deg = 12.0
 rounding_margin_mm = 2.0
+
+[contour.labels]          # REQ-GEO-01: corners of the half outline that mark the edges
+# Own key: edge labelling used 4 mm before the hard set. The hard set needs 8 mm: with 4 mm the
+# seam check failed on hard tee3 (armhole 334 mm against a sleeve cap of 95 mm), so an edge was
+# labelled at the wrong corner. With 8 mm both hard tees pass (tests/test_hard.py). The clean set is
+# checked by the full test suite and the eval. NEEDS REAL PHOTOS.
+corner_window_mm = 8.0
 
 [contour.armhole]          # default armhole between shoulder point and underarm point
 # A flat-lay photo hides the armhole under the sleeve, so only its two end points are

@@ -21,6 +21,8 @@ Work in progress. Until real captures exist, `sewtrace.mock.synth` renders
 synthetic tees (known geometry, printed ArUco marker, camera tilt), and the
 Meta API calls are mocked. See `docs/CONTRIBUTING.md`.
 
+Read `docs/CAPTURE.md` before you take photos.
+
 Put real captures in `data/raw/<tee>/` (`front.jpg`, `back.jpg`, `sleeve.jpg`). Write the tape
 measure values in mm to `data/ground_truth/<tee>.json` (SPEC 10.3). `sewtrace eval data/raw`
 stops with an error for a tee that has no such file.

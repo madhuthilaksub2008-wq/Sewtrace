@@ -559,7 +559,7 @@ def hard_views(p: synth.TeeParams, hp: HardParams) -> dict:
         avg = (right + left) / 2
         vis_avg = (vis_r + vis_l) / 2
         views[view] = {
-            "half": avg, "visible_half": vis_avg, "edges": edges, "origin": origin,
+            "half": avg, "visible_half": vis_avg, "visible_right": vis_r, "edges": edges, "origin": origin,
             "body": body, "body_rounded": body_round, "sleeves": sleeve_polys, "garment": outline,
             "sleeve_records": records,
             "right": right, "left": left,
@@ -583,6 +583,7 @@ def make_tee_hard(p: synth.TeeParams, out: Path, seed: int, hard: HardParams | N
         truth["photos"][view] = {
             "half_outline_mm": v["half"].tolist(),
             "visible_half_outline_mm": v["visible_half"].tolist() if view == "front" else v["half"].tolist(),
+            "visible_right_half_mm": v["visible_right"].tolist(),   # the right side of the body ring, not averaged
             "edges": v["edges"],
             "origin_mm": v["origin"].tolist(),
             "world_mm_to_photo_px": H.tolist(),   # before the lens distortion

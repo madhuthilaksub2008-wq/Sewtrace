@@ -71,6 +71,8 @@ def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bo
             return half, contour.label_sleeve_edges(half)
         half = contour.body_half(contour.remove_sleeves(outline))
         return half, contour.label_body_edges(half)
+    except contour.ShoulderPointNotClear as err:
+        raise ContourFailed(f"{view} photo {photo}: {err}. Take the {view} photo again.") from err
     except ValueError as err:
         raise ContourFailed(
             f"{view} photo {photo}: {err}. Take the photo again with the whole t-shirt flat and in view."

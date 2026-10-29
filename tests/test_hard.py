@@ -6,14 +6,16 @@ tolerance was changed.
 """
 
 import json
+import shutil
 from dataclasses import replace
 
 import cv2
 import numpy as np
 import pytest
+import shapely
 
 from sewtrace.api.client import MetaClient
-from sewtrace.config import Settings
+from sewtrace.config import Settings, get_config
 from sewtrace.mock import proof, synth, synth_hard
 from sewtrace.pipeline import ContourFailed, run
 from sewtrace.types import MEASUREMENT_KEYS
@@ -57,8 +59,8 @@ def _calm(index: int, **kw) -> synth_hard.HardParams:
     return replace(synth_hard.hard_params(index), wave_mm=1.0, asymmetry_mm=2.0, **kw)
 
 
-def test_req_seg_03_clean_mask_drops_strays_fills_holes_and_nicks():
-    """REQ-SEG-03: a SAM mask with holes, stray blobs and an edge nick gives one clean piece."""
+def test_req_geo_01_clean_mask_drops_strays_fills_holes_and_nicks():
+    """REQ-GEO-01: a SAM mask with holes, stray blobs and an edge nick gives one clean piece."""
     mask = np.zeros((300, 300), np.uint8)
     mask[60:240, 60:240] = 1
     mask[100:106, 100:106] = 0           # hole
@@ -73,6 +75,32 @@ def test_req_seg_03_clean_mask_drops_strays_fills_holes_and_nicks():
     n, _ = cv2.connectedComponents(out)
     assert n == 2  # background and one piece
     assert abs(int(out.sum()) - 180 * 180) < 0.03 * 180 * 180
+
+
+def test_req_geo_01_clean_mask_bridges_a_one_pixel_crack_across_a_sleeve_seam():
+    """REQ-GEO-01: a crack of 1 px between the body and a sleeve must not cut the sleeve off.
+    The old order (largest piece, then close) kept the body only."""
+    mask = np.zeros((300, 400), np.uint8)
+    mask[60:240, 60:240] = 1             # body
+    mask[100:200, 241:330] = 1           # sleeve, one pixel column of gap (x = 240)
+    out = contour.clean_mask(mask, px_per_mm=3.0)
+    assert out[150, 300] == 1
+    n, _ = cv2.connectedComponents(out)
+    assert n == 2
+
+
+def test_req_geo_01_proof_masks_are_cleaned_like_the_photo_masks():
+    """REQ-GEO-01, REQ-VER-02: the proof's mask outline goes through clean_mask too: a nick in
+    the edge of the mask is not an inward corner of the outline."""
+    from sewtrace.vision.verify import mask_outline_mm
+
+    mask = np.zeros((300, 300), np.uint8)
+    mask[60:240, 60:240] = 1
+    mask[58:64, 140:144] = 0             # nick, 4 px wide and 4 px deep
+    hom = Homography(np.diag([1 / 4, 1 / 4, 1.0]))   # 4 px per mm: a 2 px cleanup radius
+    ring = mask_outline_mm(mask > 0, hom)
+    in_nick = ring[(np.abs(ring[:, 0] - 142 / 4) < 0.2) & (ring[:, 1] < 40)]   # top edge above the middle of the nick
+    assert len(in_nick) > 0 and in_nick[:, 1].max() < 15.6   # edge at y = 60 px = 15 mm; the raw nick floor is at 16
 
 
 def test_req_geo_01_hard_truth_matches_clean_truth_without_faults():
@@ -102,13 +130,59 @@ def test_req_geo_01_joint_finder_tolerates_rounded_corners(radius):
 
 
 def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
-    """REQ-GEO-01: a 3 degree kink with waves cannot place the shoulder point: ContourFailed's cause
+    """REQ-GEO-01: a 3 degree kink with waves on both sides cannot place the shoulder point: the error
     says so and what to do, instead of a guess that is tens of mm out."""
     p = _tee(0)
     hp = _calm(0, kink_deg=(3.0, 3.0), corner_radius_mm=10.0)
     outline, _, _ = _joints(p, hp)
-    with pytest.raises(ValueError, match="shoulder point is not clear.*wider angle"):
+    with pytest.raises(ValueError, match="shoulder point is not clear.*Let the sleeves hang down more"):
         contour.find_sleeve_joints(outline)
+
+
+@pytest.mark.parametrize("kinks", [(3.0, 10.0), (10.0, 3.0)])
+def test_req_geo_01_one_faint_shoulder_is_placed_by_the_clear_one(kinks):
+    """REQ-GEO-01: a tee with one faint (3 degree) and one clear (10 degree) shoulder is accepted
+    and both shoulder points are near the truth. Measured: the faint side alone has a plateau of 54
+    and 132 mm (the old per-side gate refused), the joint fit one of 28 and 35 mm; shoulder error
+    3.3 and 8.6 mm."""
+    p = _tee(1)
+    hp = _calm(1, kink_deg=kinks, corner_radius_mm=8.0)
+    outline, shoulder, _ = _joints(p, hp)
+    found_shoulder, _ = contour.find_sleeve_joints(outline)
+    assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+
+
+def test_req_geo_01_two_faint_shoulders_are_refused():
+    """REQ-GEO-01: both shoulders at 3 degrees: the joint fit is a plateau of 117 mm, refused
+    (a truly ambiguous tee), with the action to take."""
+    outline, _, _ = _joints(_tee(1), _calm(1, kink_deg=(3.0, 3.0), corner_radius_mm=8.0))
+    with pytest.raises(contour.ShoulderPointNotClear, match="Let the sleeves hang down more"):
+        contour.find_sleeve_joints(outline)
+
+
+def _peak_scores(positions: list[int], n: int = 400) -> np.ndarray:
+    score = np.zeros(n)
+    score[positions] = 40.0
+    return score
+
+
+@pytest.mark.parametrize("neck_offset, ok", [(30, True), (55, False)])
+def test_req_geo_01_neck_pair_may_be_further_from_mirrored_than_the_hem_pairs(neck_offset, ok):
+    """REQ-GEO-01: six corners on an arc of 300 mm. Hem pairs are off from mirrored by 4 and 10 mm,
+    the neck pair by ``neck_offset``: the neck pair carries the sleeve top difference too, so it has
+    its own, larger tolerance (hem 25 mm, neck 40 mm)."""
+    other, arc = 100, 300
+    tol = get_config().contour.joints
+    assert tol.pair_tol_hem_mm < 30 < tol.pair_tol_neck_mm < 55   # the two cases sit between the tolerances
+    # positions on the arc, from the first underarm point: (outer), (middle), (neck)
+    pairs = [(20, 284), (60, 250), (100, 200 + neck_offset)]
+    score = _peak_scores([other + a for a, _ in pairs] + [other + b for _, b in pairs])
+    if ok:
+        got = contour._six_corners(score, other, other + arc, radius=5)
+        assert got == [other + 20, other + 60, other + 100, other + 230, other + 250, other + 284]
+    else:
+        with pytest.raises(ValueError, match="no 6 that mirror each other"):
+            contour._six_corners(score, other, other + arc, radius=5)
 
 
 def test_req_geo_01_whole_garment_with_no_underarm_is_an_error():
@@ -166,8 +240,9 @@ def test_req_geo_04_hard_tee_measurements_and_seams(hard_dir, client, tmp_path, 
 
 
 def test_req_geo_01_hard_tee_with_faint_kink_names_the_photo(hard_dir, client, tmp_path):
-    """REQ-GEO-01: tee1 (3 degree kink) is refused with ContourFailed that names the photo."""
-    with pytest.raises(ContourFailed, match=r"front photo .*not clear.*wider angle"):
+    """REQ-GEO-01: tee1 (3 degree kink) is refused with ContourFailed that names the photo, says
+    what to do and names the photo to take again."""
+    with pytest.raises(ContourFailed, match=r"front photo .*not clear.*Let the sleeves hang down more.*Take the front photo again"):
         run(hard_dir / "tee1", tmp_path / "out", client)
 
 
@@ -189,13 +264,39 @@ def test_req_scl_03_marker_passes_on_hard_photos_with_lens_and_curl(tmp_path):
     assert 0.003 < abs(span_error) < 0.03
 
 
-def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(tmp_path, client):
+@pytest.mark.parametrize("angle_deg", [11.0, 17.0, 29.0])
+def test_req_ver_02_expected_gap_leaves_out_every_point_nearest_the_armhole(angle_deg):
+    """REQ-VER-02: a paper point whose nearest body edge is the armhole ties with it (the same
+    distance, up to float noise). The tie must go to 'armhole' every time. Before, it went either
+    way, and the expected gap of a hard tee read 1.3 mm too high (and neck points of 40 mm counted)."""
+    a = np.radians(angle_deg)
+    rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    body = (shapely.segmentize(shapely.box(0, 0, 100, 100), 1.0).exterior.coords)
+    body = np.asarray(body)[:-1] @ rot.T
+    armhole = np.array([[100.0, 0.0], [100.0, 50.0], [100.0, 100.0]]) @ rot.T   # the right edge
+    paper = np.array([[10.0, 20.0], [70.0, 20.0], [70.0, 80.0], [10.0, 80.0]]) @ rot.T
+    gaps, neck_gaps = proof.expected_gaps(paper, body, (np.array([-9e3, 0.0]), np.array([-9e3, 1.0])),
+                                          armhole, centre_x_mm=-9e3)
+    assert len(neck_gaps) == 0
+    assert not np.isclose(gaps, 30.0, atol=1e-6).any()   # the paper's right edge is 30 mm from the armhole
+
+
+def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(hard_dir, tmp_path, client):
     """REQ-VER-02: wavy hand-cut paper with a lift shadow on a hard tee. The fold is found and the
-    measured mean gap is within 1.5 mm of the exact one (measured: 1.3 mm; the clean proof uses 0.5 mm)."""
+    measured mean gap is within 0.5 mm of the exact one (measured -0.09 mm; the clean proof uses 0.5 mm).
+
+    History: this test had abs=1.5 for a measured 1.3 mm under-read. The cause was the expected gap,
+    not the measurement: a paper point nearest the armhole or the neck is left out when that edge is
+    the nearest one, and the test of 'nearest' was made against a neck and armhole line that did not
+    match the body ring (an average of the right and left side) and had no tie rule.
+
+    Known open gaps (SPEC 10.1, not covered here, see the report): other seeds scatter by -0.4 to +0.6 mm;
+    paper edge wobble of 2 to 3 mm next to the fold puts fold points outside proof.fold_exclude_mm
+    (tee8, scale 1.02: +1.8 mm); a 3 to 4 mm bulge of the fold edge cuts the found fold short (tee3,
+    scale 0.98, seed 6: +15 mm)."""
     from sewtrace.vision.verify import verify_proof
 
-    hp = replace(synth_hard.hard_params(2), barrel_k1=0.0, curl_mm=0.0)
-    synth.make_tee_hard(_tee(2), tmp_path / "tee3", 2, hp)
+    shutil.copytree(hard_dir / "tee3", tmp_path / "tee3")   # the fixture's tee3 (no lens, no curl); proof files stay out of it
     truth = proof.make_proof_hard(tmp_path / "tee3", seed=5, scale=1.02, name="proof")
     photo = tmp_path / "tee3" / "proof.jpg"
     result = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))))
@@ -203,4 +304,4 @@ def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(tmp_path, client
     assert result.fold_mm is not None
     p0, p1 = np.asarray(result.fold_mm)
     assert np.linalg.norm(p1 - p0) > 250
-    assert result.mean_mm == pytest.approx(truth["expected_gap_mean_mm"], abs=1.5)
+    assert result.mean_mm == pytest.approx(truth["expected_gap_mean_mm"], abs=0.5)

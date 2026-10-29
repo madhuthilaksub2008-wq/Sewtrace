@@ -102,17 +102,24 @@ class JointsConfig(_Strict):
     corner_window_mm: float = Field(gt=0)
     underarm_min_deg: float = Field(gt=0, lt=180)
     corner_min_deg: float = Field(gt=0, lt=180)
-    pair_tol_mm: float = Field(gt=0)
+    pair_tol_hem_mm: float = Field(gt=0)
+    pair_tol_neck_mm: float = Field(gt=0)
     shoulder_symmetry_mm: float = Field(gt=0)
     shoulder_plateau_mm: float = Field(gt=0)
+    near_best: float = Field(gt=1)
     rounding_deg: float = Field(gt=0, lt=180)
     rounding_margin_mm: float = Field(ge=0)
+
+
+class LabelsConfig(_Strict):
+    corner_window_mm: float = Field(gt=0)
 
 
 class ContourConfig(_Strict):
     armhole: ArmholeConfig
     mask: MaskConfig
     joints: JointsConfig
+    labels: LabelsConfig
 
 
 class InferenceConfig(_Strict):

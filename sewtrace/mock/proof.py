@@ -33,6 +33,7 @@ from sewtrace.config import get_config
 from sewtrace.mock import synth
 
 PAPER_BGR = (238, 241, 243)
+TIE_MM = 1e-6   # a paper point is on the armhole or the neck when that edge is this close to as near as the body edge
 
 
 def paper_outline(half: np.ndarray, scale: float = 1.0, rotation_deg: float = 0.0,
@@ -60,6 +61,11 @@ def expected_gaps(
     points whose nearest body edge is the neck (the back neckline). Neck gaps are the
     left-out neck points. The body edge is the half on the paper's side of the tee centre
     line (plus the config margin).
+
+    ``armhole`` and ``neck`` must be the very edges the body ring was built from: a paper point
+    whose nearest body edge is one of them then ties with it, and the tie is broken by
+    TIE_MM, not by float noise. (A neck or armhole line that only looks like the body's, such
+    as the average of its right and left side, makes the tie random.)
     """
     cfg = get_config().proof
     ring = shapely.LinearRing(paper)
@@ -71,8 +77,8 @@ def expected_gaps(
     d_fold = np.asarray(shapely.distance(pts, shapely.LineString(list(fold))), float)
     d_neck = np.full(len(d_body), np.inf) if neck is None else np.asarray(
         shapely.distance(pts, shapely.LineString(neck)), float)
-    comparable = (d_fold >= cfg.fold_exclude_mm) & (d_armhole > d_body)
-    on_neck = comparable & (d_neck <= d_body)
+    comparable = (d_fold >= cfg.fold_exclude_mm) & (d_armhole > d_body + TIE_MM)
+    on_neck = comparable & (d_neck <= d_body + TIE_MM)
     return d_body[comparable & ~on_neck], d_body[on_neck]
 
 
@@ -147,7 +153,7 @@ def make_proof_hard(
     front = truth["photos"]["front"]
     origin = np.asarray(front["origin_mm"], float)
     half = np.asarray(front["half_outline_mm"], float)  # the pattern: front neck
-    visible = np.asarray(front["visible_half_outline_mm"], float)  # the mask: back neck
+    visible = np.asarray(front["visible_right_half_mm"], float)  # the right side of the mask: back neck, as built
     edges = {k: tuple(v) for k, v in front["edges"].items()}
     regions = {k: np.asarray(v) for k, v in front["regions_mm"].items() if k != "sleeves"}
     cut = synth_hard.wave_edges(half, edges, replace(hp, wave_mm=cut_wave_mm), view=3, side=0, skip=("fold",))
@@ -159,7 +165,7 @@ def make_proof_hard(
         {"body": [regions["body"]], "sleeve": [np.asarray(s) for s in front["regions_mm"]["sleeves"]]},
         [regions["garment"]], p.colour_bgr, rng, hp, overlays={"paper": ([paper], PAPER_BGR)})
     synth_hard.save(tee_dir, name, photo, masks, hp.jpeg_quality)
-    armhole = half[edges["armhole"][0] : edges["armhole"][1] + 1] + origin
+    armhole = visible[edges["armhole"][0] : edges["armhole"][1] + 1] + origin
     neck = visible[edges["neck"][0] : edges["neck"][1] + 1] + origin
     gaps, neck_gaps = expected_gaps(paper, regions["body_rounded"], fold, armhole, origin[0], neck=neck)
     proof = {

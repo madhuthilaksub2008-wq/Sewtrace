@@ -88,10 +88,14 @@ def expected_neck_gap_mm(spec: PanelSpec, step_mm: float = 2.0) -> float:
 
 
 def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
-    """(N, 2) largest external contour of a boolean mask, in mm."""
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not contours:
+    """(N, 2) outline of a boolean mask, in mm. The mask is cleaned like the front and back
+    photo masks (contour.clean_mask, REQ-GEO-01), so holes, nicks and stray blobs of a SAM mask
+    do not reach the outline."""
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
         raise ValueError("empty mask")
+    mask = contour.clean_mask(mask, contour.px_per_mm(homography, np.array([xs.mean(), ys.mean()])))
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     biggest = max(contours, key=cv2.contourArea)
     return homography.px_to_mm(biggest.reshape(-1, 2).astype(float))
 

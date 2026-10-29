@@ -81,6 +81,19 @@ def test_req_cap_03_page_shows_capture_rules_and_sleeve_diagram(client):
     assert html.index("Take the photos") < html.index("Run with my photos")
 
 
+def test_req_cap_03_page_shows_capture_tips(client):
+    """REQ-CAP-03: tips that keep the scale and the shoulder point right, before upload."""
+    html = client.get("/").text
+    for tip in ("Tape the marker card flat to the surface.",
+                "Put the marker close to the t-shirt, near the middle of one side.",
+                "Hold the camera directly above the t-shirt. Put the t-shirt in the middle of the frame.",
+                "Use the main lens. Do not use the wide-angle lens.",
+                "Let the sleeves hang down, so the sleeve top bends clearly away from the shoulder line."):
+        assert tip in html
+    assert html.index("Tips for good photos") < html.index("Run with my photos")
+    assert "\u2014" not in html[html.index("Tips for good photos") : html.index("<h3>The marker</h3>")]   # no em dash
+
+
 def test_req_cap_03_marker_pdf_is_100_mm_and_a_valid_marker():
     """REQ-SCL-01, SPEC 9.1: the black square is 100 mm on A4 and is ArUco DICT_4X4_50 id 0."""
     side = 100 * 72 / 25.4
