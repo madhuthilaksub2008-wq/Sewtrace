@@ -1,4 +1,4 @@
-"""Command line: sewtrace synth | run | eval | verify | day1."""
+"""Command line: sewtrace synth | run | eval | verify | serve | day1."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> None:
     v.add_argument("--spec", default=None,
                    help="spec.json of the cut pattern (default: out/<photo folder name>/spec.json, "
                         "the folder of 'sewtrace run <that folder>'); gives the expected neck gap")
+    sv = sub.add_parser("serve", help="start the one-page test UI (see docs/DEPLOY.md)")
+    sv.add_argument("--host", default="127.0.0.1", help="use 0.0.0.0 in a container")
+    sv.add_argument("--port", type=int, default=None, help="default: web.port in config.toml")
     d = sub.add_parser("day1", help="Day 1 test: ONE paid SAM call and ONE paid Spark call (REQ-API-09)")
     d.add_argument("photo")
     d.add_argument("--yes-spend", action="store_true",
@@ -67,6 +70,16 @@ def _dispatch(args: argparse.Namespace) -> None:
                       f"{change['to_mm']:.2f} mm (pair {change['pair']})")
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
+    elif args.cmd == "serve":
+        import uvicorn
+
+        from sewtrace.config import get_config
+        from sewtrace.web.app import WebConfigError, create_app
+        try:
+            app = create_app()
+        except WebConfigError as err:
+            _fail(err)
+        uvicorn.run(app, host=args.host, port=args.port or get_config().web.port)
     elif args.cmd == "day1":
         from sewtrace.day1 import run_day1
         run_day1(args.photo, yes_spend=args.yes_spend)

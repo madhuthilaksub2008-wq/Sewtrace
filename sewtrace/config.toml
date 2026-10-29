@@ -139,3 +139,8 @@ neck_search_mm = 15.0      # how far from the neck end of the shoulder line the 
 
 [ground_truth]
 repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third
+
+[web]                      # sewtrace serve: the one-page test UI (SPEC 6)
+max_upload_mb = 20         # per photo; a larger file is refused before any run
+job_retention_min = 120    # an uploaded job folder is deleted this long after it was created
+port = 8000

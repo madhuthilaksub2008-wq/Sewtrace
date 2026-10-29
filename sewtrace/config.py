@@ -160,6 +160,14 @@ class GroundTruthConfig(_Strict):
     repeat_tol_mm: float = Field(gt=0)
 
 
+class WebConfig(_Strict):
+    """The test web page (sewtrace serve). Not a pipeline value."""
+
+    max_upload_mb: float = Field(gt=0)  # per photo
+    job_retention_min: float = Field(gt=0)  # a finished job folder is deleted after this age
+    port: int = Field(ge=1, le=65535)
+
+
 class AppConfig(_Strict):
     api: ApiConfig
     models: ModelsConfig
@@ -173,6 +181,7 @@ class AppConfig(_Strict):
     measure: MeasureConfig
     marker: MarkerConfig
     ground_truth: GroundTruthConfig
+    web: WebConfig
 
     @property
     def reasoning_model(self) -> ModelConfig:

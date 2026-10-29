@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewtrace test page</title>
+<style>
+  :root { --ok:#1a7f37; --bad:#c62828; --ink:#222; --line:#d6d6d6; --soft:#f5f5f2; --accent:#1f5fbf; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.45 system-ui, sans-serif; color: var(--ink); margin: 0; background: #fff; }
+  header { position: sticky; top: 0; z-index: 2; background: #222; color: #fff; padding: 8px 16px;
+           display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; }
+  header b { font-size: 16px; }
+  .pill { padding: 1px 9px; border-radius: 10px; font-weight: 600; font-size: 13px; }
+  .MOCK { background: #e9b949; color: #222; } .REAL { background: #c62828; } .OFFLINE { background: #6b7280; }
+  main { max-width: 980px; margin: 0 auto; padding: 8px 16px 60px; }
+  section { border: 1px solid var(--line); border-radius: 8px; padding: 4px 16px 16px; margin: 16px 0; }
+  h2 { font-size: 18px; margin: 12px 0 6px; } h3 { font-size: 15px; margin: 14px 0 6px; }
+  .cols { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  .cols > * { flex: 1 1 280px; }
+  ol, ul { padding-left: 22px; margin: 6px 0; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #888; background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  label { display: block; margin: 6px 0; } input[type=file] { max-width: 100%; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 3px 8px; text-align: right; } th:first-child, td:first-child { text-align: left; }
+  td.ok, span.ok { color: var(--ok); font-weight: 600; } td.bad, span.bad { color: var(--bad); font-weight: 600; }
+  td.ok { background: #e8f5ea; } td.bad { background: #fdeaea; }
+  .photos { display: flex; flex-wrap: wrap; gap: 8px; } .photos figure { margin: 0; flex: 1 1 280px; }
+  img { max-width: 100%; height: auto; border: 1px solid var(--line); background: #fafafa; }
+  figcaption { font-size: 13px; color: #555; }
+  .msg { padding: 8px 12px; border-radius: 6px; margin: 8px 0; }
+  .msg.err { background: #fdeaea; border: 1px solid var(--bad); } .msg.info { background: var(--soft); border: 1px solid var(--line); }
+  .msg.warn { background: #fff6dd; border: 1px solid #e9b949; }
+  .links a { margin-right: 14px; }
+  .scroll { overflow-x: auto; }
+  .small { font-size: 13px; color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <b>Sewtrace test page</b>
+  <span>Mode <span id="mode" class="pill">...</span></span>
+  <span>Reasoning model <b id="model">...</b></span>
+  <span>Spent <b id="ledger">...</b> of <b id="limit">...</b></span>
+  <span id="busy" class="small"></span>
+</header>
+<main>
+<div id="modeNote"></div>
+
+<section id="capture">
+  <h2>1. Take the photos</h2>
+  <div class="cols">
+    <div>
+      <ol>
+        <li>Put the t-shirt on a flat surface with a colour that contrasts with the t-shirt.</li>
+        <li>Make the t-shirt flat with your hands. Remove all folds that are not part of the garment.</li>
+        <li>Put the marker on the surface, near the t-shirt. Do not put the marker on the t-shirt.</li>
+        <li>Hold the camera directly above the t-shirt.</li>
+        <li>Make sure that the full t-shirt and the full marker are in the frame.</li>
+        <li>Take the front photo.</li>
+        <li>Turn the t-shirt over. Do steps 2 to 5 again. Take the back photo.</li>
+        <li><b>Sleeve photo:</b> fold one sleeve flat along its underarm line. Put the fold on the left and the cap at the top. Do steps 3 to 5 again. Take the sleeve photo.</li>
+      </ol>
+      <h3>The marker</h3>
+      <ol>
+        <li><a href="/marker.pdf" target="_blank">Open the marker PDF.</a></li>
+        <li>Set the print scale to 100% ("Actual size").</li>
+        <li>Print the marker on matte paper.</li>
+        <li>Measure the black square with a steel ruler. The side must be 100 mm, plus or minus 0.5 mm.</li>
+        <li>Attach the marker to stiff card. Make sure that the card is flat.</li>
+      </ol>
+    </div>
+    <div>
+      <svg viewBox="0 0 270 235" width="100%" role="img" aria-label="Sleeve photo: fold on the left, cap at the top, whole marker in frame">
+        <rect x="2" y="2" width="266" height="231" fill="#e8e4da" stroke="#666" stroke-width="2"/>
+        <path d="M70 175 L70 48 Q105 18 150 52 Q165 62 190 175 Z" fill="#c8453d" stroke="#222" stroke-width="2"/>
+        <line x1="70" y1="40" x2="70" y2="185" stroke="#1f5fbf" stroke-width="3" stroke-dasharray="7 4"/>
+        <text x="10" y="112" font-size="13" fill="#1f5fbf" font-weight="700">FOLD</text>
+        <text x="10" y="127" font-size="12" fill="#1f5fbf" font-weight="700">on left</text>
+        <text x="84" y="22" font-size="13" font-weight="700" fill="#222">CAP at the top</text>
+        <text x="95" y="198" font-size="12" fill="#fff" font-weight="700">hem</text>
+        <rect x="205" y="150" width="50" height="50" fill="#111"/>
+        <rect x="215" y="160" width="10" height="10" fill="#fff"/><rect x="235" y="170" width="10" height="10" fill="#fff"/>
+        <rect x="215" y="180" width="20" height="10" fill="#fff"/>
+        <text x="262" y="222" font-size="11" fill="#222" text-anchor="end">marker in frame</text>
+      </svg>
+      <div class="small">Sleeve photo rule. The same rule holds for the front and back photos: the whole t-shirt and the whole marker are in the frame.</div>
+      <svg viewBox="0 0 270 120" width="100%" role="img" aria-label="Marker rule: print at 100 percent, black square 100 mm">
+        <rect x="20" y="10" width="70" height="70" fill="#111"/>
+        <rect x="34" y="24" width="14" height="14" fill="#fff"/><rect x="62" y="38" width="14" height="14" fill="#fff"/>
+        <rect x="34" y="52" width="28" height="14" fill="#fff"/>
+        <line x1="20" y1="94" x2="90" y2="94" stroke="#222" stroke-width="2"/>
+        <line x1="20" y1="88" x2="20" y2="100" stroke="#222" stroke-width="2"/><line x1="90" y1="88" x2="90" y2="100" stroke="#222" stroke-width="2"/>
+        <text x="30" y="112" font-size="12" font-weight="700">100 mm</text>
+        <text x="110" y="34" font-size="13" font-weight="700">Print at 100%</text>
+        <text x="110" y="52" font-size="12">Do not use "Fit to page".</text>
+        <text x="110" y="70" font-size="12">Measure the black square.</text>
+        <text x="110" y="88" font-size="12">Keep it flat and in frame.</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<section id="runBox">
+  <h2>2. Make a pattern</h2>
+  <div class="cols">
+    <form id="runForm">
+      <label>Front photo <input type="file" name="front" accept="image/jpeg,image/png"></label>
+      <label>Back photo <input type="file" name="back" accept="image/jpeg,image/png"></label>
+      <label>Sleeve photo <input type="file" name="sleeve" accept="image/jpeg,image/png"></label>
+      <button class="primary" id="runBtn" type="submit">Run with my photos</button>
+      <div class="small" id="uploadNote"></div>
+    </form>
+    <div>
+      <p>No photos yet? Use a synthetic tee. It has known measurements, so the page shows the error.</p>
+      <button id="sampleBtn" type="button">Try a sample tee</button>
+      <p class="small">REAL mode spends money on every run. Each run is checked against the budget limit.</p>
+    </div>
+  </div>
+  <div id="runMsg"></div>
+  <div id="runOut"></div>
+</section>
+
+<section id="proofBox">
+  <h2>3. Check the proof photo</h2>
+  <p>Cut the paper panel on the stitch line and put it on the t-shirt with its fold on the centre. Take one photo from above, with the marker in frame. The check uses the pattern of the last run.</p>
+  <div class="cols">
+    <form id="proofForm">
+      <label>Proof photo <input type="file" name="photo" accept="image/jpeg,image/png"></label>
+      <button class="primary" id="proofBtn" type="submit">Check my proof photo</button>
+    </form>
+    <div><button id="proofSampleBtn" type="button">Try the sample proof</button>
+      <div class="small">The sample proof is a paper panel cut 1% too big, for the sample tee.</div></div>
+  </div>
+  <div id="proofMsg"></div>
+  <div id="proofOut"></div>
+</section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === "class") el.className = v; else el.setAttribute(k, v); }
+  for (const kid of kids) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+const mm = (v, d = 1) => (v === null || v === undefined ? "n/a" : v.toFixed(d) + " mm");
+const signed = (v) => { v = Math.abs(v) < 0.05 ? 0 : v; return (v >= 0 ? "+" : "") + v.toFixed(1) + " mm"; };
+function note(box, kind, text, title) {
+  box.replaceChildren(h("div", {class: "msg " + kind}, title ? h("b", {}, title + ". ") : "", text));
+}
+async function api(url, opts) {
+  const res = await fetch(url, opts);
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok) {
+    const e = (body && body.error) || {title: "Request failed", message: "The server answered HTTP " + res.status + "."};
+    throw e;
+  }
+  return body;
+}
+
+let state = {};
+async function refreshStatus() {
+  try {
+    state = await api("/api/status");
+  } catch (e) { $("busy").textContent = "Server not reachable"; return; }
+  $("mode").textContent = state.mode; $("mode").className = "pill " + state.mode;
+  $("model").textContent = state.reasoning_model;
+  $("ledger").textContent = "$" + state.ledger_usd.toFixed(4);
+  $("limit").textContent = "$" + state.budget_limit_usd.toFixed(2);
+  $("busy").textContent = state.busy ? "A run is active" : "";
+  $("uploadNote").textContent = state.uploads_enabled ? "Limit " + state.max_upload_mb + " MB per photo. JPEG or PNG."
+    : "Mock mode: your own photos need REAL mode. Use the sample tee.";
+  const n = $("modeNote");
+  if (state.mode === "REAL") n.replaceChildren(h("div", {class: "msg warn"}, "REAL mode. Every run makes paid Meta calls."));
+  else if (state.mode === "MOCK") n.replaceChildren(h("div", {class: "msg info"}, "MOCK mode. No paid calls. Only the sample tee works. Real photos need REAL mode: set META_API_KEY and SEWTRACE_MOCK=0 on the server, and install the .[real] extra."));
+  else n.replaceChildren(h("div", {class: "msg info"}, "OFFLINE mode. Answers come from the cache only."));
+}
+
+function setBusy(on) { for (const id of ["runBtn", "sampleBtn", "proofBtn", "proofSampleBtn"]) $(id).disabled = on; }
+
+async function start(url, form, msgBox, outBox, render) {
+  outBox.replaceChildren();
+  setBusy(true);
+  note(msgBox, "info", "Starting...");
+  try {
+    const {id} = await api(url, {method: "POST", body: form});
+    await follow(id, msgBox, outBox, render);
+  } catch (e) {
+    note(msgBox, "err", e.message, e.title);
+  } finally { setBusy(false); refreshStatus(); }
+}
+
+async function follow(id, msgBox, outBox, render) {
+  for (;;) {
+    const job = await api("/api/jobs/" + id);
+    if (job.state === "running") { note(msgBox, "info", job.step + "..."); await new Promise((r) => setTimeout(r, 700)); continue; }
+    if (job.state === "error") {
+      note(msgBox, "err", job.error.message, job.error.title);
+      if (job.error.seam_log) outBox.replaceChildren(seamLog(job.error.seam_log, []));
+      return;
+    }
+    msgBox.replaceChildren();
+    render(id, job.result, outBox);
+    return;
+  }
+}
+
+const file = (id, name) => "/api/jobs/" + id + "/files/" + name;
+
+function renderRun(id, r, box) {
+  const out = [];
+  out.push(h("h3", {}, "Photos with the SAM mask outline"));
+  const photos = h("div", {class: "photos"});
+  for (const p of r.photos) photos.append(h("figure", {}, h("img", {src: file(id, p.file), alt: p.view + " photo with mask outline"}), h("figcaption", {}, p.view)));
+  out.push(photos);
+
+  out.push(h("h3", {}, "Measurements"));
+  const mt = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Measured"), ...(r.synthetic ? [h("th", {}, "Truth"), h("th", {}, "Error")] : [])));
+  for (const m of r.measurements) {
+    mt.append(h("tr", {}, h("td", {}, m.key.replace("_", " ")), h("td", {}, mm(m.value_mm)),
+      ...(r.synthetic ? [h("td", {}, mm(m.truth_mm)), h("td", {}, m.error_mm === null ? "n/a" : signed(m.error_mm))] : [])));
+  }
+  out.push(mt);
+
+  out.push(h("h3", {}, "Seam pairs"));
+  const st = h("table", {}, h("tr", {}, h("th", {}, "Pair (a ~ b)"), h("th", {}, "a"), h("th", {}, "b"), h("th", {}, "Diff b - a"), h("th", {}, "Allowed"), h("th", {}, "Status")));
+  for (const s of r.seams) {
+    st.append(h("tr", {}, h("td", {}, s.name), h("td", {}, mm(s.len_a_mm)), h("td", {}, mm(s.len_b_mm)), h("td", {}, signed(s.diff_mm)),
+      h("td", {}, signed(s.min_diff_mm) + " to " + signed(s.max_diff_mm)),
+      h("td", {class: s.ok ? "ok" : "bad"}, s.ok ? "OK" : "FAIL")));
+  }
+  out.push(st);
+  out.push(h("h3", {}, "Seam check log"));
+  out.push(seamLog(r.seam_log, r.seams.map((s) => s.name)));
+  out.push(h("p", {}, "Model calls: ", h("b", {}, r.model_calls), r.model_calls === 0 ? " (served from the cache)" : ""));
+
+  out.push(h("h3", {}, "Pattern preview"));
+  out.push(h("img", {src: file(id, r.preview), alt: "pattern panels preview"}));
+  const links = h("p", {class: "links"});
+  for (const name of r.downloads) links.append(h("a", {href: file(id, name), download: ""}, name === "spec" ? "spec.json" : "pattern." + name));
+  out.push(h("h3", {}, "Downloads"), links);
+  box.replaceChildren(...out);
+}
+
+function seamLog(log, names) {
+  if (!log.length) return h("p", {class: "small"}, "No log.");
+  const all = names.length ? names : [...new Set(log.flatMap((row) => Object.keys(row.diffs || {})))];
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Step"), ...all.map((n) => h("th", {}, n)), h("th", {}, "Change")));
+  for (const row of log) {
+    const failing = new Set(row.failing || []);
+    const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm` : JSON.stringify(c)).join("; ");
+    t.append(h("tr", {}, h("td", {}, row.iteration + " " + row.source),
+      ...all.map((n) => (n in (row.diffs || {})) ? h("td", {class: failing.has(n) ? "bad" : "ok"}, signed(row.diffs[n])) : h("td", {}, "")),
+      h("td", {}, applied)));
+  }
+  return h("div", {class: "scroll"}, t);
+}
+
+function renderProof(id, r, box) {
+  const out = [
+    h("p", {}, "Mean gap ", h("b", {}, mm(r.mean_mm, 2)), ", max ", h("b", {}, mm(r.max_mm, 2)), ", p95 ", h("b", {}, mm(r.p95_mm, 2)),
+      ". ", h("b", {class: r.pct_within >= 95 ? "ok" : "bad"}, r.pct_within.toFixed(1) + "%"), " of points are within " + r.tol_mm + " mm."),
+  ];
+  if (r.neck) {
+    let t = `Neck (information, not in the mean): ${r.neck.points} points, mean gap ${r.neck.mean_mm.toFixed(1)} mm.`;
+    if (r.neck.expected_mm !== null) t += ` Expected from the spec ${r.neck.expected_mm.toFixed(1)} mm, difference ${signed(r.neck.difference_mm)}.`;
+    out.push(h("div", {class: "msg " + (r.neck.flagged ? "warn" : "info")}, t, r.neck.flagged ? ` WARNING: the difference is more than ${r.neck.tol_mm} mm. Check the neck depths of the cut paper against spec.json.` : ""));
+  }
+  out.push(h("img", {src: file(id, r.overlay), alt: "proof overlay: green within tolerance, red elsewhere"}));
+  out.push(h("p", {class: "small"}, "Green: gap under " + r.tol_mm + " mm. Red: all other points. Grey: fold edge and neck, not compared. Model calls: " + r.model_calls + "."));
+  box.replaceChildren(...out);
+}
+
+$("runForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  start("/api/run", new FormData($("runForm")), $("runMsg"), $("runOut"), renderRun);
+});
+$("sampleBtn").addEventListener("click", () => {
+  const f = new FormData(); f.append("sample", "1");
+  start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
+});
+$("proofForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  start("/api/proof", new FormData($("proofForm")), $("proofMsg"), $("proofOut"), renderProof);
+});
+$("proofSampleBtn").addEventListener("click", () => {
+  const f = new FormData(); f.append("sample", "1");
+  start("/api/proof", f, $("proofMsg"), $("proofOut"), renderProof);
+});
+
+// A refresh keeps the last results and any run in progress.
+(async function init() {
+  await refreshStatus();
+  const latest = state.latest || {};
+  setInterval(refreshStatus, 5000);
+  try {
+    if (latest.run) { setBusy(true); await follow(latest.run, $("runMsg"), $("runOut"), renderRun); }
+    if (latest.proof) { await follow(latest.proof, $("proofMsg"), $("proofOut"), renderProof); }
+  } catch (e) { /* job was deleted: start clean */ } finally { setBusy(false); }
+})();
+</script>
+</body>
+</html>
