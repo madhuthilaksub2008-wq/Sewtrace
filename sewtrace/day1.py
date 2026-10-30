@@ -70,6 +70,15 @@ def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarra
     user can check by eye that they line up. Boxes are also printed next to the image size."""
     (width, height), boxes = client.sam_boxes(photo, prompt)
     print(f"SAM frame check: image {width} x {height} px (as cv2.imread reads it, EXIF applied)")
+    inspection = client.sam_inspect(photo, prompt)
+    sent, source = inspection.sent_wh, inspection.source_wh
+    print(f"  sent to SAM {sent[0]} x {sent[1]} px; SAM reported source "
+          + (f"{source[0]} x {source[1]} px" + ("" if source == sent else "  (DIFFERS from sent: resized on the server)")
+             if source else "size unreadable (sent size assumed)"))
+    for r in inspection.records:
+        conf = "none" if r.confidence is None else f"{r.confidence:.3f}"
+        print(f"  record {r.object_id}: confidence {conf}  bounds {r.bounds[0]:g},{r.bounds[1]:g} to "
+              f"{r.bounds[2]:g},{r.bounds[3]:g}  raster {r.raster_wh[0]} x {r.raster_wh[1]}")
     for object_id, left, top, right, bottom in boxes:
         print(f"  box {object_id}: left {left:g}  top {top:g}  right {right:g}  bottom {bottom:g}")
     if not boxes:

@@ -65,8 +65,8 @@ max_upload_px = 1568       # DAY 1 VALUE TO CONFIRM (REQ-API-02, SPEC 8.1, 13). 
 est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
 
 [sam]
-min_score = 0.5            # REQ-SEG-04: stop when the best mask scores less. The cookbook shows NO score on SAM
-                           # records. Without a score the check is skipped with a warning (SPEC conflict, Day 1).
+min_score = 0.5            # DAY 1 VALUE TO CONFIRM (REQ-SEG-04): stop when the best mask confidence (0..1, the mask
+                           # record's "c" field) is lower. Without a confidence the check is skipped with a warning.
 upload_jpeg_quality = 95   # SAM is sent the decoded pixels (EXIF applied), re-encoded as JPEG (after the max_upload_px downscale).
                            # PNG would be 3 to 5 times larger for a phone photo (payload and upload time), and
                            # SAM is billed per image, so size does not change the price. Q95 adds no visible edge.

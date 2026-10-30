@@ -54,21 +54,32 @@ H, W = 60, 80
 
 # ---- fakes -------------------------------------------------------------------------
 
-def _box(oid, left, top, right, bottom):
-    return NS(kind="box", object_id=oid, left=left, top=top, right=right, bottom=bottom)
+def _box(oid, left, top, right, bottom, confidence=None):
+    """Like meta_sam_parser's SegmentationBoxRecord (half-open box in the frame SAM saw)."""
+    return NS(kind="box", object_id=oid, left=left, top=top, right=right, bottom=bottom, confidence=confidence)
 
 
-def _mask(oid, w, h, fill=None, **extra):
-    return NS(kind="mask", object_id=oid, mask=NS(width=w, height=h, encoding="lossless", data=fill), **extra)
+def _mask(oid, w, h, fill=None, at=None, confidence=None):
+    """Like SegmentationMaskRecord. ``w`` x ``h`` is the RASTER size (mask.width, mask.height); ``at`` is the
+    half-open ``bounds`` (left, top, right, bottom) in the SAM frame, default the whole raster at (0, 0)."""
+    left, top, right, bottom = at if at is not None else (0, 0, w, h)
+    return NS(kind="mask", object_id=oid, mask=NS(width=w, height=h, encoding="lossless", payload="~", data=fill),
+              bounds=NS(left=left, top=top, right=right, bottom=bottom), confidence=confidence)
 
 
-def _result(records, status="completed", diagnostics=()):
-    return NS(outcome=NS(status=status), diagnostics=list(diagnostics), records=list(records))
+def _raw(w, h, n=1):
+    """raw_output text with ``n`` box lines carrying the source size, as the API writes them."""
+    return "\n".join(f"<0f>{i}<|box;x1=0;y1=0;x2=1;y2=1;w={w};h={h};c=0.9|><|mask;x=0;y=0;data=1,1,~AA|>"
+                      for i in range(n))
+
+
+def _result(records, status="completed", diagnostics=(), raw_output=""):
+    return NS(outcome=NS(status=status), diagnostics=list(diagnostics), records=list(records), raw_output=raw_output)
 
 
 def _decode(mask):
-    """Fake of decode_mask_to_raster: a flat row-major list. ``data`` None means all foreground."""
-    return mask.data if mask.data is not None else [1] * (mask.width * mask.height)
+    """Fake of decode_mask_to_raster: ``bytes`` of width*height, row-major, 0 or 1. ``data`` None means all foreground."""
+    return bytes(mask.data) if mask.data is not None else b"\x01" * (mask.width * mask.height)
 
 
 def _fake_parser(result, seen=None):
@@ -245,10 +256,10 @@ def test_req_seg_01_output_text_done_is_synthesized_once():
 
 # ---- SAM decoding (REQ-SEG-01, REQ-SEG-03) ------------------------------------------------
 
-def test_req_seg_01_box_local_mask_is_placed_at_the_box_top_left():
-    """UNCONFIRMED layout (Day 1): the mask is as large as its box and sits at the box top-left."""
+def test_req_seg_01_box_local_mask_is_placed_at_the_bounds_top_left():
+    """meta_sam_parser 0.1.0: the raster is box-local and is placed at bounds.left, bounds.top."""
     data = [1, 0, 0, 1, 1, 1]  # 3 wide, 2 high: [[1,0,0],[1,1,1]]
-    result = _result([_box("0", 10, 5, 13, 7), _mask("0", 3, 2, data)])
+    result = _result([_box("0", 10, 5, 13, 7), _mask("0", 3, 2, data, at=(10, 5, 13, 7))])
     (res,) = sam_results_from(result, _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
     expected = np.zeros((H, W), bool)
     expected[5, 10] = True
@@ -257,48 +268,86 @@ def test_req_seg_01_box_local_mask_is_placed_at_the_box_top_left():
     assert res.score is None
 
 
-def test_req_seg_01_cookbook_sizes_box_width_is_right_minus_left():
-    result = _result([_box("0", 751, 290, 925, 493), _mask("0", 174, 203)])
+def test_req_seg_01_decode_returns_bytes_that_are_read_row_major():
+    """Day 1 bug: np.asarray(bytes) is one 0-d value. The raster must be frombuffer(...).reshape(h, w)."""
+    data = bytes([1, 0, 0, 0, 0, 1])  # 3 x 2
+    (res,) = sam_results_from(_result([_mask("0", 3, 2, data, at=(0, 0, 3, 2))]), _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert res.mask[0, 0] and res.mask[1, 2] and res.mask.sum() == 2
+
+
+def test_req_seg_01_raster_is_resized_to_its_bounds():
+    """The raster has its own size. Day 1: 'decodes to 1 values, expected 1024 x 710'. Here 4 x 2 covers 8 x 4."""
+    data = [1, 1, 0, 0, 1, 1, 0, 0]  # left half foreground
+    result = _result([_mask("0", 4, 2, data, at=(10, 20, 18, 24))])
+    (res,) = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert res.mask[20:24, 10:14].all() and not res.mask[20:24, 14:18].any() and res.mask.sum() == 16
+
+
+def test_req_seg_01_cookbook_sizes_bounds_width_is_right_minus_left():
+    result = _result([_box("0", 751, 290, 925, 493), _mask("0", 174, 203, at=(751, 290, 925, 493))])
     (res,) = sam_results_from(result, _decode, (600, 1000), "ducks.jpg", "duck", box_tol_px=TOL)
     assert res.mask.sum() == 174 * 203
     ys, xs = np.nonzero(res.mask)
     assert (xs.min(), xs.max(), ys.min(), ys.max()) == (751, 924, 290, 492)
 
 
-def test_req_seg_01_full_image_mask_is_used_as_is_and_box_within_one_px_is_clipped():
-    full = _result([_mask("0", W, H)])
-    assert sam_results_from(full, _decode, (H, W), "p", "x", box_tol_px=TOL)[0].mask.all()
-    # Rounding: a box 1 px past the edge is clipped, as before.
-    edge = _result([_box("0", W - 2, H - 1, W + 1, H + 1), _mask("0", 3, 2)])
+def test_req_seg_01_bounds_within_one_px_of_the_edge_are_clipped():
+    edge = _result([_mask("0", 3, 2, at=(W - 2, H - 1, W + 1, H + 1))])
     (res,) = sam_results_from(edge, _decode, (H, W), "p", "x", box_tol_px=TOL)
     assert res.mask.sum() == 2 and res.mask[H - 1, W - 2:].all()
 
 
-def test_req_seg_01_box_past_the_image_by_more_than_one_px_is_an_error_not_a_clip():
-    """Stricter than the old clipping test: a box outside the frame means the frames differ."""
-    past = _result([_box("0", W - 2, H - 1, W + 3, H + 2), _mask("0", 5, 3)])
+def test_req_seg_01_bounds_past_the_image_by_more_than_one_px_are_an_error_not_a_clip():
+    past = _result([_mask("0", 5, 3, at=(W - 2, H - 1, W + 3, H + 2))])
     with pytest.raises(ApiError, match=r"p\.jpg.*different pixel frames"):
         sam_results_from(past, _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
-    negative = _result([_box("0", -3, 0, 2, 2), _mask("0", 5, 2)])
+    negative = _result([_mask("0", 5, 2, at=(-3, 0, 2, 2))])
     with pytest.raises(ApiError, match="different pixel frames"):
         sam_results_from(negative, _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
 
 
-def test_req_seg_01_unexpected_mask_size_is_an_error_not_a_guess():
-    with pytest.raises(ApiError, match="neither the image"):
-        sam_results_from(_result([_box("0", 0, 0, 10, 10), _mask("0", 7, 7)]), _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
-    with pytest.raises(ApiError, match="decodes to"):
+def test_req_seg_01_wrong_decoded_length_and_empty_bounds_are_errors():
+    with pytest.raises(ApiError, match=r"p\.jpg.*decodes to 2 values, expected 80 x 60"):
         sam_results_from(_result([_mask("0", W, H, [1, 1])]), _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
+    with pytest.raises(ApiError, match="empty bounds"):
+        sam_results_from(_result([_mask("0", 3, 3, at=(5, 5, 5, 8))]), _decode, (H, W), "p.jpg", "t-shirt", box_tol_px=TOL)
 
 
-def test_req_seg_03_score_attribute_is_used_when_the_record_has_one():
-    result = _result([_box("0", 0, 0, 5, 5), _mask("0", 5, 5, score=0.4),
-                      _box("1", 20, 20, 30, 30), _mask("1", 10, 10, score=0.9)])
+def test_req_seg_01_source_size_is_read_from_the_box_lines_and_never_crashes():
+    from sewtrace.api.client import sam_source_hw
+    assert sam_source_hw(_raw(1024, 710, n=2)) == (710, 1024)
+    assert sam_source_hw(_raw(1024, 710) + "\n" + _raw(500, 400)) is None  # boxes disagree
+    for bad in ("", "no boxes here", "<|box;w=abc;h=5|>", "<|box;w=0;h=5|>", "<|box;h=5|>", "<|box;w=5|", None, 7):
+        assert sam_source_hw(bad) is None
+
+
+def test_req_seg_01_server_side_resize_is_mapped_with_the_reported_source_size(caplog):
+    """We sent 80 x 60 but SAM worked on 160 x 120: bounds are in the 160 x 120 frame."""
+    data = [1] * 20 * 10
+    result = _result([_mask("0", 20, 10, data, at=(40, 20, 60, 30))], raw_output=_raw(160, 120))
+    with caplog.at_level("WARNING", logger="sewtrace.api.client"):
+        (res,) = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert "resized on the server" in caplog.text
+    ys, xs = np.nonzero(res.mask)
+    assert (xs.min(), xs.max(), ys.min(), ys.max()) == (20, 29, 10, 14)  # halved into the 80 x 60 frame
+
+
+def test_req_seg_01_unreadable_source_size_keeps_the_sent_size():
+    result = _result([_mask("0", 4, 4, at=(1, 1, 5, 5))], raw_output="garbage <|box;w=|>")
+    (res,) = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert res.mask.sum() == 16
+
+
+def test_req_seg_03_confidence_of_the_mask_record_is_the_score():
+    result = _result([_mask("0", 5, 5, confidence=0.4), _mask("1", 10, 10, at=(20, 20, 30, 30), confidence=0.9)])
     results = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
     assert [r.score for r in results] == [0.4, 0.9]
-    assert select_best(results).score == 0.9  # the higher score wins although its mask is bigger anyway
+    assert select_best(results).score == 0.9
     small_but_sure = [SamResult(mask=np.ones((2, 2), bool), score=0.9), SamResult(mask=np.ones((9, 9), bool), score=0.5)]
     assert select_best(small_but_sure).score == 0.9
+    # The box confidence is not the mask confidence (REQ-SEG-03 asks for the mask).
+    boxed = _result([_box("0", 0, 0, 5, 5, confidence=0.99), _mask("0", 5, 5)])
+    assert sam_results_from(boxed, _decode, (H, W), "p", "x", box_tol_px=TOL)[0].score is None
 
 
 def test_req_seg_03_no_score_stand_in_picks_largest_mask_and_does_not_fake_a_score():
@@ -313,7 +362,7 @@ def test_req_seg_03_no_score_stand_in_picks_largest_mask_and_does_not_fake_a_sco
 
 
 def test_req_seg_04_missing_score_skips_threshold_with_a_warning(tmp_path, photo, monkeypatch, caplog):
-    records = [_box("0", 0, 0, 5, 5), _mask("0", 5, 5), _box("1", 10, 10, 30, 30), _mask("1", 20, 20)]
+    records = [_mask("0", 5, 5), _mask("1", 20, 20, at=(10, 10, 30, 30))]
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
     client = _client(tmp_path)
     with caplog.at_level("WARNING", logger="sewtrace.api.client"):
@@ -327,9 +376,9 @@ def test_req_seg_04_missing_score_skips_threshold_with_a_warning(tmp_path, photo
 
 
 def test_req_seg_04_score_below_threshold_still_stops_when_the_parser_gives_one(tmp_path, photo, monkeypatch):
-    records = [_box("0", 0, 0, 5, 5), _mask("0", 5, 5, score=0.1)]
+    records = [_mask("0", 5, 5, confidence=0.1)]
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
-    with pytest.raises(SegmentationFailed, match="below"):
+    with pytest.raises(SegmentationFailed, match=r"p\.jpg.*'t-shirt'.*below"):
         _client(tmp_path).segment(photo, "t-shirt")
 
 
@@ -369,10 +418,10 @@ def test_req_seg_01_missing_parser_names_the_fix_and_makes_no_call(tmp_path, pho
 
 
 def test_req_api_02_raw_events_are_cached_so_a_decoding_error_is_not_paid_twice(tmp_path, photo, monkeypatch):
-    bad = _result([_box("0", 0, 0, 10, 10), _mask("0", 7, 7)])
+    bad = _result([_mask("0", 7, 7, [1, 1])])
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(bad))
     client = _client(tmp_path)
-    with pytest.raises(ApiError, match="neither the image"):
+    with pytest.raises(ApiError, match="decodes to 2 values"):
         client.segment(photo, "t-shirt")
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
     assert client.segment(photo, "t-shirt").all()  # decoded from the stored events
@@ -391,7 +440,7 @@ def test_pyproject_has_real_extra_with_the_parser():
     """C-08."""
     root = Path(__file__).resolve().parent.parent
     extras = tomllib.loads((root / "pyproject.toml").read_text())["project"]["optional-dependencies"]
-    assert extras["real"] == ["meta_sam_parser"]
+    assert extras["real"] == ["meta_sam_parser==0.1.0"]
     assert "meta_sam_parser" not in "".join(tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"])
 
 
@@ -546,11 +595,13 @@ def test_req_api_09_day1_prints_fail_when_the_answer_does_not_validate(tmp_path,
 
 
 def test_req_seg_01_day1_prints_boxes_next_to_image_size_and_writes_overlay(tmp_path, photo, monkeypatch, capsys):
-    records = [_box("0", 10, 5, 30, 25), _mask("0", 20, 20)]
-    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
+    records = [_box("0", 10, 5, 30, 25), _mask("0", 10, 10, at=(10, 5, 30, 25), confidence=0.875)]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=_raw(W, H))))
     run_day1(photo, yes_spend=True, client=_client(tmp_path), out_dir=tmp_path / "o")
     out = capsys.readouterr().out
     assert f"image {W} x {H} px" in out and "box 0: left 10  top 5  right 30  bottom 25" in out
+    assert "record 0: confidence 0.875  bounds 10,5 to 30,25  raster 10 x 10" in out
+    assert f"sent to SAM {W} x {H} px; SAM reported source {W} x {H} px" in out and "DIFFERS" not in out
     overlay = cv2.imread(str(tmp_path / "o" / "p.sam_overlay.png"))
     assert overlay.shape == (H, W, 3)
     assert overlay[15, 20, 2] > overlay[15, 20, 0]  # mask area is shaded red
@@ -619,7 +670,7 @@ def test_req_seg_01_unreadable_photo_is_an_error_before_any_call(tmp_path, monke
 
 
 def test_req_seg_01_box_outside_the_sent_frame_stops_the_run(tmp_path, photo, monkeypatch):
-    records = [_box("0", 0, 0, W + 40, H + 40), _mask("0", W + 40, H + 40)]
+    records = [_mask("0", W + 40, H + 40)]
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
     with pytest.raises(ApiError, match="different pixel frames"):
         _client(tmp_path).segment(photo, "t-shirt")
@@ -644,10 +695,10 @@ def test_req_api_02_stream_without_completed_is_billed_but_not_cached(tmp_path, 
 
 def test_req_api_02_decoder_version_reuses_events_and_redecodes(tmp_path, photo, monkeypatch):
     seen: list[dict] = []
-    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10)]), seen))
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10, [1, 1, 1])]), seen))
     client = _client(tmp_path)
-    with pytest.raises(ApiError, match="neither the image"):
-        client.segment(photo, "t-shirt")  # 10 x 10 mask without a box: decoder cannot place it
+    with pytest.raises(ApiError, match="decodes to 3 values"):
+        client.segment(photo, "t-shirt")  # a short raster: the decoder rejects it
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
     assert client.segment(photo, "t-shirt").all()
     monkeypatch.setattr(client_mod, "SAM_DECODE_VERSION", client_mod.SAM_DECODE_VERSION + 1)
@@ -659,7 +710,7 @@ def test_req_api_02_decoder_version_reuses_events_and_redecodes(tmp_path, photo,
 
 def test_req_api_08_offline_redecodes_stored_events_and_misses_cleanly_without_them(tmp_path, photo, monkeypatch):
     from sewtrace.api.client import CacheMiss
-    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10)])))
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", 10, 10, [1, 1, 1])])))
     online = _client(tmp_path)
     with pytest.raises(ApiError):
         online.segment(photo, "t-shirt")  # events cached, mask not decodable yet

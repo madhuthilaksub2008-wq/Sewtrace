@@ -42,6 +42,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import time
@@ -71,7 +72,7 @@ Transport = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any
 
 # Bump when ``sam_results_from`` or the mask decoding changes. It is part of the key of the decoded
 # mask only, so the stored raw events are reused and a decoder fix needs no new paid call.
-SAM_DECODE_VERSION = 2
+SAM_DECODE_VERSION = 3  # 3: box-local raster is resized to its bounds; confidence comes from the record
 
 PARSER_MISSING = (
     "SAM 3.1 output is decoded with Meta's meta_sam_parser, which is not installed. "
@@ -143,15 +144,40 @@ class SegmentationFailed(ApiError):
 
 
 class SamResult(BaseModel):
-    """One mask SAM returned, full image size, with its score if the API gave one.
+    """One mask SAM returned, full image size, with its confidence if the API gave one.
 
-    The cookbook shows no score on SAM records (SPEC conflict with REQ-SEG-03 and 04).
-    ``score`` is None when the parsed record has no score or confidence attribute."""
+    ``score`` is the mask record's ``confidence`` (0..1). It is None when SAM sent none (or an
+    out-of-range value): the parser keeps None and does not mean zero."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     mask: np.ndarray  # bool, H x W
     score: float | None = None
+
+
+class SamRecordInfo(BaseModel):
+    """One SAM mask record for the Day 1 report. ``bounds`` and ``box_in_photo`` are
+    (left, top, right, bottom); ``bounds`` is in SAM's frame, ``box_in_photo`` in the original photo."""
+
+    model_config = ConfigDict(frozen=True)
+
+    object_id: str
+    confidence: float | None
+    bounds: tuple[float, float, float, float]
+    raster_wh: tuple[int, int]
+    box_in_photo: tuple[float, float, float, float] | None
+
+
+class SamInspection(BaseModel):
+    """Stored SAM answer in plain numbers. Sizes are (width, height) in px; ``source_wh`` is None
+    when SAM's box lines carry no readable size."""
+
+    model_config = ConfigDict(frozen=True)
+
+    image_wh: tuple[int, int]
+    sent_wh: tuple[int, int]
+    source_wh: tuple[int, int] | None
+    records: list[SamRecordInfo]
 
 
 class HttpError(Exception):
@@ -297,9 +323,9 @@ class MetaClient:
         score are cached together, so the threshold is checked on every call and a low
         score is never paid for twice.
 
-        SPEC CONFLICT, for the user to decide on Day 1: the cookbook shows no score on SAM
-        records. When the masks carry no score, the largest mask wins and the min_score check
-        is skipped with a warning. It is never faked as 1.0."""
+        The score is the mask record's ``confidence``. When SAM sends none for some mask (stand-in,
+        see ``select_best``), the largest mask wins and the min_score check is skipped with a
+        warning. It is never faked as 1.0."""
         image_path = Path(image_path)
         key = self._sam_key(image_path, prompt, decoded=True)
         cached, cached_score = self._cache_file(key, ".png"), self._cache_file(key, ".score.json")
@@ -330,7 +356,7 @@ class MetaClient:
         if best.score is None:
             log.warning(
                 "segment %s %r: SAM gave no score, so the min_score check (%g) is skipped. "
-                "Check the mask by eye. (SPEC conflict with REQ-SEG-04, Day 1.)",
+                "Check the mask by eye. (SAM sent no mask confidence.)",
                 image_path.name, prompt, min_score,
             )
         elif best.score < min_score:
@@ -419,17 +445,37 @@ class MetaClient:
     def sam_boxes(self, image_path: str | Path, prompt: str) -> tuple[tuple[int, int], list[tuple[str, float, float, float, float]]]:
         """``((width, height), [(object_id, left, top, right, bottom), ...])`` of the cached SAM
         answer, in the pixel frame of the decoded photo (the original, not the downscaled upload).
-        Never calls the API: it needs the stored raw events (Day 1 uses it to check the box frame
-        by eye)."""
+        Uses the same frame mapping as ``segment``. Never calls the API: it needs the stored raw
+        events (Day 1 uses it to check the box frame by eye)."""
+        inspection = self.sam_inspect(image_path, prompt)
+        return inspection.image_wh, [(r.object_id, *r.box_in_photo) for r in inspection.records if r.box_in_photo]
+
+    def sam_inspect(self, image_path: str | Path, prompt: str) -> SamInspection:
+        """What SAM returned for a stored answer: per record confidence, bounds, raster size, and the
+        source size SAM reported against the size we sent. Never calls the API."""
         image_path = Path(image_path)
         if not self._events_file(image_path, prompt).exists():
             raise CacheMiss(f"no stored SAM answer for {image_path.name!r} with prompt {prompt!r}; segment it first.")
         _, image, result = self._sam_parsed(image_path, prompt)
-        sent_h, sent_w = _fitted_hw(*image.shape[:2], self.config.sam.max_upload_px)
-        sx, sy = image.shape[1] / sent_w, image.shape[0] / sent_h
-        boxes = [(str(r.object_id), float(r.left) * sx, float(r.top) * sy, float(r.right) * sx, float(r.bottom) * sy)
-                 for r in result.records if r.kind == "box"]
-        return (image.shape[1], image.shape[0]), boxes
+        sent_hw = _fitted_hw(*image.shape[:2], self.config.sam.max_upload_px)
+        frame_h, frame_w = sam_frame_hw(result, sent_hw)
+        sx, sy = image.shape[1] / frame_w, image.shape[0] / frame_h
+        boxes = {str(r.object_id): r for r in result.records if r.kind == "box"}
+        records: list[SamRecordInfo] = []
+        for r in (r for r in result.records if r.kind == "mask"):
+            b = r.bounds
+            box = boxes.get(str(r.object_id))
+            records.append(SamRecordInfo(
+                object_id=str(r.object_id), confidence=r.confidence,
+                bounds=(float(b.left), float(b.top), float(b.right), float(b.bottom)),
+                raster_wh=(int(r.mask.width), int(r.mask.height)),
+                box_in_photo=None if box is None else (float(box.left) * sx, float(box.top) * sy,
+                                                       float(box.right) * sx, float(box.bottom) * sy),
+            ))
+        reported = sam_source_hw(getattr(result, "raw_output", None))
+        return SamInspection(
+            image_wh=(image.shape[1], image.shape[0]), sent_wh=(sent_hw[1], sent_hw[0]),
+            source_wh=None if reported is None else (reported[1], reported[0]), records=records)
 
     def _sam_parsed(self, image_path: Path, prompt: str) -> tuple[Any, np.ndarray, Any]:
         parser = _load_sam_parser()
@@ -798,74 +844,96 @@ def _parse_sam_events(parser: Any, events: list[dict[str, Any]]) -> Any:
     return result
 
 
-def _record_score(*records: Any) -> float | None:
-    """A score the parser exposes on a record, if any. Attribute names are a guess (the cookbook
-    shows none), so this stays None unless a numeric ``score`` or ``confidence`` exists."""
-    for record in records:
-        for name in ("score", "confidence"):
-            value = getattr(record, name, None)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                return float(value)
-    return None
+# One box token of the wire grammar, e.g. ``<|box;x1=1;y1=2;x2=3;y2=4;w=1024;h=710;c=0.9|>``. ``w`` and ``h``
+# are the size of the frame SAM processed (meta_sam_parser reads them as source_width and source_height
+# but does not keep them on the record).
+_BOX_TOKEN = re.compile(r"<\|box;([^|]*)\|>")
+_UINT = re.compile(r"[0-9]+")
+
+
+def sam_source_hw(raw_output: object) -> tuple[int, int] | None:
+    """``(height, width)`` of the frame SAM reports in its box lines, or None when the text has no box
+    token, a token without a valid ``w`` and ``h``, or boxes that disagree. Never raises."""
+    if not isinstance(raw_output, str):
+        return None
+    sizes: set[tuple[int, int]] = set()
+    for token in _BOX_TOKEN.finditer(raw_output):
+        fields = {k.strip(): v.strip() for k, _, v in (f.partition("=") for f in token.group(1).split(";"))}
+        w, h = fields.get("w", ""), fields.get("h", "")
+        if _UINT.fullmatch(w) and _UINT.fullmatch(h) and int(w) > 0 and int(h) > 0:
+            sizes.add((int(h), int(w)))
+    return next(iter(sizes)) if len(sizes) == 1 else None
+
+
+def sam_frame_hw(result: Any, sent_hw: tuple[int, int]) -> tuple[int, int]:
+    """``(height, width)`` of the frame the SAM coordinates are in: the size SAM reports, else the
+    size we sent. A difference means the server resized the photo; the reported size is then right."""
+    reported = sam_source_hw(getattr(result, "raw_output", None))
+    if reported is None:
+        log.info("SAM did not report a readable source size, so the sent size %d x %d px is assumed.",
+                 sent_hw[1], sent_hw[0])
+        return sent_hw
+    if reported != sent_hw:
+        log.warning("SAM worked on a %d x %d px frame, but %d x %d px was sent (resized on the server). "
+                    "Coordinates are mapped with the size SAM reported.", reported[1], reported[0], sent_hw[1], sent_hw[0])
+    return reported
+
+
+def _raster_of(mask: Any, decode_mask: Callable[[Any], bytes], photo: str, object_id: str) -> np.ndarray:
+    """Bool ``height x width`` raster of one mask record. The parser returns ``width * height`` bytes,
+    row-major, one per pixel (0 or 1)."""
+    mw, mh = int(mask.width), int(mask.height)
+    raw = decode_mask(mask)
+    if len(raw) != mw * mh:
+        raise ApiError(f"{photo}: SAM mask {object_id} decodes to {len(raw)} values, expected {mw} x {mh}.")
+    return np.frombuffer(raw, dtype=np.uint8).reshape(mh, mw) > 0
 
 
 def sam_results_from(
-    result: Any, decode_mask: Callable[[Any], Any], image_hw: tuple[int, int], photo: str, prompt: str,
+    result: Any, decode_mask: Callable[[Any], bytes], image_hw: tuple[int, int], photo: str, prompt: str,
     *, box_tol_px: float, full_hw: tuple[int, int] | None = None,
 ) -> list[SamResult]:
-    """Parsed segmentation records -> full-image boolean masks.
+    """Parsed segmentation records -> full-image boolean masks (meta_sam_parser 0.1.0 contract).
 
-    UNCONFIRMED (Day 1, REQ-API-09): in the cookbook example each mask is as large as its box
-    (174 x 203 for box 751..925 x 290..493), so a mask is read as a raster local to its box and
-    placed at the box top-left. A mask the size of the whole image is used as it is. Any other
-    size is an error, not a guess. The raster is read as row-major, any non-zero value is
-    foreground.
+    Each mask record holds a raster of its own size (``mask.width`` x ``mask.height``) and half-open
+    ``bounds`` in the frame SAM processed. The raster is resized to the bounds and placed at
+    (left, top). Its score is the record's ``confidence`` (None when SAM sent none).
 
-    ``image_hw`` must be the shape of the pixels that were sent to SAM. Photos are downscaled
-    before the upload (``sam.max_upload_px``), so pass the original shape as ``full_hw``: boxes and
-    masks are then scaled back to that frame, which keeps the mm geometry unchanged. A box that
-    passes the original image by more than ``box_tol_px`` means the two frames differ (EXIF
-    rotation, server-side resize): that is an error, never a clip, since it would misplace the
-    mask in mm silently. One sent pixel is rounding noise, so the tolerance is ``box_tol_px``
-    sent pixels, measured in the original frame (``box_tol_px`` times the larger scale factor)."""
-    height, width = image_hw
+    ``image_hw`` is the shape of the pixels that were sent to SAM. The coordinate frame is the size SAM
+    reports in its box lines (``sam_frame_hw``), which is ``image_hw`` unless the server resized the photo.
+    Photos are downscaled before the upload (``sam.max_upload_px``), so pass the original shape as
+    ``full_hw``: masks are scaled back to that frame, which keeps the mm geometry unchanged. Bounds that
+    pass the frame by more than ``box_tol_px`` mean the frames differ (EXIF rotation): that is an error,
+    never a clip, since it would misplace the mask in mm silently."""
+    height, width = sam_frame_hw(result, image_hw)
     full_h, full_w = full_hw or image_hw
     sx, sy = full_w / width, full_h / height
     tol_px = box_tol_px * max(sx, sy)
-    boxes = {r.object_id: r for r in result.records if r.kind == "box"}
     out: list[SamResult] = []
     for record in (r for r in result.records if r.kind == "mask"):
-        mw, mh = int(record.mask.width), int(record.mask.height)
-        flat = np.asarray(decode_mask(record.mask))
-        if flat.size != mw * mh:
-            raise ApiError(f"{photo}: SAM mask {record.object_id} decodes to {flat.size} values, "
-                           f"expected {mw} x {mh}.")
-        raster = flat.reshape(mh, mw) > 0
-        box = boxes.get(record.object_id)
-        if box is not None and (box.left * sx < -tol_px or box.top * sy < -tol_px
-                                or box.right * sx > full_w + tol_px or box.bottom * sy > full_h + tol_px):
+        raster = _raster_of(record.mask, decode_mask, photo, str(record.object_id))
+        b = record.bounds
+        left, top, right, bottom = round(b.left), round(b.top), round(b.right), round(b.bottom)
+        if right <= left or bottom <= top:
+            raise ApiError(f"{photo}: SAM mask {record.object_id} for {prompt!r} has empty bounds "
+                           f"({left}, {top}) to ({right}, {bottom}).")
+        if left * sx < -tol_px or top * sy < -tol_px or right * sx > full_w + tol_px or bottom * sy > full_h + tol_px:
             raise ApiError(
-                f"{photo}: SAM box {record.object_id} for {prompt!r} is ({box.left * sx:g}, {box.top * sy:g}) to "
-                f"({box.right * sx:g}, {box.bottom * sy:g}), but the image is {full_w} x {full_h} px. The box and the "
+                f"{photo}: SAM mask {record.object_id} for {prompt!r} is ({left * sx:g}, {top * sy:g}) to "
+                f"({right * sx:g}, {bottom * sy:g}), but the image is {full_w} x {full_h} px. The mask and the "
                 "photo use different pixel frames (EXIF rotation or a resize on the server). The mask "
                 "would land in the wrong place, so no mask was used. Run 'sewtrace day1' and check the overlay.")
+        bw, bh = right - left, bottom - top
+        if raster.shape != (bh, bw):  # the raster has its own size; linear then 0.5 keeps a smooth edge
+            raster = cv2.resize(raster.astype(np.float32), (bw, bh), interpolation=cv2.INTER_LINEAR) > 0.5
         full = np.zeros((height, width), bool)
-        if (mw, mh) == (width, height):
-            full = raster
-        elif box is not None and (mw, mh) == (int(box.right - box.left), int(box.bottom - box.top)):
-            left, top = int(box.left), int(box.top)
-            x0, y0, x1, y1 = max(left, 0), max(top, 0), min(left + mw, width), min(top + mh, height)
-            if x1 > x0 and y1 > y0:
-                full[y0:y1, x0:x1] = raster[y0 - top : y1 - top, x0 - left : x1 - left]
-        else:
-            raise ApiError(
-                f"{photo}: SAM mask {record.object_id} for {prompt!r} is {mw} x {mh} px. That is neither "
-                f"the image ({width} x {height}) nor its box. The mask layout is unconfirmed (Day 1): "
-                "check a real response and fix sam_results_from.")
+        x0, y0, x1, y1 = max(left, 0), max(top, 0), min(right, width), min(bottom, height)
+        if x1 > x0 and y1 > y0:
+            full[y0:y1, x0:x1] = raster[y0 - top : y1 - top, x0 - left : x1 - left]
         if full.any():
-            if (full_h, full_w) != (height, width):  # linear then 0.5 keeps a smooth edge, not 2 px stair steps
+            if (full_h, full_w) != (height, width):
                 full = cv2.resize(full.astype(np.float32), (full_w, full_h), interpolation=cv2.INTER_LINEAR) > 0.5
-            out.append(SamResult(mask=full, score=_record_score(record, box)))
+            out.append(SamResult(mask=full, score=record.confidence))
     return out
 
 

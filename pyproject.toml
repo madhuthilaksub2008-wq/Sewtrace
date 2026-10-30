@@ -24,9 +24,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
 # Meta's official decoder for SAM output. Needed only for real SAM calls (REQ-SEG-01).
-# TODO Day 1: pin the version that was verified against a real response (for example
-# "meta_sam_parser==X.Y.Z"). It could not be checked offline, so no version is guessed here.
-real = ["meta_sam_parser"]
+# Pinned to the version Day 1 ran against (0.1.0).
+real = ["meta_sam_parser==0.1.0"]
 
 [project.scripts]
 sewtrace = "sewtrace.cli:main"

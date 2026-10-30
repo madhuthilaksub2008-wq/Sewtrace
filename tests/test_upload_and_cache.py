@@ -65,7 +65,7 @@ def test_req_api_02_sam_upload_is_downscaled_and_a_box_local_mask_lands_in_the_o
     mw, mh = 300, 200  # sent-frame box (500, 400) to (800, 600)
     data = np.zeros((mh, mw), np.uint8)
     data[:100, :] = 1  # top half of the box
-    result = _result([_box("0", 500, 400, 800, 600), _mask("0", mw, mh, data.ravel().tolist())])
+    result = _result([_mask("0", mw, mh, data.ravel().tolist(), at=(500, 400, 800, 600))])
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(result))
     stream = StreamTransport()
     mask = _client(tmp_path / "c", stream=stream, config=_sam_cfg(2000)).segment(photo_path, "t-shirt")
@@ -79,7 +79,7 @@ def test_req_api_02_sam_upload_is_downscaled_and_a_box_local_mask_lands_in_the_o
 def test_req_api_02_sam_box_check_runs_in_the_original_frame_after_rescaling(tmp_path, monkeypatch):
     photo_path = _big_photo(tmp_path)
     # The box ends 30 sent px (60 original px) past the frame: a frame mismatch, still an error.
-    records = [_box("0", 0, 0, 2030, 1500), _mask("0", 2030, 1500)]
+    records = [_mask("0", 2030, 1500)]
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records)))
     with pytest.raises(ApiError, match="different pixel frames"):
         _client(tmp_path / "c", config=_sam_cfg(2000)).segment(photo_path, "t-shirt")
@@ -88,17 +88,17 @@ def test_req_api_02_sam_box_check_runs_in_the_original_frame_after_rescaling(tmp
 def test_req_api_02_one_sent_pixel_of_box_rounding_is_tolerated(tmp_path):
     """Tolerance is box_overhang_tol_px SENT pixels: 2 original px at a factor of 2, not 1."""
     kwargs = {"box_tol_px": TOL, "full_hw": (3000, 4000)}
-    ok = _result([_box("0", 0, 0, 2001, 1500), _mask("0", 2000, 1500)])
+    ok = _result([_mask("0", 2000, 1500, at=(0, 0, 2001, 1500))])
     (res,) = sam_results_from(ok, _decode, (1500, 2000), "p", "x", **kwargs)
     assert res.mask.shape == (3000, 4000) and res.mask.all()
-    past = _result([_box("0", 0, 0, 2003, 1500), _mask("0", 2003, 1500)])
+    past = _result([_mask("0", 2003, 1500)])
     with pytest.raises(ApiError, match="different pixel frames"):
         sam_results_from(past, _decode, (1500, 2000), "p", "x", **kwargs)
 
 
 def test_req_api_02_sam_boxes_are_reported_in_the_original_frame(tmp_path, monkeypatch):
     photo_path = _big_photo(tmp_path)
-    result = _result([_box("0", 500, 400, 800, 600), _mask("0", 300, 200)])
+    result = _result([_box("0", 500, 400, 800, 600), _mask("0", 300, 200, at=(500, 400, 800, 600))])
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(result))
     client = _client(tmp_path / "c", config=_sam_cfg(2000))
     client.segment(photo_path, "t-shirt")
