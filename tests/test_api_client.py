@@ -549,9 +549,10 @@ def test_req_api_07_real_responses_are_not_flagged_estimated(tmp_path):
     assert _rows(client)[0]["estimated"] == "0"
 
 
-def test_req_api_07_timeout_is_600_s_and_effort_unchanged():
+def test_req_api_07_timeout_is_300_s_and_effort_unchanged():
+    """Day 1 (Oct 30): about 185 tokens/s, so 32000 tokens take about 175 s; 300 s leaves margin."""
     cfg = load_config()
-    assert cfg.api.timeout_s == 600.0
+    assert cfg.api.timeout_s == 300.0
     assert cfg.reasoning.effort == "high" and cfg.reasoning.max_tokens == 32000
 
 

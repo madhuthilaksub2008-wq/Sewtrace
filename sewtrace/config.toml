@@ -4,8 +4,9 @@
 
 [api]
 base_url = "https://api.meta.ai/v1"
-timeout_s = 600.0          # one request (REQ-API-07). A non-streaming call can emit up to max_tokens=32000
-                           # reasoning tokens. Set this from the Day 1 measured latency (REQ-API-09).
+timeout_s = 300.0          # one request (REQ-API-07). Day 1 (Oct 30) measured 5.6 s for 1,036 output tokens
+                           # (about 185 tokens/s). max_tokens=32000 at that rate is about 175 s, so 300 s
+                           # leaves margin. Not part of any cache key.
 max_tries = 3              # tries per call on HTTP 429 or 5xx (REQ-API-06)
 backoff_s = 2.0            # wait before try n+1 is backoff_s * 2 ** (n - 1)
 budget_limit_usd = 140.0   # SPEC 8.3 "any day": stop all paid calls (REQ-API-04, C-01)
@@ -14,7 +15,7 @@ ledger_path = "data/ledger.csv"  # relative to the repo root; outside cache/ so 
 offline = false            # true, or SEWTRACE_OFFLINE=1: cache only, no mock, no network
 
 [models.sam]
-id = "sam-3.1"             # SPEC 4.2 note 1: confirm against "sam-3-1" in the Day 1 test
+id = "sam-3.1"             # MEASURED Day 1 (Oct 30): "sam-3.1" works. Not "sam-3-1" (SPEC 4.2 note 1)
 price_per_image_usd = 0.0025
 
 [models.spark]
@@ -50,27 +51,29 @@ effort = "high"
 # uses as its estimate.
 max_tokens = 32000
 # NOT IN THE COOKBOOK: the name of the output limit parameter. Allowed: max_tokens,
-# max_completion_tokens. Default is max_tokens (SPEC wording). DAY 1 CHECK (REQ-API-09): if the
-# API answers HTTP 400 naming this parameter, switch it here. No code change needed.
+# max_completion_tokens. MEASURED Day 1 (Oct 30): the API accepts max_tokens.
 max_tokens_param = "max_tokens"
 # Sent as prompt_cache_key (cookbook 05_prompt_caching). One fixed value, so calls that share
 # the same developer message prefix hit the same cache.
 prompt_cache_key = "sewtrace-v1"
 upload_jpeg_quality = 95   # Muse is sent the decoded pixels re-encoded at this quality. Separate from [sam],
                            # so tuning SAM does not invalidate the Muse cache keys.
-max_upload_px = 1568       # DAY 1 VALUE TO CONFIRM (REQ-API-02, SPEC 8.1, 13). Long side of a photo sent to Muse. The
+max_upload_px = 1568       # MEASURED Day 1 (Oct 30): about 2,809 image tokens at this size (REQ-API-02, SPEC 8.1, 13). Long side of a photo sent to Muse. The
                            # decoded pixels are shrunk (INTER_AREA) to this before the JPEG re-encode, to keep
-                           # SPEC 8.1's about 1,500 image tokens per photo near true for a 12 to 48 MP phone photo
-                           # (check the Day 1 token count). Part of the cache key.
-est_image_tokens = 1500    # SPEC 8.1 assumption, for the pre-call budget estimate
+                           # the image token count bounded for a 12 to 48 MP phone photo.
+                           # Part of the cache key.
+# MEASURED Day 1 (Oct 30): about 2,809 image tokens per photo sent at 1568 px (SPEC 8.1 assumed 1,500).
+# For the pre-call budget estimate only. Not part of any cache key.
+est_image_tokens = 2800
 
 [sam]
-min_score = 0.5            # DAY 1 VALUE TO CONFIRM (REQ-SEG-04): stop when the best mask confidence (0..1, the mask
-                           # record's "c" field) is lower. Without a confidence the check is skipped with a warning.
+min_score = 0.5            # DAY 1 (Oct 30): SAM sends NO confidence (mask or box), so this is currently unused. Still
+                           # to confirm (REQ-SEG-04, open conflict with REQ-SEG-03): stop when the best mask
+                           # confidence (0..1, the mask record's "c" field) is lower. Without one the check is skipped.
 upload_jpeg_quality = 95   # SAM is sent the decoded pixels (EXIF applied), re-encoded as JPEG (after the max_upload_px downscale).
                            # PNG would be 3 to 5 times larger for a phone photo (payload and upload time), and
                            # SAM is billed per image, so size does not change the price. Q95 adds no visible edge.
-max_upload_px = 2048       # DAY 1 VALUE TO CONFIRM (REQ-API-02, SPEC 13). Long side of a photo sent to SAM; larger photos
+max_upload_px = 2048       # MEASURED Day 1 (Oct 30): SAM answers in the frame it was sent, no server resize at 2048 px (REQ-API-02, SPEC 13). Long side of a photo sent to SAM; larger photos
                            # are shrunk (INTER_AREA) first. The masks and boxes come back in that smaller frame and are
                            # scaled back to the original photo, so the mm geometry is unchanged. Part of the cache key.
 box_overhang_tol_px = 1.0  # a SAM box that passes the image by more than this means a frame mismatch: error

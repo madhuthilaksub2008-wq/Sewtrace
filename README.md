@@ -167,7 +167,9 @@ The Day 1 test replaces that estimate with a measured value.
 
 ## Status of open items
 
-- **Day 1 test:** not run yet. The model IDs, the real token counts and the real cost per run are still estimates.
+- **Day 1 test:** run on Oct 30 (one real SAM call and one real Spark call, synthetic photo). Model IDs, parameters, token counts and cost are measured and set in config. The Meta Usage page comparison is pending (user). See `docs/PROJECT.md`.
 - **Real eval:** pending (Oct 31). It needs the real captures and the tape-measure ground truth (SPEC 10.3).
-- **SAM score field:** open. The cookbook shows no score on SAM records. Until the Day 1 test shows one, the largest mask wins and the minimum score check is skipped with a warning.
+- **SAM score field:** SAM sends no confidence (Day 1). The largest mask wins and the minimum score check is skipped with a warning. The SPEC conflict (REQ-SEG-03, REQ-SEG-04) needs a user decision.
+- **SAM edge position:** on the synthetic photo the SAM outline is 1 to 2.5 mm inside the true edge. Not yet measured on real fabric (Oct 31).
+- **Real model calls:** 1 of the 20 needed for REQ-RSN-06 are done. No truncation so far.
 - **Open decisions:** Spark or Wonder (D-01), seam tolerances (D-02), sleeve cap ease (D-03), seam allowance (D-04).

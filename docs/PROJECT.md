@@ -152,7 +152,7 @@ known geometry with the marker and camera tilt; SAM and the model are mocked):
 | T22 SVG + DXF | done |
 | T24/T25 proof photo + overlay gap | done on synthetic proof photos |
 | T26.1 eval `sewtrace eval` | done: mean error 0.36 mm, all seams pass |
-| T8/T9 real SAM and Muse calls | **next**: needs API access (Day 1 tests) |
+| T8/T9 real SAM and Muse calls | Day 1 run done on Oct 30, see "Day 1 results" |
 | T23/T29/T30 web UI, wow sequence, offline mode | done, mock-tested (demo bundles replay offline) |
 | Real captures and tape-measure ground truth | waiting on tees and marker |
 
@@ -163,9 +163,48 @@ replay, eval (mean error 0.36 mm, all seams pass). CI runs the tests with no key
 
 **Not met yet:**
 
-- `REQ-RSN-01`, `REQ-RSN-06`, `REQ-API-09`: need the paid Day 1 run (one real call to each model, token and cost record).
+- `REQ-API-09`: met, except the comparison of the ledger with the Meta Usage page (user, pending).
+- `REQ-RSN-06`: partly. 1 of 20 real calls done (1,036 output tokens, no truncation).
 - `REQ-VER-01`: the real proof photo is due on Oct 31.
-- `REQ-SEG-03`, `REQ-SEG-04`: partly. No SAM score field has been seen yet, so the score rule is untested on a real answer.
+- `REQ-SEG-03`, `REQ-SEG-04`: partly. SAM sends no confidence (Day 1), so the score rule cannot run. User decision needed.
+
+`REQ-RSN-01` is met: one real Spark call returned a valid answer.
+
+## Day 1 results (Oct 30)
+
+One real call to each model on the synthetic photo `data/synth/tee1/front.jpg`
+(`sewtrace day1 ... --yes-spend`). Ledger: $0.002500 before, $0.010482 after.
+
+| Fact | Result |
+| --- | --- |
+| SAM model ID | `sam-3.1` works (not `sam-3-1`) |
+| SAM frame | Answer frame equals the sent frame (2048 x 1841 px). No server resize at 2048 px |
+| SAM mask raster | Box-local, at most 1024 px on the long side, upsized to the bounds |
+| SAM confidence | None. SAM sends no mask or box confidence |
+| SAM edge position | 1 to 2.5 mm inside the true edge on the synthetic photo (area ratio SAM/truth 0.968) |
+| Spark call | 2,863 input tokens (cached 0), 1,036 output tokens, 5.6 s, $0.007982 |
+| Spark image tokens | About 2,809 per photo at 1568 px (SPEC 8.1 assumed 1,500) |
+| Spark speed | About 185 output tokens/s |
+| Spark pricing | Config reproduces the ledger exactly (2863 x $1.25/M + 1036 x $4.25/M) |
+| Spark parameters | `max_tokens` accepted. The production schema with `minimum` and `exclusiveMinimum` accepted |
+| Spark answer | front neck 65 mm, back neck 15 mm, sleeve cap 50/20 mm, grain vertical |
+
+Config changes from this run: `reasoning.est_image_tokens` 1500 to 2800,
+`api.timeout_s` 600 to 300. Neither is a cache key input, so no cached answer
+is invalidated.
+
+**Cost per real run (estimate).** SAM: 3 images x $0.0025 = $0.0075. Panel
+call: 3 images x 2,800 tokens + about 1,000 text tokens = about 9,400 input
+tokens = $0.012, plus 1,000 to 4,000 output tokens = $0.004 to $0.017. One run
+is about $0.025 to $0.04. Each seam loop call (at most 3) adds about the same
+panel cost, only when a seam fails. The budget guard still assumes the worst
+case of 32,000 output tokens (about $0.14 per Spark call, $0.1396 on the Day 1 test).
+
+**Open items from Day 1:**
+
+- `REQ-SEG-03` and `REQ-SEG-04` conflict with the API: SAM sends no confidence, so the minimum score check cannot run. The user must decide (for example, drop the score rule from the SPEC).
+- SAM edge inset of 1 to 2.5 mm on the synthetic photo. This would narrow the chest width by about 4 to 5 mm if it holds on real fabric. To measure on real tees on Oct 31. A calibrated outline offset in config is a possible fix. It is not built.
+- Usage page comparison: the user compares the Meta Usage page with the ledger total. Pending.
 
 **Values that need your confirmation** (marked in `sewtrace/config.toml`):
 

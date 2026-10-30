@@ -44,7 +44,7 @@ from sewtrace.api.client import (
     with_output_text_done,
 )
 from sewtrace.config import Settings, load_config
-from sewtrace.day1 import run_day1
+from sewtrace.day1 import run_day1, worst_case_usd
 from sewtrace.reason.panels import PanelInference
 from sewtrace.reason.seams import ADJUST_SCHEMA
 
@@ -542,6 +542,18 @@ def test_req_api_09_day1_refuses_without_yes_spend_and_prints_the_estimate(tmp_p
     out = capsys.readouterr().out
     assert "worst case" in out and "sam-3.1" in out and "muse-spark-1.3" in out
     assert client._stream_transport.calls == [] and client._transport.calls == []
+
+
+def test_req_api_05_day1_worst_case_uses_the_measured_image_tokens(tmp_path):
+    """REQ-API-05, REQ-API-09: the Spark estimate is built from reasoning.est_image_tokens (2,800 after Day 1)."""
+    client = _client(tmp_path)
+    cfg = client.config
+    assert cfg.reasoning.est_image_tokens == 2800
+    spark = worst_case_usd(client)[cfg.reasoning_model.id]
+    assert spark == pytest.approx(0.1396, abs=1e-4)
+    fewer = cfg.model_copy(update={"reasoning": cfg.reasoning.model_copy(update={"est_image_tokens": 1500})})
+    client.config = fewer
+    assert worst_case_usd(client)[fewer.reasoning_model.id] < spark
 
 
 def test_req_api_09_day1_cli_refuses_without_the_flag(tmp_path, photo, monkeypatch, capsys):
