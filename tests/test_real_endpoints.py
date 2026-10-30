@@ -34,6 +34,7 @@ from sewtrace.api.client import (
     SegmentationFailed,
     parse_sse,
     reasoning_request_body,
+    sam_frame_hw,
     sam_request_body,
     sam_results_from,
     select_best,
@@ -595,12 +596,12 @@ def test_req_api_09_day1_prints_fail_when_the_answer_does_not_validate(tmp_path,
 
 
 def test_req_seg_01_day1_prints_boxes_next_to_image_size_and_writes_overlay(tmp_path, photo, monkeypatch, capsys):
-    records = [_box("0", 10, 5, 30, 25), _mask("0", 10, 10, at=(10, 5, 30, 25), confidence=0.875)]
+    records = [_box("0", 10, 5, 30, 25, confidence=0.5), _mask("0", 10, 10, at=(10, 5, 30, 25), confidence=0.875)]
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=_raw(W, H))))
     run_day1(photo, yes_spend=True, client=_client(tmp_path), out_dir=tmp_path / "o")
     out = capsys.readouterr().out
     assert f"image {W} x {H} px" in out and "box 0: left 10  top 5  right 30  bottom 25" in out
-    assert "record 0: confidence 0.875  bounds 10,5 to 30,25  raster 10 x 10" in out
+    assert "record 0: mask confidence 0.875  box confidence 0.500  bounds 10,5 to 30,25  raster 10 x 10" in out
     assert f"sent to SAM {W} x {H} px; SAM reported source {W} x {H} px" in out and "DIFFERS" not in out
     overlay = cv2.imread(str(tmp_path / "o" / "p.sam_overlay.png"))
     assert overlay.shape == (H, W, 3)
@@ -925,3 +926,85 @@ def test_req_api_04_urllib_bad_json_and_never_sent_errors(monkeypatch):
     for transport in (urllib_transport, urllib_stream_transport):
         with pytest.raises(ApiNotSent):
             transport("https://x", {}, {}, 5.0)
+
+
+# ---- SAM frame safety (REQ-SEG-01), review of 79246e8 --------------------------------------
+
+def _one_mask_result(raw):
+    return _result([_mask("0", 4, 4, at=(1, 1, 5, 5))], raw_output=raw)
+
+
+def test_req_seg_01_transposed_reported_frame_is_an_error_not_a_stretch():
+    """Sent 80 x 60, SAM says 60 x 80: separate x and y scales would stretch the mask by 1.33 and 0.75."""
+    with pytest.raises(ApiError, match=r"p\.jpg.*'x'.*different pixel frames.*day1"):
+        sam_results_from(_one_mask_result(_raw(H, W)), _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
+
+
+def test_req_seg_01_cropped_reported_frame_is_an_error():
+    with pytest.raises(ApiError, match="different pixel frames"):
+        sam_results_from(_one_mask_result(_raw(W, H - 10)), _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
+
+
+def test_req_seg_01_uniform_half_size_frame_is_mapped(caplog):
+    """SAM worked on 40 x 30 (same aspect as the 80 x 60 sent): bounds double into the sent frame."""
+    result = _result([_mask("0", 10, 5, at=(10, 5, 20, 10))], raw_output=_raw(W // 2, H // 2))
+    with caplog.at_level("WARNING", logger="sewtrace.api.client"):
+        (res,) = sam_results_from(result, _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert "resized on the server" in caplog.text
+    ys, xs = np.nonzero(res.mask)
+    assert (xs.min(), xs.max(), ys.min(), ys.max()) == (20, 39, 10, 19)
+
+
+def test_req_seg_01_rounding_of_the_reported_size_is_accepted():
+    sent = (1841, 2048)  # H, W
+    result = _result([_mask("0", 4, 4, at=(1, 1, 5, 5))], raw_output=_raw(1024, 921))  # 920.5 rounded up
+    assert sam_frame_hw(result, sent) == (921, 1024)
+
+
+def test_req_seg_01_equal_reported_frame_is_a_no_op(caplog):
+    with caplog.at_level("INFO", logger="sewtrace.api.client"):
+        assert sam_frame_hw(_one_mask_result(_raw(W, H)), (H, W)) == (H, W)
+    assert not caplog.records
+
+
+def test_req_seg_01_transposed_real_sizes_name_the_photo():
+    """The review case: sent 2048 x 1841, reported 1841 x 2048."""
+    with pytest.raises(ApiError, match=r"a\.jpg.*1841 x 2048.*2048 x 1841"):
+        sam_frame_hw(_one_mask_result(_raw(1841, 2048)), (1841, 2048), "a.jpg", "t-shirt")
+
+
+def test_req_seg_01_disagreeing_box_sizes_are_an_error_but_unreadable_is_not(caplog):
+    both = _raw(W, H) + "\n" + _raw(W // 2, H // 2)
+    with pytest.raises(ApiError, match=r"p\.jpg.*different frame sizes"):
+        sam_frame_hw(_one_mask_result(both), (H, W), "p.jpg", "x")
+    assert sam_frame_hw(_one_mask_result("no boxes"), (H, W)) == (H, W)
+
+
+def test_req_seg_01_raster_downsize_uses_area_and_upsize_uses_linear():
+    # 6 x 6 raster to 2 x 2 bounds: each 3 x 3 block is 6/9 foreground. INTER_AREA keeps it (INTER_LINEAR
+    # would sample the empty middle column).
+    down = [1, 0, 1, 1, 0, 1] * 6
+    (res,) = sam_results_from(_result([_mask("0", 6, 6, down, at=(0, 0, 2, 2))]), _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert res.mask.sum() == 4
+    # 2 x 1 raster [1, 0] to 4 x 1 bounds: linear gives 1, .75, .25, 0.
+    (up,) = sam_results_from(_result([_mask("0", 2, 1, [1, 0], at=(0, 0, 4, 1))]), _decode, (H, W), "p", "x", box_tol_px=TOL)
+    assert up.mask[0, :4].tolist() == [True, True, False, False] and up.mask.sum() == 2
+
+
+def test_req_seg_04_box_confidence_without_mask_confidence_warns_and_is_not_the_score(caplog):
+    result = _result([_box("0", 0, 0, 5, 5, confidence=0.93), _mask("0", 5, 5)])
+    with caplog.at_level("WARNING", logger="sewtrace.api.client"):
+        (res,) = sam_results_from(result, _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
+    assert res.score is None
+    assert "p.jpg" in caplog.text and "box has 0.93" in caplog.text and "not used as the score" in caplog.text
+
+
+def test_req_api_02_raw_events_key_is_unchanged_and_only_the_decoded_key_moved(tmp_path):
+    """Day 1 paid for a SAM answer stored under the raw key: it must still be found. Values were computed
+    with the code before the frame fix (SAM_DECODE_VERSION 3)."""
+    image = np.random.default_rng(7).integers(0, 255, (60, 80, 3), dtype=np.uint8)
+    path = tmp_path / "a.png"
+    cv2.imwrite(str(path), image)
+    client = _client(tmp_path)
+    assert client._sam_key(path, "t-shirt", decoded=False) == "9266f858babaa1dd1646868da73f42f25411827278ea8b3ffe7d33ebc5e5101e"
+    assert client._sam_key(path, "t-shirt", decoded=True) != "8ff2b54ab437db8bcee5f1271b775895727b65ffc2ed5b232882844db64acc3c"

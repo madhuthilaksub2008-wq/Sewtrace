@@ -77,7 +77,8 @@ def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarra
              if source else "size unreadable (sent size assumed)"))
     for r in inspection.records:
         conf = "none" if r.confidence is None else f"{r.confidence:.3f}"
-        print(f"  record {r.object_id}: confidence {conf}  bounds {r.bounds[0]:g},{r.bounds[1]:g} to "
+        box_conf = "none" if r.box_confidence is None else f"{r.box_confidence:.3f}"
+        print(f"  record {r.object_id}: mask confidence {conf}  box confidence {box_conf}  bounds {r.bounds[0]:g},{r.bounds[1]:g} to "
               f"{r.bounds[2]:g},{r.bounds[3]:g}  raster {r.raster_wh[0]} x {r.raster_wh[1]}")
     for object_id, left, top, right, bottom in boxes:
         print(f"  box {object_id}: left {left:g}  top {top:g}  right {right:g}  bottom {bottom:g}")
