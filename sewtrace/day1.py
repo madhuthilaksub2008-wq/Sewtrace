@@ -65,25 +65,36 @@ def _report(label: str, rows: list[dict[str, str]], seconds: float, text: str) -
               "(input tokens minus estimated text tokens). Use it to update reasoning.est_image_tokens.")
 
 
-def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarray, out_dir: Path) -> Path:
-    """Mask (red) and SAM boxes (green) over the photo, in the frame the pipeline reads, so the
-    user can check by eye that they line up. Boxes are also printed next to the image size."""
-    (width, height), boxes = client.sam_boxes(photo, prompt)
-    print(f"SAM frame check: image {width} x {height} px (as cv2.imread reads it, EXIF applied)")
+def _print_sam_facts(client: MetaClient, photo: Path, prompt: str) -> list[tuple[str, float, float, float, float]]:
+    """Print what the stored SAM answer says and return its boxes in the photo frame. Needs no good frame,
+    so it also shows the facts of an answer that ``segment`` refused."""
     inspection = client.sam_inspect(photo, prompt)
-    sent, source = inspection.sent_wh, inspection.source_wh
-    print(f"  sent to SAM {sent[0]} x {sent[1]} px; SAM reported source "
-          + (f"{source[0]} x {source[1]} px" + ("" if source == sent else "  (DIFFERS from sent: resized on the server)")
-             if source else "size unreadable (sent size assumed)"))
+    width, height = inspection.image_wh
+    print(f"SAM frame check: image {width} x {height} px (as cv2.imread reads it, EXIF applied)")
+    sent = inspection.sent_wh
+    reported = ", ".join(f"{w} x {h} px" for w, h in inspection.reported_wh)
+    if not reported:
+        reported = "size unreadable (sent size assumed)"
+    elif inspection.reported_wh != [sent]:
+        reported += "  (DIFFERS from sent)"
+    print(f"  sent to SAM {sent[0]} x {sent[1]} px; SAM reported source {reported}")
     for r in inspection.records:
         conf = "none" if r.confidence is None else f"{r.confidence:.3f}"
         box_conf = "none" if r.box_confidence is None else f"{r.box_confidence:.3f}"
         print(f"  record {r.object_id}: mask confidence {conf}  box confidence {box_conf}  bounds {r.bounds[0]:g},{r.bounds[1]:g} to "
               f"{r.bounds[2]:g},{r.bounds[3]:g}  raster {r.raster_wh[0]} x {r.raster_wh[1]}")
+    boxes = [(r.object_id, *r.box_in_photo) for r in inspection.records if r.box_in_photo]
     for object_id, left, top, right, bottom in boxes:
         print(f"  box {object_id}: left {left:g}  top {top:g}  right {right:g}  bottom {bottom:g}")
     if not boxes:
         print("  no box records in the answer")
+    return boxes
+
+
+def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarray, out_dir: Path) -> Path:
+    """Mask (red) and SAM boxes (green) over the photo, in the frame the pipeline reads, so the
+    user can check by eye that they line up. Boxes are also printed next to the image size."""
+    boxes = _print_sam_facts(client, photo, prompt)
     image = cv2.imread(str(photo))
     shaded = image.copy()
     shaded[mask] = (0, 0, 255)
@@ -96,6 +107,14 @@ def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarra
     path = out_dir / f"{photo.stem}.sam_overlay.png"
     cv2.imwrite(str(path), overlay)
     return path
+
+
+def _print_stored_sam_facts(client: MetaClient, photo: Path, prompt: str) -> None:
+    """After a refused SAM answer: show its facts from the cache (no API call). The caller re-raises."""
+    try:
+        _print_sam_facts(client, photo, prompt)
+    except ApiError as err:  # nothing stored (failed stream) or unreadable: the original error still follows
+        print(f"SAM facts: not available ({err})")
 
 
 def run_day1(
@@ -122,7 +141,11 @@ def run_day1(
         sam_prompt = client.config.sam.prompts.garment
         n = len(_ledger_rows(client))
         start = time.monotonic()
-        mask = client.segment(photo, sam_prompt)
+        try:
+            mask = client.segment(photo, sam_prompt)
+        except ApiError:
+            _print_stored_sam_facts(client, photo, sam_prompt)
+            raise
         _report("SAM", _ledger_rows(client)[n:], time.monotonic() - start, sam_prompt)
         print(f"SAM mask: {int(mask.sum())} px of {mask.size}")
         print(f"SAM overlay: {_write_overlay(client, photo, sam_prompt, mask, Path(out_dir))}")

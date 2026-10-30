@@ -178,6 +178,7 @@ class SamInspection(BaseModel):
     image_wh: tuple[int, int]
     sent_wh: tuple[int, int]
     source_wh: tuple[int, int] | None
+    reported_wh: list[tuple[int, int]]  # every distinct size in the box lines; more than one means they disagree
     records: list[SamRecordInfo]
 
 
@@ -448,19 +449,27 @@ class MetaClient:
         answer, in the pixel frame of the decoded photo (the original, not the downscaled upload).
         Uses the same frame mapping as ``segment``. Never calls the API: it needs the stored raw
         events (Day 1 uses it to check the box frame by eye)."""
-        inspection = self.sam_inspect(image_path, prompt)
+        inspection = self.sam_inspect(image_path, prompt, raise_on_bad_frame=True)
         return inspection.image_wh, [(r.object_id, *r.box_in_photo) for r in inspection.records if r.box_in_photo]
 
-    def sam_inspect(self, image_path: str | Path, prompt: str) -> SamInspection:
+    def sam_inspect(self, image_path: str | Path, prompt: str, *, raise_on_bad_frame: bool = False) -> SamInspection:
         """What SAM returned for a stored answer: per record confidence, bounds, raster size, and the
-        source size SAM reported against the size we sent. Never calls the API."""
+        source size SAM reported against the size we sent. Never calls the API.
+
+        Records are collected without the frame check, so a frame SAM got wrong still shows its facts
+        (``box_in_photo`` is None then). ``sam_boxes`` raises for such a frame."""
         image_path = Path(image_path)
         if not self._events_file(image_path, prompt).exists():
             raise CacheMiss(f"no stored SAM answer for {image_path.name!r} with prompt {prompt!r}; segment it first.")
         _, image, result = self._sam_parsed(image_path, prompt)
         sent_hw = _fitted_hw(*image.shape[:2], self.config.sam.max_upload_px)
-        frame_h, frame_w = sam_frame_hw(result, sent_hw, image_path.name, prompt)
-        sx, sy = image.shape[1] / frame_w, image.shape[0] / frame_h
+        try:
+            frame_h, frame_w = sam_frame_hw(result, sent_hw, image_path.name, prompt)
+            sx, sy = image.shape[1] / frame_w, image.shape[0] / frame_h
+        except ApiError:
+            if raise_on_bad_frame:
+                raise
+            sx = sy = None
         boxes = {str(r.object_id): r for r in result.records if r.kind == "box"}
         records: list[SamRecordInfo] = []
         for r in (r for r in result.records if r.kind == "mask"):
@@ -471,13 +480,15 @@ class MetaClient:
                 box_confidence=None if box is None else box.confidence,
                 bounds=(float(b.left), float(b.top), float(b.right), float(b.bottom)),
                 raster_wh=(int(r.mask.width), int(r.mask.height)),
-                box_in_photo=None if box is None else (float(box.left) * sx, float(box.top) * sy,
+                box_in_photo=None if box is None or sx is None or sy is None else (float(box.left) * sx, float(box.top) * sy,
                                                        float(box.right) * sx, float(box.bottom) * sy),
             ))
-        reported = sam_source_hw(getattr(result, "raw_output", None))
+        raw_output = getattr(result, "raw_output", None)
+        reported = sam_source_hw(raw_output)
         return SamInspection(
             image_wh=(image.shape[1], image.shape[0]), sent_wh=(sent_hw[1], sent_hw[0]),
-            source_wh=None if reported is None else (reported[1], reported[0]), records=records)
+            source_wh=None if reported is None else (reported[1], reported[0]),
+            reported_wh=[(w, h) for h, w in sorted(_sam_source_sizes(raw_output))], records=records)
 
     def _sam_parsed(self, image_path: Path, prompt: str) -> tuple[Any, np.ndarray, Any]:
         parser = _load_sam_parser()
@@ -873,7 +884,12 @@ def sam_source_hw(raw_output: object) -> tuple[int, int] | None:
     return next(iter(sizes)) if len(sizes) == 1 else None
 
 
-def sam_frame_hw(result: Any, sent_hw: tuple[int, int], photo: str = "the photo", prompt: str = "") -> tuple[int, int]:
+# Retaking the photo does not help: EXIF is stripped before the upload and a transposed frame is server behaviour.
+_SAM_FRAME_ADVICE = ("The sizes are above. This is a problem in the SAM answer, not in the photo. "
+                     "Keep the stored answer in the cache folder and report these sizes.")
+
+
+def sam_frame_hw(result: Any, sent_hw: tuple[int, int], photo: str, prompt: str) -> tuple[int, int]:
     """``(height, width)`` of the frame the SAM coordinates are in: the size SAM reports, else the
     size we sent.
 
@@ -886,8 +902,7 @@ def sam_frame_hw(result: Any, sent_hw: tuple[int, int], photo: str = "the photo"
     if len(sizes) > 1:
         listed = ", ".join(f"{w} x {h}" for h, w in sorted(sizes))
         raise ApiError(f"{photo}: SAM reported different frame sizes for the prompt {prompt!r} ({listed} px). "
-                       "No single frame fits the masks, so no mask was used. Run 'sewtrace day1' and check "
-                       "the answer, then take the photo again.")
+                       "No single frame fits the masks, so no mask was used. " + _SAM_FRAME_ADVICE)
     if not sizes:
         log.info("SAM did not report a readable source size, so the sent size %d x %d px is assumed.", sent_w, sent_h)
         return sent_hw
@@ -899,7 +914,7 @@ def sam_frame_hw(result: Any, sent_hw: tuple[int, int], photo: str = "the photo"
             f"{photo}: SAM worked on a {rep_w} x {rep_h} px frame for the prompt {prompt!r}, but "
             f"{sent_w} x {sent_h} px was sent. The mask and the photo use different pixel frames "
             "(rotated, cropped or padded on the server). The mask would land in the wrong place, so no "
-            "mask was used. Run 'sewtrace day1' and check the overlay, then take the photo again.")
+            "mask was used. " + _SAM_FRAME_ADVICE)
     log.warning("SAM worked on a %d x %d px frame, but %d x %d px was sent (resized on the server). "
                 "Coordinates are mapped with the size SAM reported.", rep_w, rep_h, sent_w, sent_h)
     return rep_h, rep_w
@@ -907,7 +922,8 @@ def sam_frame_hw(result: Any, sent_hw: tuple[int, int], photo: str = "the photo"
 
 def _resize_mask(mask: np.ndarray, width: int, height: int) -> np.ndarray:
     """Bool ``mask`` resized to ``width`` x ``height``: INTER_AREA when it shrinks (no aliasing of thin
-    parts), INTER_LINEAR otherwise; then 0.5 keeps a smooth edge."""
+    parts), INTER_LINEAR otherwise; then 0.5 keeps a smooth edge. A mixed resize (one axis shrinks, one
+    grows) uses INTER_LINEAR and may alias slightly on the shrinking axis."""
     shrinking = width <= mask.shape[1] and height <= mask.shape[0]
     interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
     return cv2.resize(mask.astype(np.float32), (width, height), interpolation=interpolation) > 0.5
@@ -961,7 +977,7 @@ def sam_results_from(
                 f"{photo}: SAM mask {record.object_id} for {prompt!r} is ({left * sx:g}, {top * sy:g}) to "
                 f"({right * sx:g}, {bottom * sy:g}), but the image is {full_w} x {full_h} px. The mask and the "
                 "photo use different pixel frames (EXIF rotation or a resize on the server). The mask "
-                "would land in the wrong place, so no mask was used. Run 'sewtrace day1' and check the overlay.")
+                "would land in the wrong place, so no mask was used. " + _SAM_FRAME_ADVICE)
         bw, bh = right - left, bottom - top
         if raster.shape != (bh, bw):  # the raster has its own size; linear then 0.5 keeps a smooth edge
             raster = _resize_mask(raster, bw, bh)

@@ -608,6 +608,27 @@ def test_req_seg_01_day1_prints_boxes_next_to_image_size_and_writes_overlay(tmp_
     assert overlay[15, 20, 2] > overlay[15, 20, 0]  # mask area is shaded red
 
 
+@pytest.mark.parametrize("raw, shown", [
+    (_raw(H, W), f"SAM reported source {H} x {W} px  (DIFFERS from sent)"),
+    (_raw(W, H) + "\n" + _raw(W // 2, H // 2), f"SAM reported source {W // 2} x {H // 2} px, {W} x {H} px"),
+])
+def test_req_seg_04_day1_prints_the_facts_of_a_refused_stored_answer_without_a_new_call(
+        tmp_path, photo, monkeypatch, capsys, raw, shown):
+    records = [_box("0", 10, 5, 30, 25, confidence=0.5), _mask("0", 10, 10, at=(10, 5, 30, 25), confidence=0.875)]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=raw)))
+    client = _client(tmp_path)
+    client._events_file(photo, client.config.sam.prompts.garment).write_text(json.dumps(EVENTS))
+    with pytest.raises(ApiError, match="Keep the stored answer") as err:
+        run_day1(photo, yes_spend=True, client=client, out_dir=tmp_path / "o")
+    assert "day1" not in str(err.value) and "take the photo" not in str(err.value)
+    out = capsys.readouterr().out
+    assert f"image {W} x {H} px" in out and shown in out
+    assert "record 0: mask confidence 0.875  box confidence 0.500  bounds 10,5 to 30,25  raster 10 x 10" in out
+    assert client._stream_transport.calls == [] and client._transport.calls == []
+    assert not client.ledger_path.exists() or client.ledger_total_usd() == 0.0
+    assert not (tmp_path / "o").exists()
+
+
 def test_req_api_09_day1_prints_approximate_image_tokens(tmp_path, photo, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result([_mask("0", W, H)])))
     run_day1(photo, yes_spend=True, client=_client(tmp_path), out_dir=tmp_path / "o")
@@ -936,7 +957,7 @@ def _one_mask_result(raw):
 
 def test_req_seg_01_transposed_reported_frame_is_an_error_not_a_stretch():
     """Sent 80 x 60, SAM says 60 x 80: separate x and y scales would stretch the mask by 1.33 and 0.75."""
-    with pytest.raises(ApiError, match=r"p\.jpg.*'x'.*different pixel frames.*day1"):
+    with pytest.raises(ApiError, match=r"p\.jpg.*'x'.*different pixel frames.*not in the photo"):
         sam_results_from(_one_mask_result(_raw(H, W)), _decode, (H, W), "p.jpg", "x", box_tol_px=TOL)
 
 
@@ -958,12 +979,12 @@ def test_req_seg_01_uniform_half_size_frame_is_mapped(caplog):
 def test_req_seg_01_rounding_of_the_reported_size_is_accepted():
     sent = (1841, 2048)  # H, W
     result = _result([_mask("0", 4, 4, at=(1, 1, 5, 5))], raw_output=_raw(1024, 921))  # 920.5 rounded up
-    assert sam_frame_hw(result, sent) == (921, 1024)
+    assert sam_frame_hw(result, sent, "a.jpg", "x") == (921, 1024)
 
 
 def test_req_seg_01_equal_reported_frame_is_a_no_op(caplog):
     with caplog.at_level("INFO", logger="sewtrace.api.client"):
-        assert sam_frame_hw(_one_mask_result(_raw(W, H)), (H, W)) == (H, W)
+        assert sam_frame_hw(_one_mask_result(_raw(W, H)), (H, W), "p.jpg", "x") == (H, W)
     assert not caplog.records
 
 
@@ -977,7 +998,7 @@ def test_req_seg_01_disagreeing_box_sizes_are_an_error_but_unreadable_is_not(cap
     both = _raw(W, H) + "\n" + _raw(W // 2, H // 2)
     with pytest.raises(ApiError, match=r"p\.jpg.*different frame sizes"):
         sam_frame_hw(_one_mask_result(both), (H, W), "p.jpg", "x")
-    assert sam_frame_hw(_one_mask_result("no boxes"), (H, W)) == (H, W)
+    assert sam_frame_hw(_one_mask_result("no boxes"), (H, W), "p.jpg", "x") == (H, W)
 
 
 def test_req_seg_01_raster_downsize_uses_area_and_upsize_uses_linear():
