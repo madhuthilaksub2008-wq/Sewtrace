@@ -8,6 +8,9 @@ Use these tips with the photo steps in SPEC 9.2. The web page shows the same tip
 4. Put the t-shirt in the middle of the frame.
 5. Use the main lens. Do not use the wide-angle lens.
 6. Put each sleeve at an angle down from the shoulder. Keep a gap between the sleeve and the side of the t-shirt.
+7. For the sleeve photo, keep the sleeve sewn on. Do not cut the t-shirt. Fold one sleeve flat along its underarm line. Put the fold on the left and the cap at the top.
+   Turn the t-shirt so the folded sleeve lies below the body and the body is above it. The whole t-shirt must be in the photo, with the marker.
+   The synthetic sleeve photos show this layout: the neck points left, and the cap of the folded sleeve joins the armhole of the body.
 
 ## Why
 

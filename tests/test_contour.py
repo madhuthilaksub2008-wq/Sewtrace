@@ -109,6 +109,23 @@ def test_mask_to_outline_square():
     assert pts[:, 1].max() - pts[:, 1].min() == pytest.approx(50, abs=0.5)
 
 
+def test_req_geo_01_sleeve_fold_survives_a_dented_mask_edge():
+    """REQ-GEO-01: a mask edge that sits 2 mm inside the fold line over its top part (SAM wobble)
+    still gives the whole fold, so the cap starts at the top of the fold."""
+    half, edges = synth.sleeve_half(synth.TEES[0])
+    pts = half.copy()
+    pts[(pts[:, 0] == 0) & (pts[:, 1] < 40), 0] = 2.0
+    pts[:, 0] += 50
+    mask = np.zeros((500, 400), np.uint8)
+    cv2.fillPoly(mask, [np.round(pts * 2).astype(np.int32)], 255)
+    H = Homography(np.diag([0.5, 0.5, 1.0]))  # 2 px per mm
+    got = contour.sleeve_half(contour.smooth_outline(contour.mask_to_outline(mask > 0, H)))
+    assert got.array()[:, 1].max() == pytest.approx(half[:, 1].max(), abs=1.0)
+    cap_end = contour.label_sleeve_edges(got)[0].end
+    cap_mm = length(half[edges["cap"][0] : edges["cap"][1] + 1])
+    assert cap_end * 2.0 == pytest.approx(cap_mm, abs=10.0)  # the whole cap, not a stub; 2 mm spacing
+
+
 def test_smooth_outline_keeps_corners_and_spacing():
     """REQ-GEO-01: smooth outline keeps corners and spacing."""
     rng = np.random.default_rng(0)

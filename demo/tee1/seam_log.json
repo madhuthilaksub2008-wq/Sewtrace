@@ -7,7 +7,7 @@
   "diffs": {
    "front.shoulder~back.shoulder": -0.91,
    "front.side~back.side": -0.47,
-   "front.armhole+back.armhole~sleeve.cap": 4.98,
+   "front.armhole+back.armhole~sleeve.cap": 5.15,
    "sleeve.underarm~sleeve.underarm:mirror": 0.0
   },
   "failing": [],

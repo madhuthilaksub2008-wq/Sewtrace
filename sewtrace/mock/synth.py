@@ -12,6 +12,16 @@ checked against exact ground truth:
   data/synth/teeN/truth.json                       params, measurements (SPEC 10.2),
                                                    half outlines in mm, world->photo H
 
+Sleeve photo layout (SPEC 9.2 steps 9 to 11). A real sleeve stays sewn on, so the photo
+shows the WHOLE t-shirt. The tee lies turned about 80 degrees, neck to the left and hem to
+the right. One sleeve is folded flat along its underarm line and hangs below the body:
+fold on the left, cap at the top, the cap sewn to the armhole of the body above it, with a
+seam shadow between them. The other sleeve lies out flat as in the front photo. The
+"sleeve" mask is the folded half sleeve only, with the exact known half-sleeve outline.
+The body is turned so the armhole ends meet the cap ends; the armhole curve and the cap
+curve differ a little, so a thin band of fabric closes the gap (the sleeve outline stays
+exact, the seam line there is not). The "t-shirt" mask is the whole garment.
+
 Synthetic tees live in data/synth, apart from real captures in data/raw, so a
 synthetic name can never match real ground truth (data/ground_truth/<tee>.json).
 
@@ -31,6 +41,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import shapely
 
 from sewtrace.config import MARKER_ID, MARKER_SIZE_MM, get_config
 
@@ -203,6 +214,37 @@ def flatlay_sleeve(p: TeeParams, side: int) -> np.ndarray:
     return poly * [side, 1]
 
 
+def sleeve_scene_body(p: TeeParams, cap: np.ndarray, sleeve: np.ndarray, band_mm: float = 8.0) -> list[np.ndarray]:
+    """The rest of the t-shirt around a folded half sleeve, in the sleeve's mm frame.
+
+    The body is turned (no scaling) so the left armhole ends sit on the ends of the cap
+    chord: the body then lies above the cap with its neck to the left. The other sleeve
+    lies out flat as in the front photo. A thin band along the cap closes the small gap
+    between the cap and the armhole curve. The sleeve polygon is cut out of the result,
+    so the body mask only touches the sleeve at the seam and never overlaps it.
+    ``cap`` is the cap polyline (shoulder end first); ``sleeve`` the folded half sleeve."""
+    half = body_half(p, back=True)[0]  # back-neck silhouette, as in the front photo
+    flat_right = flatlay_sleeve(p, 1)
+    arm = armhole_curve(p) * [-1, 1]   # left armhole, shoulder end first
+    a0, a1 = arm[0], arm[-1]
+    angle = np.arctan2(*(cap[-1] - cap[0])[::-1]) - np.arctan2(*(a1 - a0)[::-1])
+    rot = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    shift = (cap[0] + cap[-1]) / 2 - rot @ ((a0 + a1) / 2)
+
+    def place(poly: np.ndarray) -> shapely.Polygon:
+        return shapely.make_valid(shapely.Polygon(poly @ rot.T + shift))
+
+    seam_band = shapely.LineString(cap).buffer(band_mm, cap_style="flat")
+    body = shapely.union_all([place(mirror_full(half)), place(flat_right), seam_band])
+    body = shapely.difference(body, shapely.make_valid(shapely.Polygon(sleeve)))
+    return [np.asarray(g.exterior.coords) for g in getattr(body, "geoms", [body]) if not g.is_empty]
+
+
+def place_in_frame(polys: list[np.ndarray], margin_mm: float = 80.0) -> np.ndarray:
+    """Shift that puts the min corner of all polygons at ``margin_mm`` (render() needs x, y > 0)."""
+    return margin_mm - np.vstack(polys).min(axis=0)
+
+
 # ---- rendering -------------------------------------------------------------
 
 def _marker_image(size_px: int) -> np.ndarray:
@@ -329,9 +371,11 @@ def make_tee(p: TeeParams, out: Path, seed: int) -> dict:
         }
 
     half, edges = sleeve_half(p)
-    origin = np.array([80.0, 80.0])
+    body = sleeve_scene_body(p, half[edges["cap"][0] : edges["cap"][1] + 1], half)
+    origin = place_in_frame([half, *body])
     sleeve = half + origin
-    photo, masks, H, marker_mm = render({"sleeve": [sleeve]}, p.colour_bgr, rng)
+    body = [b + origin for b in body]
+    photo, masks, H, marker_mm = render({"body": body, "sleeve": [sleeve]}, p.colour_bgr, rng)
     _save(out, "sleeve", photo, masks)
     truth["photos"]["sleeve"] = {
         "half_outline_mm": half.tolist(),

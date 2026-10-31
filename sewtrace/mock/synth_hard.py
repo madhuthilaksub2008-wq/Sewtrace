@@ -597,11 +597,17 @@ def make_tee_hard(p: synth.TeeParams, out: Path, seed: int, hard: HardParams | N
 
     half, edges = synth.sleeve_half(p)
     half = wave_edges(half, edges, hp, 2, 0, skip=("fold",))
-    origin = np.array([80.0, 80.0])
-    ring = _dense(half + origin)
+    ring = _dense(half)
     for key in ("underarm", "hem"):               # sleeve cap end and hem corner: the two free convex corners
-        ring = round_corner(ring, half[edges[key][0]] + origin, hp.corner_radius_mm)
-    photo, masks, H, marker_mm = render_hard({"sleeve": [ring]}, [ring], p.colour_bgr, rng, hp)
+        ring = round_corner(ring, half[edges[key][0]], hp.corner_radius_mm)
+    cap = half[edges["cap"][0] : edges["cap"][1] + 1]
+    body = synth.sleeve_scene_body(p, cap, ring, band_mm=10.0)   # clean body: the whole t-shirt around the sleeve
+    origin = synth.place_in_frame([ring, *body])
+    body = [b + origin for b in body]
+    ring = ring + origin
+    garment = shapely.union_all([shapely.make_valid(shapely.Polygon(g)) for g in [ring, *body]])
+    garment = [np.asarray(g.exterior.coords) for g in getattr(garment, "geoms", [garment])]
+    photo, masks, H, marker_mm = render_hard({"body": body, "sleeve": [ring]}, garment, p.colour_bgr, rng, hp)
     save(out, "sleeve", photo, masks, hp.jpeg_quality)
     truth["photos"]["sleeve"] = {
         "half_outline_mm": half.tolist(), "edges": edges, "origin_mm": origin.tolist(),

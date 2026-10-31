@@ -31,6 +31,8 @@ CORNER_DEG = 30.0      # turning angle that counts as a corner
 CORNER_WINDOW_MM = 4.0
 SMOOTH_SIGMA_MM = 1.5
 FOLD_TOL_MM = 1.0
+FOLD_REFIT_ROUNDS = 3   # refits of the sleeve fold line on the points near it
+FOLD_REFIT_TOL_MM = 2.5  # reach of a refit: wide enough for a mask edge that wobbles by about 2 mm
 JOINT_SPACING_MM = 1.0   # outline spacing for the sleeve joint search
 JOINT_TRIM_MM = 4.0      # least length of a sleeve-top or shoulder run ignored at its ends by the fit
 JOINT_MIN_RUN_MM = 15.0  # shortest straight run on each side of the shoulder point
@@ -667,12 +669,16 @@ def sleeve_half(outline: Outline) -> Outline:
     grid = np.radians(np.arange(-30, 30.05, 0.25))
     theta = grid[int(np.argmax([support(t)[0] for t in grid]))]
     _, near = support(theta)
-    # Refine: total least squares line through the fold points.
-    fp = pts[near]
-    _, _, vt = np.linalg.svd(fp - fp.mean(axis=0))
-    d = vt[0] if vt[0][1] > 0 else -vt[0]
-    theta = np.arctan2(-d[0], d[1])  # angle of the fold from +y
-    q = (pts - fp.mean(axis=0)) @ _rot(-theta).T
+    # Refine: total least squares line through the fold points. A wobbly mask edge can leave
+    # only a part of the fold within the tolerance of the first guess, and the line of that
+    # part runs off the rest. So refit on every point near the fitted line until it settles.
+    for _ in range(FOLD_REFIT_ROUNDS):
+        fp = pts[near]
+        _, _, vt = np.linalg.svd(fp - fp.mean(axis=0))
+        d = vt[0] if vt[0][1] > 0 else -vt[0]
+        theta = np.arctan2(-d[0], d[1])  # angle of the fold from +y
+        q = (pts - fp.mean(axis=0)) @ _rot(-theta).T
+        near = np.abs(q[:, 0]) < FOLD_REFIT_TOL_MM
     q = _orient_like_synth(q)
 
     on_fold = np.abs(q[:, 0]) < FOLD_TOL_MM

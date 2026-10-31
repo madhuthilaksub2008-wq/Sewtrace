@@ -9,7 +9,7 @@
     "chest_width": 0.26,
     "body_length": -0.03,
     "shoulder_width": -0.33,
-    "sleeve_length": 0.24,
+    "sleeve_length": 0.19,
     "neck_width": -0.43,
     "armhole_depth": 0.9
    },
@@ -25,11 +25,11 @@
     "chest_width": 0.21,
     "body_length": 0.05,
     "shoulder_width": 1.28,
-    "sleeve_length": 0.21,
+    "sleeve_length": 0.1,
     "neck_width": 0.13,
     "armhole_depth": 0.75
    },
-   "mean_abs_err_mm": 0.44,
+   "mean_abs_err_mm": 0.42,
    "seams_ok": true,
    "error": "",
    "synthetic": true
@@ -41,11 +41,11 @@
     "chest_width": 0.31,
     "body_length": 0.26,
     "shoulder_width": 0.13,
-    "sleeve_length": 0.2,
+    "sleeve_length": -0.01,
     "neck_width": 0.3,
     "armhole_depth": 0.76
    },
-   "mean_abs_err_mm": 0.33,
+   "mean_abs_err_mm": 0.29,
    "seams_ok": true,
    "error": "",
    "synthetic": true
@@ -57,11 +57,11 @@
     "chest_width": 0.06,
     "body_length": -0.27,
     "shoulder_width": -0.19,
-    "sleeve_length": 0.21,
+    "sleeve_length": 0.1,
     "neck_width": -0.13,
     "armhole_depth": 0.52
    },
-   "mean_abs_err_mm": 0.23,
+   "mean_abs_err_mm": 0.21,
    "seams_ok": true,
    "error": "",
    "synthetic": true
@@ -73,15 +73,15 @@
     "chest_width": 0.58,
     "body_length": 0.05,
     "shoulder_width": -0.81,
-    "sleeve_length": 0.19,
+    "sleeve_length": 0.06,
     "neck_width": 0.0,
     "armhole_depth": 0.97
    },
-   "mean_abs_err_mm": 0.43,
+   "mean_abs_err_mm": 0.41,
    "seams_ok": true,
    "error": "",
    "synthetic": true
   }
  ],
- "mean_abs_err_mm": 0.358
+ "mean_abs_err_mm": 0.33799999999999997
 }
