@@ -38,6 +38,9 @@ JOINT_SPACING_MM = 1.0   # outline spacing for the sleeve joint search
 JOINT_TRIM_MM = 4.0      # least length of a sleeve-top or shoulder run ignored at its ends by the fit
 JOINT_MIN_RUN_MM = 15.0  # shortest straight run on each side of the shoulder point
 JOINT_REACH_MM = 20.0    # tangent fit length at the underarm point
+UNDERARM_TRIM_MIN_MM = 1     # least and most of an underarm skipped before the tangents are fitted
+UNDERARM_TRIM_MAX_MM = 40
+MIN_FIT_MM = 8           # shortest stretch of an underarm tangent fit
 
 
 # ---- polyline helpers -------------------------------------------------------
@@ -241,6 +244,8 @@ class _Joints:
     shoulder_dir_b: np.ndarray
     side_dir_a: np.ndarray      # unit vectors along the side seam, towards the hem
     side_dir_b: np.ndarray
+    body_from: int              # body side run pts[body_from:body_to]: straight, past both underarm roundings
+    body_to: int
 
 
 @dataclass(frozen=True)
@@ -439,32 +444,48 @@ def _side_differences(c: tuple[int, ...], other: int, n: int) -> tuple[float, fl
     )
 
 
-def _corner_sets(cands: list[int], other: int, n: int) -> list[tuple[int, ...]]:
-    """Every choice of six corners with three on each side of the middle of the arc. The sleeve
-    hem pair, the cuff top pair and the neck pair are then nested by construction: a cuff top
-    cannot be taken from the other side."""
+def _skips_stronger(c: tuple[int, ...], cands: list[int], score: np.ndarray) -> bool:
+    """True when the six corners pass over a candidate that is stronger than the cuff top (c1 or c4)
+    of its side, between the sleeve hem corner (c0 or c5) and the middle of the neck. A cuff top
+    weaker than a wiggle on the same sleeve is a wiggle taken for the cuff top: the real cuff top
+    broke a mirror limit and was skipped. The same holds for a sleeve corner taken for a neck corner."""
+    neck_mid = (c[2] + c[3]) / 2
+    for lo, hi, top in ((c[0], neck_mid, c[1]), (neck_mid, c[5], c[4])):
+        if any(score[x] > score[top] for x in cands if lo < x < hi and x not in c):
+            return True
+    return False
+
+
+def _corner_sets(cands: list[int], score: np.ndarray, other: int, n: int) -> list[list[tuple[int, ...]]]:
+    """Choices of six corners, three on each side of a split of the candidates, with no stronger
+    candidate skipped than the cuff top (see _skips_stronger). One group per split, the split nearest
+    the middle of the arc first. The sleeve hem pair, the cuff top pair and the neck pair are nested
+    by construction: a cuff top cannot be taken from the other side. The split is not fixed at the
+    middle: sleeves laid unevenly move it, and a split with 3 and 3 candidates is possible."""
     mid = (other + n) / 2
-    left, right = [c for c in cands if c < mid], [c for c in cands if c >= mid]
-    return [(*a, *b) for a in itertools.combinations(left, 3) for b in itertools.combinations(right, 3)]
+    splits = sorted(range(3, len(cands) - 2), key=lambda m: abs((cands[m - 1] + cands[m]) / 2 - mid))
+    return [
+        [c for a in itertools.combinations(cands[:m], 3) for b in itertools.combinations(cands[m:], 3)
+         if not _skips_stronger(c := (*a, *b), cands, score)]
+        for m in splits
+    ]
 
 
-def _not_mirrored(cands: list[int], other: int, n: int, limits: tuple[float, float, float]) -> ValueError:
+def _not_mirrored(cands: list[int], score: np.ndarray, other: int, n: int, limits: tuple[float, float, float]) -> ValueError:
     """The error for a top arc with no valid six corners. ``limits`` are the three tolerances in
-    samples, in the order of _side_differences(). Reports the measure of the closest choice that
-    is furthest over its limit, so that the number is one that a retake can fix."""
+    samples, in the order of _side_differences(). Reports the measure of the best supported choice of
+    corners (the strongest ones) that is furthest over its limit, so that the number is one that a
+    retake can fix."""
     if len(cands) < 6:
         return ValueError(
             f"found {len(cands)} convex corners over the sleeves and neck, but 6 are needed "
             "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask, neck up?"
         )
-    sets = _corner_sets(cands, other, n)
-    if not sets:
-        mid = (other + n) / 2
-        sides = sum(c < mid for c in cands), sum(c >= mid for c in cands)
-        return ValueError(
-            f"found {sides[0]} and {sides[1]} convex corners on the two sides of the t-shirt, but 3 are needed "
-            "on each (2 sleeve hem, 1 neck): is the whole t-shirt, with both sleeves, in the mask, neck up?"
-        )
+    # The best supported choice: a weak wiggle in place of a cuff top is nearly as mirrored as the real one.
+    group = _corner_sets(cands, score, other, n)[0]   # the split nearest the middle
+    best = max(sum(score[x] for x in c) for c in group)
+    sets = [c for c in group if sum(score[x] for x in c) >= best - 1e-9]
+
     def worst(c: tuple[int, ...]) -> tuple[float, int]:
         ratios = [d / lim for d, lim in zip(_side_differences(c, other, n), limits)]
         k = int(np.argmax(ratios))
@@ -484,10 +505,11 @@ def _not_mirrored(cands: list[int], other: int, n: int, limits: tuple[float, flo
 
 def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int]:
     """The six convex corners of the top arc (``other`` .. ``n``): sleeve hem bottom and top and
-    neck, left and right. The strongest peaks are candidates. The six are chosen as three on each
-    side of the middle of the arc, in order: sleeve hem bottom, sleeve hem top, neck corner. A
-    corner that is rounded or beside a scoop can be weaker than a wiggle in the edge, but a
-    wiggle does not fit the structure of a tee.
+    neck, left and right. The strongest peaks are candidates. The six are chosen in order, three
+    per side: sleeve hem bottom, sleeve hem top, neck corner. A corner that is rounded or beside a
+    scoop can be weaker than a wiggle in the edge, but a wiggle does not fit the structure of a tee.
+    A choice never skips a candidate stronger than its cuff top on the same side (_skips_stronger): if the
+    strongest candidate does not fit the limits, the photo is refused, not the next best wiggle.
 
     The two sides must match in what each can measure alone, so that sleeves laid unevenly are
     fine: the sleeve length (``pair_tol_hem_mm``), the length from cuff top to neck corner
@@ -497,16 +519,31 @@ def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int
     cands = sorted(_peaks(score, cfg.corner_min_deg, radius)[:12])
     limits = (cfg.pair_tol_hem_mm / JOINT_SPACING_MM, cfg.cuff_width_diff_mm / JOINT_SPACING_MM,
               cfg.pair_tol_neck_mm / JOINT_SPACING_MM)
-    best: tuple[float, tuple[int, ...]] | None = None
-    for c in _corner_sets(cands, other, n):
-        if any(d > lim for d, lim in zip(_side_differences(c, other, n), limits)):
-            continue
-        strength = sum(min(score[c[i]], score[c[5 - i]]) for i in range(3))
-        if best is None or strength > best[0]:
-            best = (strength, c)
-    if best is None:
-        raise _not_mirrored(cands, other, n, limits)
-    return list(best[1])
+    for group in _corner_sets(cands, score, other, n):
+        fits = [c for c in group if all(d <= lim for d, lim in zip(_side_differences(c, other, n), limits))]
+        if fits:
+            return list(max(fits, key=lambda c: sum(score[x] for x in c)))
+    raise _not_mirrored(cands, score, other, n, limits)
+
+
+def _underarm_corner(pts: np.ndarray, fine: np.ndarray, at: int, room_in: int, room_out: int) -> tuple[np.ndarray, int]:
+    """Tangent corner at the underarm sample ``at`` (REQ-GEO-01), and the trim: samples from ``at``
+    to where both tangents start.
+
+    A rounded underarm (up to 25 mm radius) puts tangents fitted on the arc inside the true corner by
+    about the radius, so both lines start past the rounding. How far the rounding reaches follows from
+    how sharp the turn at the corner is: the peak of ``fine`` (turning over a short chord, deg) is about
+    ``contour.joints.underarm_rounding_deg_mm`` / extent. That is a single strong value; the turning at
+    each sample along the arc is too noisy on a real mask to find the end of the rounding.
+    ``room_*`` are the samples free on each side before the next corner."""
+    cfg = get_config().contour.joints
+    peak = float(fine[np.arange(at - 3, at + 4) % len(fine)].max())
+    trim = int(np.clip(round(cfg.underarm_rounding_deg_mm / max(peak, 1.0)), UNDERARM_TRIM_MIN_MM, UNDERARM_TRIM_MAX_MM))
+    reach = min(trim + JOINT_REACH_MM, room_in, room_out)
+    trim = int(min(trim, reach - MIN_FIT_MM))
+    point = _corner(_ring_run(pts, at - int(reach), at), _ring_run(pts, at, at + int(reach)),
+                    reach, reach, float(max(trim, 1)), float(max(trim, 1)))
+    return point, max(trim, 1)
 
 
 def _find_joints(outline: Outline) -> _Joints:
@@ -546,18 +583,14 @@ def _find_joints(outline: Outline) -> _Joints:
     inner[other + k : n - k] = turn[other + k : n - k]
     top = _six_corners(inner, other, n, 3 * k)
     c0, c1, c2, c3, c4, c5 = top
-    reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
     h = hem[0] if hem else other // 2
-
-    def underarm(into_lo: int, into_hi: int, out_lo: int, out_hi: int) -> np.ndarray:
-        return _corner(_ring_run(pts, into_lo, into_hi), _ring_run(pts, out_lo, out_hi), JOINT_REACH_MM, JOINT_REACH_MM)
-
     prev = hem[-1] if hem else 0
-    under_a = underarm(other - min(reach, other - prev - 2), other, other, other + min(reach, c0 - other - 2))
-    under_b = underarm(n - min(reach, n - c5 - 2), n, 0, min(reach, h - 2))
-
     fine = gaussian_filter1d(_signed_turning(pts, max(int(round(4.0 / JOINT_SPACING_MM)), 1)), 2, mode="wrap")
     fine = np.abs(fine)
+
+    under_a, trim_a = _underarm_corner(pts, fine, other, other - prev - 2, c0 - other - 2)
+    under_b, trim_b = _underarm_corner(pts, fine, 0, n - c5 - 2, h - 2)
+    body_from, body_to = trim_b, other - trim_a
 
     scan_a = _shoulder_scan(pts, fine, sleeve=c1, neck=c2)
     scan_b = _shoulder_scan(pts, fine, sleeve=c4, neck=c3)
@@ -566,10 +599,12 @@ def _find_joints(outline: Outline) -> _Joints:
     shoulder_b, dir_b = scan_b.at(j)
     ia = c1 + int(np.argmin(np.linalg.norm(pts[c1 : c2 + 1] - shoulder_a, axis=1)))
     ib = c3 + int(np.argmin(np.linalg.norm(pts[c3 : c4 + 1] - shoulder_b, axis=1)))
-    side_a = pts[max(other - reach, 0)] - under_a
-    side_b = pts[min(reach, other)] - under_b
+    reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
+    side_a = pts[max(body_to - reach, 0)] - under_a
+    side_b = pts[min(body_from + reach, other)] - under_b
     return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib, c2, c3,
-                   dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b))
+                   dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b),
+                   body_from, body_to)
 
 
 def _shoulder_scan(pts: np.ndarray, fine: np.ndarray, sleeve: int, neck: int) -> _HingeScan:
@@ -641,13 +676,13 @@ def cut_sleeves_flagged(outline: Outline) -> tuple[Outline, np.ndarray, np.ndarr
     edge is not on the outline (front neck depth is inferred, REQ-RSN-04).
     """
     j = _find_joints(outline)
-    pts, other = j.pts, j.other
+    pts = j.pts
     centre = _centroid(pts)
     arm_a = default_armhole(j.shoulder_a, j.underarm_a, j.shoulder_dir_a, j.side_dir_a, centre)
     arm_b = default_armhole(j.shoulder_b, j.underarm_b, j.shoulder_dir_b, j.side_dir_b, centre)
     parts = [
         (j.underarm_b[None], False),
-        (pts[1:other], False),
+        (pts[j.body_from : j.body_to], False),
         (j.underarm_a[None], True),
         (arm_a[::-1][1:-1], True),
         (j.shoulder_a[None], True),

@@ -42,11 +42,14 @@ def _near_end(run: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return pick if len(pick) >= 2 else run[-3:]
 
 
-def _corner(into: np.ndarray, out_of: np.ndarray, reach_in: float = 8.0, reach_out: float = 8.0) -> np.ndarray:
+def _corner(
+    into: np.ndarray, out_of: np.ndarray, reach_in: float = 8.0, reach_out: float = 8.0,
+    lo_in: float = 1.0, lo_out: float = 1.0,
+) -> np.ndarray:
     """Corner between two edges: intersection of tangent lines fitted to each edge
-    over arc lengths 1..reach mm from the corner."""
-    c1, d1 = _fit_line(_near_end(into, 1.0, reach_in))
-    c2, d2 = _fit_line(_near_end(out_of[::-1], 1.0, reach_out))
+    over arc lengths lo..reach mm from the corner (lo is raised to skip a rounding)."""
+    c1, d1 = _fit_line(_near_end(into, lo_in, reach_in))
+    c2, d2 = _fit_line(_near_end(out_of[::-1], lo_out, reach_out))
     A = np.c_[d1, -d2]
     if abs(np.linalg.det(A)) < 1e-6:
         return into[-1]

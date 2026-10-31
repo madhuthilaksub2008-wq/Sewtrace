@@ -109,11 +109,15 @@ corner_min_deg = 10.0      # convex corners (sleeve hem, neck) are picked among 
 # agree in what each can measure alone, by at most:
 #   pair_tol_hem_mm     sleeve length (underarm to the outer cuff corner). 0 to 23 mm on the 40 hard
 #                       photos (10 tees, front and back, with and without lens and curl). Unchanged.
-#   cuff_width_diff_mm  cuff width, from the outer to the inner cuff corner. People do not lay both
-#                       sleeves the same: an adult tee photographed on Oct 31 had cuffs 138 and 92 mm
-#                       wide (46 mm), with the sleeve lengths 16 mm apart. 1.5 times 46 mm, rounded.
-#                       Before Oct 31 the cuff top pair had to mirror within pair_tol_hem_mm, and
-#                       that photo was refused. NEEDS REAL PHOTOS.
+#   cuff_width_diff_mm  cuff width, from the outer to the inner cuff corner. Evidence is thin:
+#                       three real photos, all with the sleeves laid by hand. Two accepted ones
+#                       (5.jpg, 6.jpg) have cuffs 6 mm apart. 1.jpg has cuffs 138 and 225 mm wide
+#                       (87 mm apart; its right sleeve runs to the image edge) and must be refused.
+#                       Until Oct 31 the limit was 70 mm from 1.5 times 46 mm, a difference that
+#                       came from a wiggle taken for the cuff top on 1.jpg, not from its cuff
+#                       corners. 70 mm is kept: it refuses the 87 mm photo with a margin of 17 mm
+#                       and leaves room for sleeves laid unevenly. Any value from 6 to 87 mm fits
+#                       these photos: the choice is a guess. NEEDS REAL PHOTOS.
 #   pair_tol_neck_mm    length from the inner cuff corner to the neck corner (sleeve top and
 #                       shoulder seam). It was the offset of the neck pair from mirrored about the
 #                       middle of the arc, which also held the sleeve length and cuff width
@@ -143,6 +147,11 @@ near_best = 1.25           # a bend whose joint fit is within this factor of the
 # straight-line fits for the shoulder point start rounding_margin_mm past that.
 rounding_deg = 12.0
 rounding_margin_mm = 2.0
+# The underarm tangents start past the rounding of the underarm (up to 25 mm radius on the hard
+# synthetic tees). The turning over a 4 mm chord peaks at the corner at about
+# underarm_rounding_deg_mm / (length of the rounding in mm): 90 degrees for a sharp corner, 30 to
+# 40 for 15 mm radius, 20 for 25 mm. 400 from those two synthetic tees. NEEDS REAL PHOTOS.
+underarm_rounding_deg_mm = 400.0
 
 [contour.labels]          # REQ-GEO-01: corners of the half outline that mark the edges
 # Own key: edge labelling used 4 mm before the hard set. The hard set needs 8 mm: with 4 mm the

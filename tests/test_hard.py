@@ -140,14 +140,21 @@ def test_req_geo_01_joint_finder_tolerates_rounded_corners(radius):
 def test_req_geo_01_rounded_underarms_are_found(radius):
     """REQ-GEO-01: both underarms rounded to 15 and 25 mm. A real kid's tee had one that turned 50
     degrees over 25 mm: the 8 mm chord saw two peaks of 27 and 22 degrees (minimum 30) and found no
-    underarm. The point is the tangent corner of the arc it is fitted on, so it lies up to about the
-    rounding radius inside the true corner (measured: 8.8 mm at 15, 16.6 mm at 25)."""
+    underarm. The point is the tangent corner of the lines fitted past the rounding, so it is near the
+    true (sharp) corner, not inside it by the radius as with lines fitted on the arc (measured then:
+    underarm off by 8.8 mm at 15 and 16.6 mm at 25, armhole depth off by 7 and 13 mm). Measured now:
+    underarm off by 3.1 and 5.3 mm, armhole depth by 4.0 and 4.1 mm. Not below 1 mm: the mask waves of
+    1 mm and the 20 mm fit length move the tangent corner by 2 to 4 mm even on a sharp underarm."""
     p = _tee(0)
     hp = _calm(0, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
     outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
     found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
-    assert max(_nearest_errors(found_underarm, underarm)) < radius
+    assert max(_nearest_errors(found_underarm, underarm)) < 6.0
     assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+    for u, s in zip(underarm, shoulder):
+        fu = found_underarm[np.argmin(np.linalg.norm(found_underarm - u, axis=1))]
+        fs = found_shoulder[np.argmin(np.linalg.norm(found_shoulder - s, axis=1))]
+        assert abs((fu[1] - fs[1]) - (u[1] - s[1])) < 6.0   # armhole depth
 
 
 def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
@@ -201,6 +208,14 @@ def _six(arc_positions: list[int], weak: tuple[int, ...] = ()):
     return contour._six_corners(score, OTHER, OTHER + ARC, radius=RADIUS)
 
 
+def _six_scored(corners: dict[int, float]):
+    """_six_corners() on corners given as {position along the arc: score in degrees}."""
+    score = np.zeros(OTHER + ARC + 100)
+    for position, deg in corners.items():
+        score[OTHER + position] = deg
+    return [c - OTHER for c in contour._six_corners(score, OTHER, OTHER + ARC, radius=RADIUS)]
+
+
 @pytest.mark.parametrize("shift, ok", [(30, True), (55, False)])
 def test_req_geo_01_neck_corner_may_be_further_off_than_the_sleeve_lengths(shift, ok):
     """REQ-GEO-01: six corners on an arc of 500 mm with sleeves of the same length and the same cuff
@@ -229,11 +244,49 @@ def test_req_geo_01_sleeves_laid_with_cuffs_of_different_widths_are_accepted():
 
 
 def test_req_geo_01_a_cuff_top_is_never_taken_from_the_other_side_of_the_arc():
-    """REQ-GEO-01: four strong corners on one side of the middle of the arc and two on the other cannot be
-    three and three. The error says the count, not an offset that no retake would fix."""
-    with pytest.raises(ValueError, match=r"4 and 2 convex corners on the two sides") as exc:
+    """REQ-GEO-01: four strong corners on one side of the middle of the arc and two on the other. The
+    six are three and three in order, so the cuff top of the right side is never one of the left, and
+    the error names the measure that fails (the neck pair is 105 mm out), not a count."""
+    tol = get_config().contour.joints
+    with pytest.raises(contour.CornersNotMirrored) as exc:
         _six([30, 130, 200, 240, 415, 470])
-    assert not isinstance(exc.value, contour.CornersNotMirrored)
+    assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
+    assert exc.value.offset_mm == pytest.approx(105, abs=1.0)
+
+
+def test_req_geo_01_uneven_sleeves_that_move_the_middle_of_the_arc_are_accepted():
+    """REQ-GEO-01: corners [50, 170, 255, 365, 415, 470] on an arc of 500 mm: sleeve lengths 20 mm apart
+    (limit 25), cuff widths 65 mm (limit 70), cuff top to neck 35 mm (limit 40). The middle of the arc
+    (250) has only two corners on its left, so a split there found 2 and 4 and refused a valid layout."""
+    tol = get_config().contour.joints
+    assert 20 < tol.pair_tol_hem_mm and 65 < tol.cuff_width_diff_mm and 35 < tol.pair_tol_neck_mm
+    positions = [50, 170, 255, 365, 415, 470]
+    assert _six(positions) == [OTHER + a for a in positions]
+
+
+def test_req_geo_01_a_wiggle_is_not_taken_for_a_cuff_top_when_the_true_corners_fail_a_limit():
+    """REQ-GEO-01: the true cuff tops (40 degrees) are 140 and 60 mm wide on the two sleeves, 80 mm apart
+    (limit 70). A wiggle of 20 degrees at 110 mm on the left sleeve would give widths 80 and 60, within
+    every limit. It is not taken: a real photo (1.jpg) had its outer sleeve corners (47 and 46 degrees)
+    skipped for wiggles of 24 and 25 degrees, and its cuffs, 138 and 225 mm wide, were accepted."""
+    tol = get_config().contour.joints
+    corners = {30: 40.0, 110: 20.0, 170: 40.0, 250: 40.0, 300: 40.0, 410: 40.0, 470: 40.0}
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six_scored(corners)
+    assert exc.value.stage == "cuff_top" and exc.value.limit_mm == tol.cuff_width_diff_mm
+    assert exc.value.offset_mm == pytest.approx(80, abs=1.0)
+    corners[110] = 0.0   # without the wiggle the same corners fail alike: the wiggle only offered a way out
+    with pytest.raises(contour.CornersNotMirrored):
+        _six_scored(corners)
+
+
+def test_req_geo_01_the_stronger_of_two_candidates_is_the_cuff_top_when_both_fit():
+    """REQ-GEO-01: a rounded true cuff top (14 degrees) and a wiggle of 30 degrees 35 mm further up the
+    sleeve top. Both choices are within every limit, and the evidence for the wiggle is stronger, so
+    the wiggle is taken: the cuff top is then 35 mm out along the sleeve top, which the shoulder fit
+    (it starts past the rounding of the cuff top) absorbs. Pinned so that a change is a decision."""
+    corners = {30: 40.0, 120: 14.0, 155: 30.0, 210: 40.0, 290: 40.0, 380: 40.0, 470: 40.0}
+    assert _six_scored(corners) == [30, 155, 210, 290, 380, 470]
 
 
 def test_req_geo_01_uneven_cuff_widths_say_what_did_not_match_and_by_how_much():
