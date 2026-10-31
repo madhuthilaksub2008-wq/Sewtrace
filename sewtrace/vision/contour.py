@@ -377,6 +377,59 @@ def _rounding_trim(turn_fine: np.ndarray, corner: int, direction: int, limit_mm:
     return max(run * JOINT_SPACING_MM + cfg.rounding_margin_mm, JOINT_TRIM_MM)
 
 
+class CornersNotMirrored(ValueError):
+    """The corners of the top arc do not mirror each other within the config tolerance.
+
+    ``stage`` is the first pair that fails ("cuff_bottom", "cuff_top" or "neck"), ``offset_mm`` its
+    closest candidate pair's distance from mirrored (nan when no pair fits inside the previous one)
+    and ``limit_mm`` the config limit it passed. They are kept so that refusals on real photos can
+    be used to recalibrate the limits."""
+
+    def __init__(self, message: str, stage: str, offset_mm: float, limit_mm: float) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.offset_mm = offset_mm
+        self.limit_mm = limit_mm
+
+
+_STAGE_NAMES = {"cuff_bottom": "outer sleeve cuff corners", "cuff_top": "inner sleeve cuff corners", "neck": "neck corners"}
+
+
+def _not_mirrored(cands: list[int], pairs: list[tuple[int, int, float]], hem_tol: float, neck_tol: float) -> ValueError:
+    """The error for a top arc with no six mirrored corners. Walks the stages of the choice in
+    _six_corners (outer cuff pair, cuff top pair inside it, neck pair inside that) and reports the
+    first stage whose closest pair is off by more than its limit. ``pairs`` offsets and the
+    tolerances are in samples; the message is in mm."""
+    if len(cands) < 6:
+        return ValueError(
+            f"found {len(cands)} convex corners over the sleeves and neck, but 6 are needed "
+            "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask, neck up?"
+        )
+    windows = [(-1, 10**9)]   # the pairs that passed the stage before; the first stage sees all
+    for room, (stage, tol) in zip((4, 2, 0), (("cuff_bottom", hem_tol), ("cuff_top", hem_tol), ("neck", neck_tol))):
+        # A pair needs room for the pairs of the later stages, or the neck pair would count as a cuff pair.
+        inside = [
+            (i, j, off) for i, j, off in pairs
+            if any(lo < i < j < hi for lo, hi in windows) and sum(i < c < j for c in cands) >= room
+        ]
+        best_off = min((off for _, _, off in inside), default=float("nan"))
+        if not best_off <= tol:
+            offset_mm, limit_mm = best_off * JOINT_SPACING_MM, tol * JOINT_SPACING_MM
+            what = _STAGE_NAMES[stage]
+            if np.isnan(offset_mm):
+                detail = f"the {what} do not mirror: no pair of corners fits inside the pair before it."
+            else:
+                detail = f"the {what} do not mirror: the closest pair is {offset_mm:.0f} mm off (limit {limit_mm:g} mm)."
+            return CornersNotMirrored(
+                f"{detail} Lay both sleeves the same way: the same angle down from the shoulder, cuffs flat "
+                "and unrolled, the same width. Keep the marker paper away from the t-shirt",
+                stage, offset_mm, limit_mm,
+            )
+        windows = [(i, j) for i, j, off in inside if off <= tol]
+    # Every stage has a pair, so _six_corners would have chosen one: kept as a safe default.
+    return CornersNotMirrored("the corners do not mirror each other", "neck", float("nan"), neck_tol * JOINT_SPACING_MM)
+
+
 def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int]:
     """The six convex corners of the top arc (``other`` .. ``n``): sleeve hem bottom and top and
     neck, left and right. The strongest peaks are candidates, and the six are chosen to be
@@ -405,10 +458,7 @@ def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int
                 if best is None or strength > best[0]:
                     best = (strength, [p0[0], p1[0], p2[0], p2[1], p1[1], p0[1]])
     if best is None:
-        raise ValueError(
-            f"found {len(cands)} convex corners over the sleeves and neck, but no 6 that mirror each other "
-            "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask, neck up?"
-        )
+        raise _not_mirrored(cands, pairs, hem_tol, neck_tol)
     return best[1]
 
 

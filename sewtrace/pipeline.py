@@ -78,6 +78,10 @@ def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bo
         # The numbers let refusals on real photos recalibrate contour.joints.shoulder_plateau_mm.
         log.warning("shoulder point not clear: %s, spread %.1f mm, limit %.1f mm", photo, err.spread_mm, err.limit_mm)
         raise ContourFailed(f"{view} photo {photo}: {err}. Take the {view} photo again.") from err
+    except contour.CornersNotMirrored as err:
+        # The numbers let refusals on real photos recalibrate contour.joints.pair_tol_*_mm.
+        log.warning("corners not mirrored: %s, stage %s, offset %.1f mm, limit %.1f mm", photo, err.stage, err.offset_mm, err.limit_mm)
+        raise ContourFailed(f"{view} photo {photo}: {err}. Take the {view} photo again.") from err
     except ValueError as err:
         raise ContourFailed(
             f"{view} photo {photo}: {err}. Take the photo again with the whole t-shirt flat and in view."

@@ -222,6 +222,27 @@ def test_req_geo_01_contour_failure_names_the_photo(tmp_path, monkeypatch):
         run(tee, tmp_path / "out", _client(tmp_path))
 
 
+def test_req_geo_01_unmirrored_corners_say_to_lay_the_sleeves_the_same_way(tmp_path, monkeypatch, caplog):
+    """REQ-GEO-01: CornersNotMirrored becomes ContourFailed that keeps its advice, ends with
+    "Take the front photo again." and does not add the generic whole t-shirt advice. Numbers are logged."""
+    from sewtrace.vision import contour
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+
+    def refuse(outline):
+        raise contour.CornersNotMirrored(
+            "the inner sleeve cuff corners do not mirror: the closest pair is 62 mm off (limit 25 mm). "
+            "Lay both sleeves the same way", "cuff_top", 62.0, 25.0)
+
+    monkeypatch.setattr(contour, "remove_sleeves", refuse)
+    with caplog.at_level("WARNING"), pytest.raises(pipeline.ContourFailed) as exc:
+        run(tee, tmp_path / "out", _client(tmp_path))
+    text = str(exc.value)
+    assert "front photo" in text and "62 mm off (limit 25 mm)" in text and text.endswith("Take the front photo again.")
+    assert "flat and in view" not in text
+    assert "stage cuff_top, offset 62.0 mm, limit 25.0 mm" in caplog.text
+
+
 @pytest.mark.parametrize("error, text", [
     ("BudgetExceeded", "over the limit"),
     ("CacheMiss", "offline mode: no cached answer for step X; run once online"),

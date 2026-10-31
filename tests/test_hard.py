@@ -180,11 +180,43 @@ def test_req_geo_01_neck_pair_may_be_further_from_mirrored_than_the_hem_pairs(ne
     pairs = [(20, 284), (60, 250), (100, 200 + neck_offset)]
     score = _peak_scores([other + a for a, _ in pairs] + [other + b for _, b in pairs])
     if ok:
-        got = contour._six_corners(score, other, other + arc, radius=5)
+        got = contour._six_corners(score, other, other + arc, radius=4)
         assert got == [other + 20, other + 60, other + 100, other + 230, other + 250, other + 284]
     else:
-        with pytest.raises(ValueError, match="no 6 that mirror each other"):
-            contour._six_corners(score, other, other + arc, radius=5)
+        with pytest.raises(contour.CornersNotMirrored, match="neck corners do not mirror") as exc:
+            contour._six_corners(score, other, other + arc, radius=4)
+        assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
+        # the closest pair inside the cuff pairs is (100, 250), 50 mm off, not the intended (100, 255)
+        assert exc.value.offset_mm == pytest.approx(50, abs=1.0)
+
+
+def test_req_geo_01_uneven_cuff_tops_say_what_did_not_mirror_and_by_how_much():
+    """REQ-GEO-01: outer cuff pair off by 16 mm (passes), closest cuff top pair off by 60 mm (limit 25 mm),
+    as on a real photo with one sleeve laid wider than the other. The error names the stage, the
+    offset and the action, and keeps the numbers."""
+    other, arc = 100, 300
+    hem = get_config().contour.joints.pair_tol_hem_mm
+    assert 16 < hem < 60
+    pairs = [(20, 296), (60, 178), (90, 180)]   # offsets 16, -62, -30; the closest cuff top pair is (60, 180), 60 mm
+    score = _peak_scores([other + a for a, _ in pairs] + [other + b for _, b in pairs])
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        contour._six_corners(score, other, other + arc, radius=1)
+    err = exc.value
+    assert err.stage == "cuff_top" and err.limit_mm == hem and err.offset_mm == pytest.approx(60, abs=1.0)
+    text = str(err)
+    assert "inner sleeve cuff corners do not mirror" in text and "60 mm off (limit 25 mm)" in text
+    assert "same angle down from the shoulder" in text and "marker paper" in text
+    assert "whole t-shirt" not in text
+
+
+def test_req_geo_01_fewer_than_six_corners_keep_the_mask_hint():
+    """REQ-GEO-01: with too few corners the cause may be the mask, so the hint stays and the error is
+    a plain ValueError."""
+    other, arc = 100, 300
+    score = _peak_scores([other + a for a in (20, 100, 200, 284)])
+    with pytest.raises(ValueError, match="4 convex corners.*whole t-shirt") as exc:
+        contour._six_corners(score, other, other + arc, radius=5)
+    assert not isinstance(exc.value, contour.CornersNotMirrored)
 
 
 def test_req_geo_01_whole_garment_with_no_underarm_is_an_error():
