@@ -44,7 +44,7 @@ from sewtrace.api.client import (
     with_output_text_done,
 )
 from sewtrace.config import Settings, load_config
-from sewtrace.day1 import run_day1, worst_case_usd
+from sewtrace.day1 import run_day1, run_probe, worst_case_usd
 from sewtrace.reason.panels import PanelInference
 from sewtrace.reason.seams import ADJUST_SCHEMA
 
@@ -1041,3 +1041,58 @@ def test_req_api_02_raw_events_key_is_unchanged_and_only_the_decoded_key_moved(t
     client = _client(tmp_path)
     assert client._sam_key(path, "t-shirt", decoded=False) == "9266f858babaa1dd1646868da73f42f25411827278ea8b3ffe7d33ebc5e5101e"
     assert client._sam_key(path, "t-shirt", decoded=True) != "8ff2b54ab437db8bcee5f1271b775895727b65ffc2ed5b232882844db64acc3c"
+
+
+# ---- Probe command (REQ-SEG-01: try a SAM text prompt before code depends on it) ---------------
+
+def test_req_seg_01_probe_refuses_without_yes_spend_and_calls_nothing(tmp_path, photo, capsys):
+    client = _client(tmp_path)
+    with pytest.raises(ApiError, match="--yes-spend"):
+        run_probe(photo, "sleeve", yes_spend=False, client=client)
+    assert "worst case $0.0025" in capsys.readouterr().out
+    assert client._stream_transport.calls == [] and client._transport.calls == []
+
+
+def test_req_seg_01_probe_refuses_in_mock_mode_even_with_the_flag(tmp_path, photo):
+    mock = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path,
+                               ledger_path=tmp_path / "l" / "ledger.csv", config=load_config()))
+    with pytest.raises(ApiError, match="Mock or offline"):
+        run_probe(photo, "sleeve", yes_spend=True, client=mock)
+
+
+def test_req_seg_01_probe_cli_refuses_without_the_flag(tmp_path, photo, monkeypatch, capsys):
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["probe", str(photo), "sleeve"])
+    assert stop.value.code == 1
+    assert "--yes-spend" in capsys.readouterr().err
+
+
+def test_req_seg_01_probe_makes_one_sam_call_reports_every_record_and_writes_overlay(tmp_path, photo, monkeypatch, capsys):
+    records = [_mask("0", 10, 10, at=(10, 5, 30, 25)), _mask("1", 10, 10, at=(40, 5, 60, 25))]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=_raw(W, H))))
+    client = _client(tmp_path)
+    path = run_probe(photo, "short sleeve", yes_spend=True, client=client, out_dir=tmp_path / "o")
+    assert len(client._stream_transport.calls) == 1 and client._transport.calls == []
+    out = capsys.readouterr().out
+    assert "SAM returned 2 mask record(s) for 'short sleeve'" in out
+    assert "record 0:" in out and "record 1:" in out
+    assert path.parent.parent == tmp_path / "o" and path.parent.name.startswith("short_sleeve_")
+    assert path.name == "p.sam_overlay.png"
+    assert cv2.imread(str(path)).shape == (H, W, 3)
+    # Same photo and prompt again: read from the cache, nothing more is spent.
+    run_probe(photo, " short sleeve ", yes_spend=True, client=client, out_dir=tmp_path / "o")
+    assert len(client._stream_transport.calls) == 1
+    assert "nothing was spent" in capsys.readouterr().out
+
+
+def test_req_seg_04_probe_prints_the_stored_facts_of_a_refused_answer_and_never_pays_twice(tmp_path, photo, monkeypatch, capsys):
+    records = [_mask("0", 10, 10, at=(10, 5, 30, 25), confidence=0.1)]  # below sam.min_score
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=_raw(W, H))))
+    client = _client(tmp_path)
+    for _ in range(2):
+        with pytest.raises(SegmentationFailed):
+            run_probe(photo, "sleeve", yes_spend=True, client=client, out_dir=tmp_path / "o")
+        assert "record 0: mask confidence 0.100" in capsys.readouterr().out
+    assert len(client._stream_transport.calls) == 1
+    assert not (tmp_path / "o").exists()

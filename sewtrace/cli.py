@@ -1,4 +1,4 @@
-"""Command line: sewtrace synth | run | eval | verify | serve | day1 | demo."""
+"""Command line: sewtrace synth | run | eval | verify | serve | day1 | probe | demo."""
 
 from __future__ import annotations
 
@@ -34,6 +34,12 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("photo")
     d.add_argument("--yes-spend", action="store_true",
                    help="required: confirm that the two paid calls are approved")
+    pb = sub.add_parser("probe", help="ONE paid SAM call: mask a text prompt on a photo and write an overlay")
+    pb.add_argument("photo")
+    pb.add_argument("prompt", help='SAM text prompt, for example: sleeve  or  "short sleeve"')
+    pb.add_argument("--yes-spend", action="store_true",
+                    help="required: confirm that the paid SAM call is approved (the worst-case cost is printed first)")
+    pb.add_argument("--out", default="out/probe", help="overlay folder (default: out/probe/<prompt>_<hash>/)")
     dm = sub.add_parser("demo", help="record a demo bundle, or play one with no network (docs/DEMO.md)")
     dsub = dm.add_subparsers(dest="demo_cmd", required=True)
     rec = dsub.add_parser("record", help="run the pipeline once and write demo/<name>/")
@@ -107,6 +113,9 @@ def _dispatch(args: argparse.Namespace) -> None:
     elif args.cmd == "day1":
         from sewtrace.day1 import run_day1
         run_day1(args.photo, yes_spend=args.yes_spend)
+    elif args.cmd == "probe":
+        from sewtrace.day1 import run_probe
+        run_probe(args.photo, args.prompt, yes_spend=args.yes_spend, out_dir=args.out)
     elif args.cmd == "demo":
         _demo(args)
     elif args.cmd == "verify":

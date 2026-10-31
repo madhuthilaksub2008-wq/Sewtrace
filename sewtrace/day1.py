@@ -7,6 +7,7 @@ and after. It never loops and never retries by itself. It refuses to run without
 from __future__ import annotations
 
 import csv
+import hashlib
 import time
 from pathlib import Path
 
@@ -164,3 +165,46 @@ def run_day1(
         after_total = client.ledger_total_usd()
         print(f"Ledger total after: ${after_total:.6f}  (this run: ${after_total - before_total:.6f})")
         print("Compare with the Usage page: they must agree within 10% (REQ-API-09).")
+
+
+def run_probe(
+    photo: str | Path, prompt: str, *, yes_spend: bool, client: MetaClient | None = None,
+    out_dir: str | Path = "out/probe",
+) -> Path:
+    """One SAM call with any text prompt (REQ-SEG-01), to try a prompt before code depends on it.
+
+    Prints every mask record and box SAM returned, and writes an overlay: the mask segment() selects in red,
+    every box in green with its record id. Refuses without ``yes_spend`` and in mock or offline
+    mode. A second run with the same photo and prompt is read from the cache and costs nothing."""
+    client = client or MetaClient()
+    photo = Path(photo)
+    if not photo.is_file():
+        raise ApiError(f"Photo {photo} not found. Check the path.")
+    prompt = prompt.strip()  # one cache key per prompt: "t-shirt " must not pay again for "t-shirt"
+    if not prompt:
+        raise ApiError("The prompt is empty. Give a text prompt, for example: sleeve")
+    usd = cost_usd(client.config.models.sam, Usage(images=1))
+    print(f"Probe {photo.name} with SAM prompt {prompt!r}: one call, worst case ${usd:.4f}. "
+          f"Ledger limit ${client.config.api.budget_limit_usd:.2f}.")
+    if not yes_spend:
+        raise ApiError("Nothing was called. Add --yes-spend to make the paid call.")
+    if client.settings.mock or client.settings.offline:
+        raise ApiError("Mock or offline mode is on. Set META_API_KEY and unset SEWTRACE_MOCK and SEWTRACE_OFFLINE.")
+
+    n = len(_ledger_rows(client))
+    start = time.monotonic()
+    try:
+        mask = client.segment(photo, prompt)
+    except ApiError:
+        _print_stored_sam_facts(client, photo, prompt)
+        raise
+    _report("SAM", _ledger_rows(client)[n:], time.monotonic() - start, prompt)
+    count = len(client.sam_inspect(photo, prompt).records)
+    print(f"SAM returned {count} mask record(s) for {prompt!r}. The overlay shades the one segment() selects "
+          "(highest confidence; the largest if a confidence is missing). Green boxes show every record.")
+    print(f"Selected mask: {int(mask.sum())} px of {mask.size}")
+    slug = "".join(c if c.isalnum() else "_" for c in prompt)[:60]
+    folder = Path(out_dir) / f"{slug}_{hashlib.sha256(prompt.encode()).hexdigest()[:8]}"
+    path = _write_overlay(client, photo, prompt, mask, folder)
+    print(f"Overlay: {path}")
+    return path
