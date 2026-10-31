@@ -339,10 +339,9 @@ def verify_proof(
     garment = mask_outline_mm(client.segment(photo, prompts.garment), homography)
     try:
         body, armhole, neck = contour.cut_sleeves_flagged(contour.smooth_outline(Outline.from_array(garment)))
-    except contour.ShoulderPointNotClear as err:
-        log.warning("shoulder point not clear: %s, spread %.1f mm, limit %.1f mm", photo, err.spread_mm, err.limit_mm)
-        raise contour.ShoulderPointNotClear(
-            f"{err}. Take the proof photo again.", err.spread_mm, err.limit_mm) from err
+    except contour.ContourRefused as err:
+        log.warning("%s: %s, %s", err.label, photo, err.log_details())
+        raise err.with_message(f"{err}. Take the proof photo again.") from err
     fold = find_fold_edge(paper, body.array())
     points, distances, neck_pts, neck_dist = edge_gaps_split(
         paper, body.array(), step_mm, hidden=armhole, fold=fold, neck=neck)

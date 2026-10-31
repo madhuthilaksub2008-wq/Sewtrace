@@ -386,6 +386,27 @@ def test_req_geo_01_cli_verify_tells_to_take_the_proof_photo_again_on_an_unclear
     assert "spread 52.0 mm" in caplog.text
 
 
+def test_req_geo_01_cli_verify_tells_to_take_the_proof_photo_again_on_unmirrored_corners(proofs, monkeypatch, caplog):
+    """A CornersNotMirrored on the proof photo says which photo to take again, keeps the numbers of the
+    refusal and its type, and logs them."""
+    from sewtrace import cli
+
+    def refuse(_):
+        raise contour.CornersNotMirrored(
+            "the two cuffs are not about equally wide: their cuff corners differ by 80 mm (limit 70 mm)",
+            "cuff_top", 80.0, 70.0)
+
+    tee_dir, _ = proofs
+    monkeypatch.delenv("META_API_KEY", raising=False)
+    monkeypatch.setenv("SEWTRACE_MOCK", "1")
+    monkeypatch.setattr(contour, "cut_sleeves_flagged", refuse)
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit) as exc:
+        cli.main(["verify", str(tee_dir / "perfect.jpg")])
+    text = str(exc.value.code)
+    assert "perfect.jpg" in text and "80 mm (limit 70 mm)" in text and text.endswith("Take the proof photo again.")
+    assert "stage cuff_top, offset 80.0 mm, limit 70.0 mm" in caplog.text
+
+
 def test_req_ver_02_fold_band_and_end_margin_are_separate_settings():
     """Nit: the width of the band and the margin at the fold ends are two settings with their own effect."""
     proof_cfg = get_config().proof

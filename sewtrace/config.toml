@@ -96,15 +96,31 @@ cleanup_mm = 0.5
 # 13 or less away from a corner. Measured on the hard synthetic set (sewtrace/mock/synth_hard.py),
 # 20 photos. NEEDS REAL PHOTOS to confirm.
 corner_window_mm = 8.0
+# Underarm points are found over their own, longer chord. A real underarm is rounded: on a kid's
+# tee photographed on Oct 31 the right one turned about 50 degrees over 25 mm, which the 8 mm
+# chord split into two peaks of 27 and 22 degrees, under the 30 degree minimum. Over 24 mm the same
+# underarm turns 40 degrees and the other 51; the next concave bend (neck, edge wave) turns 12 to
+# 23 on three real photos. The minimum is unchanged. NEEDS REAL PHOTOS.
+underarm_window_mm = 24.0
 underarm_min_deg = 30.0    # the two sharpest concave corners must turn at least this much
 corner_min_deg = 10.0      # convex corners (sleeve hem, neck) are picked among the peaks above this
-# The six are chosen as three mirror pairs about the middle of the arc between the underarm points.
-# A pair may be this far (mm) from mirrored. The two sleeve hem pairs are off by the difference of
-# the sleeve lengths: 0 to 23 mm on 40 hard photos (10 tees, front and back, with and without lens
-# and curl). The neck pair is off by that and by the difference of the two sleeve tops: 7 to 27 mm.
-# So the neck tolerance is larger. The hem value is unchanged. The neck value is 1.5 times the
-# largest measured offset. NEEDS REAL PHOTOS.
+# The six convex corners are chosen as three on each side of the middle of the arc between the
+# underarm points, in the order sleeve hem bottom, sleeve hem top, neck corner. The two sides must
+# agree in what each can measure alone, by at most:
+#   pair_tol_hem_mm     sleeve length (underarm to the outer cuff corner). 0 to 23 mm on the 40 hard
+#                       photos (10 tees, front and back, with and without lens and curl). Unchanged.
+#   cuff_width_diff_mm  cuff width, from the outer to the inner cuff corner. People do not lay both
+#                       sleeves the same: an adult tee photographed on Oct 31 had cuffs 138 and 92 mm
+#                       wide (46 mm), with the sleeve lengths 16 mm apart. 1.5 times 46 mm, rounded.
+#                       Before Oct 31 the cuff top pair had to mirror within pair_tol_hem_mm, and
+#                       that photo was refused. NEEDS REAL PHOTOS.
+#   pair_tol_neck_mm    length from the inner cuff corner to the neck corner (sleeve top and
+#                       shoulder seam). It was the offset of the neck pair from mirrored about the
+#                       middle of the arc, which also held the sleeve length and cuff width
+#                       differences (7 to 27 mm on the hard set, 1.5 times the largest = 40). The
+#                       value is unchanged: the new measure holds less. NEEDS REAL PHOTOS.
 pair_tol_hem_mm = 25.0
+cuff_width_diff_mm = 70.0
 pair_tol_neck_mm = 40.0
 # The shoulder point is the bend of the sleeve top into the shoulder seam. The two shoulders of a
 # tee are about as far from the neck, so their bends are fitted together, and the two seam lengths

@@ -100,10 +100,12 @@ class MaskConfig(_Strict):
 
 class JointsConfig(_Strict):
     corner_window_mm: float = Field(gt=0)
+    underarm_window_mm: float = Field(gt=0)
     underarm_min_deg: float = Field(gt=0, lt=180)
     corner_min_deg: float = Field(gt=0, lt=180)
     pair_tol_hem_mm: float = Field(gt=0)
     pair_tol_neck_mm: float = Field(gt=0)
+    cuff_width_diff_mm: float = Field(gt=0)
     shoulder_symmetry_mm: float = Field(gt=0)
     shoulder_plateau_mm: float = Field(gt=0)
     near_best: float = Field(gt=1)

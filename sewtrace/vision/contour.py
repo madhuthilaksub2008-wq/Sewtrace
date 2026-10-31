@@ -13,6 +13,7 @@ outlines pass through remove_sleeves() first.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import cv2
@@ -291,16 +292,39 @@ def _hinge_scan(run: np.ndarray, trim_start: float, trim_end: float) -> _HingeSc
     return _HingeScan(pts[0], e, n, bend, (u[-1] - bend) + trim_end, np.array(ssrs), np.array(coefs))
 
 
-class ShoulderPointNotClear(ValueError):
+class ContourRefused(ValueError):
+    """A photo the outline finder refuses for a reason the user fixes by taking it again.
+
+    Subclasses keep the measured numbers (``log_details()``) so that refusals on real photos can
+    be used to recalibrate the limits in ``contour.joints``. ``label`` names the refusal in logs."""
+
+    label = "contour refused"
+
+    def log_details(self) -> str:
+        return ""
+
+    def with_message(self, message: str) -> ContourRefused:
+        """A copy of this refusal with another message (the numbers are kept)."""
+        # Not copy.copy(): it calls the class with args, and the subclasses take more than a message.
+        other = type(self).__new__(type(self), message)
+        other.__dict__.update(self.__dict__)
+        return other
+
+
+class ShoulderPointNotClear(ContourRefused):
     """The sleeve top bends too little away from the shoulder seam to place the shoulder point.
 
-    ``spread_mm`` is the measured joint plateau and ``limit_mm`` the config limit it passed. They
-    are kept so that refusals on real photos can be used to recalibrate the limit."""
+    ``spread_mm`` is the measured joint plateau and ``limit_mm`` the config limit it passed."""
+
+    label = "shoulder point not clear"
 
     def __init__(self, message: str, spread_mm: float = float("nan"), limit_mm: float = float("nan")) -> None:
         super().__init__(message)
         self.spread_mm = spread_mm
         self.limit_mm = limit_mm
+
+    def log_details(self) -> str:
+        return f"spread {self.spread_mm:.1f} mm, limit {self.limit_mm:.1f} mm"
 
 
 def _joint_fit(a: _HingeScan, b: _HingeScan) -> tuple[np.ndarray, np.ndarray]:
@@ -377,13 +401,15 @@ def _rounding_trim(turn_fine: np.ndarray, corner: int, direction: int, limit_mm:
     return max(run * JOINT_SPACING_MM + cfg.rounding_margin_mm, JOINT_TRIM_MM)
 
 
-class CornersNotMirrored(ValueError):
-    """The corners of the top arc do not mirror each other within the config tolerance.
+class CornersNotMirrored(ContourRefused):
+    """The sleeves and neck of the top arc do not match each other within the config tolerances.
 
-    ``stage`` is the first pair that fails ("cuff_bottom", "cuff_top" or "neck"), ``offset_mm`` its
-    closest candidate pair's distance from mirrored (nan when no pair fits inside the previous one)
-    and ``limit_mm`` the config limit it passed. They are kept so that refusals on real photos can
-    be used to recalibrate the limits."""
+    ``stage`` is the measure that fails in the closest choice of six corners ("cuff_bottom": the
+    sleeve lengths, "cuff_top": the cuff widths, "neck": the lengths from cuff to neck corner),
+    ``offset_mm`` the difference of the two sides in that choice and ``limit_mm`` the config
+    limit it passed."""
+
+    label = "corners not mirrored"
 
     def __init__(self, message: str, stage: str, offset_mm: float, limit_mm: float) -> None:
         super().__init__(message)
@@ -391,82 +417,103 @@ class CornersNotMirrored(ValueError):
         self.offset_mm = offset_mm
         self.limit_mm = limit_mm
 
+    def log_details(self) -> str:
+        return f"stage {self.stage}, offset {self.offset_mm:.1f} mm, limit {self.limit_mm:.1f} mm"
 
-_STAGE_NAMES = {"cuff_bottom": "outer sleeve cuff corners", "cuff_top": "inner sleeve cuff corners", "neck": "neck corners"}
+
+_STAGE_NAMES = {
+    "cuff_bottom": "two sleeves are not about equally long: their outer cuff corners",
+    "cuff_top": "two cuffs are not about equally wide: their cuff corners",
+    "neck": "two shoulders are not about equally long: the cuff and neck corners",
+}
 
 
-def _not_mirrored(cands: list[int], pairs: list[tuple[int, int, float]], hem_tol: float, neck_tol: float) -> ValueError:
-    """The error for a top arc with no six mirrored corners. Walks the stages of the choice in
-    _six_corners (outer cuff pair, cuff top pair inside it, neck pair inside that) and reports the
-    first stage whose closest pair is off by more than its limit. ``pairs`` offsets and the
-    tolerances are in samples; the message is in mm."""
+def _side_differences(c: tuple[int, ...], other: int, n: int) -> tuple[float, float, float]:
+    """(sleeve length, cuff width, cuff-to-neck length) differences of the two sides, in samples,
+    for six corners c0..c5 of the top arc. Each is measured along the outline of one side against
+    the other side, so a wide cuff on one side does not count against the neck pair."""
+    return (
+        abs((c[0] - other) - (n - c[5])),
+        abs((c[1] - c[0]) - (c[5] - c[4])),
+        abs((c[2] - c[1]) - (c[4] - c[3])),
+    )
+
+
+def _corner_sets(cands: list[int], other: int, n: int) -> list[tuple[int, ...]]:
+    """Every choice of six corners with three on each side of the middle of the arc. The sleeve
+    hem pair, the cuff top pair and the neck pair are then nested by construction: a cuff top
+    cannot be taken from the other side."""
+    mid = (other + n) / 2
+    left, right = [c for c in cands if c < mid], [c for c in cands if c >= mid]
+    return [(*a, *b) for a in itertools.combinations(left, 3) for b in itertools.combinations(right, 3)]
+
+
+def _not_mirrored(cands: list[int], other: int, n: int, limits: tuple[float, float, float]) -> ValueError:
+    """The error for a top arc with no valid six corners. ``limits`` are the three tolerances in
+    samples, in the order of _side_differences(). Reports the measure of the closest choice that
+    is furthest over its limit, so that the number is one that a retake can fix."""
     if len(cands) < 6:
         return ValueError(
             f"found {len(cands)} convex corners over the sleeves and neck, but 6 are needed "
             "(2 neck, 4 sleeve hem): is the whole t-shirt, with both sleeves, in the mask, neck up?"
         )
-    windows = [(-1, 10**9)]   # the pairs that passed the stage before; the first stage sees all
-    for room, (stage, tol) in zip((4, 2, 0), (("cuff_bottom", hem_tol), ("cuff_top", hem_tol), ("neck", neck_tol))):
-        # A pair needs room for the pairs of the later stages, or the neck pair would count as a cuff pair.
-        inside = [
-            (i, j, off) for i, j, off in pairs
-            if any(lo < i < j < hi for lo, hi in windows) and sum(i < c < j for c in cands) >= room
-        ]
-        best_off = min((off for _, _, off in inside), default=float("nan"))
-        if not best_off <= tol:
-            offset_mm, limit_mm = best_off * JOINT_SPACING_MM, tol * JOINT_SPACING_MM
-            what = _STAGE_NAMES[stage]
-            if np.isnan(offset_mm):
-                detail = f"the {what} do not mirror: no pair of corners fits inside the pair before it."
-            else:
-                detail = f"the {what} do not mirror: the closest pair is {offset_mm:.0f} mm off (limit {limit_mm:g} mm)."
-            return CornersNotMirrored(
-                f"{detail} Lay both sleeves the same way: the same angle down from the shoulder, cuffs flat "
-                "and unrolled, the same width. Keep the marker paper away from the t-shirt",
-                stage, offset_mm, limit_mm,
-            )
-        windows = [(i, j) for i, j, off in inside if off <= tol]
-    # Every stage has a pair, so _six_corners would have chosen one: kept as a safe default.
-    return CornersNotMirrored("the corners do not mirror each other", "neck", float("nan"), neck_tol * JOINT_SPACING_MM)
+    sets = _corner_sets(cands, other, n)
+    if not sets:
+        mid = (other + n) / 2
+        sides = sum(c < mid for c in cands), sum(c >= mid for c in cands)
+        return ValueError(
+            f"found {sides[0]} and {sides[1]} convex corners on the two sides of the t-shirt, but 3 are needed "
+            "on each (2 sleeve hem, 1 neck): is the whole t-shirt, with both sleeves, in the mask, neck up?"
+        )
+    def worst(c: tuple[int, ...]) -> tuple[float, int]:
+        ratios = [d / lim for d, lim in zip(_side_differences(c, other, n), limits)]
+        k = int(np.argmax(ratios))
+        return ratios[k], k
+    closest = min(sets, key=lambda c: worst(c)[0])
+    k = worst(closest)[1]
+    stage = ("cuff_bottom", "cuff_top", "neck")[k]
+    offset_mm = _side_differences(closest, other, n)[k] * JOINT_SPACING_MM
+    limit_mm = limits[k] * JOINT_SPACING_MM
+    return CornersNotMirrored(
+        f"the {_STAGE_NAMES[stage]} differ by {offset_mm:.0f} mm (limit {limit_mm:g} mm). Lay both sleeves the same "
+        "way: the same angle down from the shoulder, cuffs flat and unrolled, the same width. Keep the marker "
+        "away from the t-shirt",
+        stage, offset_mm, limit_mm,
+    )
 
 
 def _six_corners(score: np.ndarray, other: int, n: int, radius: int) -> list[int]:
     """The six convex corners of the top arc (``other`` .. ``n``): sleeve hem bottom and top and
-    neck, left and right. The strongest peaks are candidates, and the six are chosen to be
-    mirror pairs about the middle of the arc (outer pair: sleeve hem bottoms, then sleeve hem
-    tops, then the neck corners), because a corner that is rounded or beside a scoop can be
-    weaker than a wiggle in the edge, but a wiggle is not mirrored by another one. The two hem
-    pairs may be off from mirrored by ``pair_tol_hem_mm``, the neck pair by ``pair_tol_neck_mm``:
-    the neck pair also carries the difference of the two sleeve tops, on top of the difference of
-    the two sleeve lengths, so it can be off by more."""
+    neck, left and right. The strongest peaks are candidates. The six are chosen as three on each
+    side of the middle of the arc, in order: sleeve hem bottom, sleeve hem top, neck corner. A
+    corner that is rounded or beside a scoop can be weaker than a wiggle in the edge, but a
+    wiggle does not fit the structure of a tee.
+
+    The two sides must match in what each can measure alone, so that sleeves laid unevenly are
+    fine: the sleeve length (``pair_tol_hem_mm``), the length from cuff top to neck corner
+    (``pair_tol_neck_mm``: it carries the difference of the sleeve tops) and the cuff width
+    (``cuff_width_diff_mm``). The cuff top is never paired with a corner of the other side."""
     cfg = get_config().contour.joints
     cands = sorted(_peaks(score, cfg.corner_min_deg, radius)[:12])
-    arc = n - other
-    hem_tol, neck_tol = cfg.pair_tol_hem_mm / JOINT_SPACING_MM, cfg.pair_tol_neck_mm / JOINT_SPACING_MM
-    pairs = [(i, j, abs((i - other) + (j - other) - arc)) for ii, i in enumerate(cands) for j in cands[ii + 1 :]]
-    hem_pairs = [(i, j) for i, j, off in pairs if off <= hem_tol]
-    neck_pairs = [(i, j) for i, j, off in pairs if off <= neck_tol]
-    best: tuple[float, list[int]] | None = None
-    for p0 in hem_pairs:
-        for p1 in hem_pairs:
-            if not p0[0] < p1[0] < p1[1] < p0[1]:
-                continue
-            for p2 in neck_pairs:
-                if not p1[0] < p2[0] < p2[1] < p1[1]:
-                    continue
-                strength = sum(min(score[i], score[j]) for i, j in (p0, p1, p2))
-                if best is None or strength > best[0]:
-                    best = (strength, [p0[0], p1[0], p2[0], p2[1], p1[1], p0[1]])
+    limits = (cfg.pair_tol_hem_mm / JOINT_SPACING_MM, cfg.cuff_width_diff_mm / JOINT_SPACING_MM,
+              cfg.pair_tol_neck_mm / JOINT_SPACING_MM)
+    best: tuple[float, tuple[int, ...]] | None = None
+    for c in _corner_sets(cands, other, n):
+        if any(d > lim for d, lim in zip(_side_differences(c, other, n), limits)):
+            continue
+        strength = sum(min(score[c[i]], score[c[5 - i]]) for i in range(3))
+        if best is None or strength > best[0]:
+            best = (strength, c)
     if best is None:
-        raise _not_mirrored(cands, pairs, hem_tol, neck_tol)
-    return best[1]
+        raise _not_mirrored(cands, other, n, limits)
+    return list(best[1])
 
 
 def _find_joints(outline: Outline) -> _Joints:
     """Shoulder and underarm points of a whole t-shirt outline (REQ-GEO-01).
 
-    Underarm points are the two sharpest concave corners. They split the outline into the
-    hem arc and the top arc; the top arc is the one that turns more (sleeves and neck add
+    Underarm points are the two sharpest concave corners, measured over a chord long enough
+    for a rounded one. They split the outline into the hem arc and the top arc; the top arc is the one that turns more (sleeves and neck add
     about 140 degrees over the hem and its two corners), a total that rounding a corner
     does not change. The top arc holds six convex corners: the strongest six found over a
     chord that is long enough for rounded corners (``contour.joints``). Their order is fixed:
@@ -478,7 +525,11 @@ def _find_joints(outline: Outline) -> _Joints:
     n = len(pts)
     k = max(int(round(cfg.corner_window_mm / JOINT_SPACING_MM)), 1)
     turn = gaussian_filter1d(_signed_turning(pts, k), k / 2, mode="wrap")
-    concave = sorted(_peaks(-turn, cfg.underarm_min_deg, 2 * k)[:2])
+    # A rounded underarm turns its angle over 20 to 40 mm, which a short chord splits into two weak
+    # peaks. A long chord measures the whole turn, as the net turning does for the top arc.
+    ku = max(int(round(cfg.underarm_window_mm / JOINT_SPACING_MM)), 1)
+    wide = gaussian_filter1d(_signed_turning(pts, ku), ku / 2, mode="wrap")
+    concave = sorted(_peaks(-wide, cfg.underarm_min_deg, 2 * ku)[:2])
     if len(concave) < 2:
         raise ValueError("found no underarm corners: is the whole t-shirt, with both sleeves, in the mask?")
     u1, u2 = concave

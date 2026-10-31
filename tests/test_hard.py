@@ -30,10 +30,17 @@ def _tee(index: int) -> synth.TeeParams:
     return synth.TeeParams(**{**base.__dict__, "name": f"tee{index + 1}"})
 
 
-def _joints(p: synth.TeeParams, hp: synth_hard.HardParams, noisy: bool = True):
-    """Shoulder and underarm points found on the rasterised hard silhouette, and the true ones."""
+def _joints(p: synth.TeeParams, hp: synth_hard.HardParams, noisy: bool = True, underarm_radius_mm: float = 0.0):
+    """Shoulder and underarm points found on the rasterised hard silhouette, and the true ones.
+    ``underarm_radius_mm`` rounds both underarms of the silhouette (a sharp one when 0)."""
     v = synth_hard.hard_views(p, hp)["front"]
     ring = v["garment"]
+    if underarm_radius_mm:
+        arm = synth.armhole_curve(p)
+        e = hp.asymmetry_mm / p.chest_half
+        ring = synth_hard._dense(ring)
+        for target in (arm[-1] + v["origin"], arm[-1] * [-(1 + e), 1] + v["origin"]):
+            ring = synth_hard.round_corner(ring, target, underarm_radius_mm)
     x0, y0 = ring.min(axis=0) - 30
     shape = (int((ring[:, 1].max() - y0 + 30) * PX), int((ring[:, 0].max() - x0 + 30) * PX))
     mask = np.zeros(shape, np.uint8)
@@ -129,6 +136,20 @@ def test_req_geo_01_joint_finder_tolerates_rounded_corners(radius):
     assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
 
 
+@pytest.mark.parametrize("radius", [15.0, 25.0])
+def test_req_geo_01_rounded_underarms_are_found(radius):
+    """REQ-GEO-01: both underarms rounded to 15 and 25 mm. A real kid's tee had one that turned 50
+    degrees over 25 mm: the 8 mm chord saw two peaks of 27 and 22 degrees (minimum 30) and found no
+    underarm. The point is the tangent corner of the arc it is fitted on, so it lies up to about the
+    rounding radius inside the true corner (measured: 8.8 mm at 15, 16.6 mm at 25)."""
+    p = _tee(0)
+    hp = _calm(0, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
+    outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
+    found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
+    assert max(_nearest_errors(found_underarm, underarm)) < radius
+    assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+
+
 def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
     """REQ-GEO-01: a 3 degree kink with waves on both sides cannot place the shoulder point: the error
     says so and what to do, instead of a guess that is tens of mm out."""
@@ -162,51 +183,82 @@ def test_req_geo_01_two_faint_shoulders_are_refused():
     assert exc.value.spread_mm > exc.value.limit_mm == get_config().contour.joints.shoulder_plateau_mm
 
 
-def _peak_scores(positions: list[int], n: int = 400) -> np.ndarray:
+def _peak_scores(positions: list[int], n: int = 600, weak: tuple[int, ...] = ()) -> np.ndarray:
     score = np.zeros(n)
     score[positions] = 40.0
+    score[list(weak)] = 12.0
     return score
 
 
-@pytest.mark.parametrize("neck_offset, ok", [(30, True), (55, False)])
-def test_req_geo_01_neck_pair_may_be_further_from_mirrored_than_the_hem_pairs(neck_offset, ok):
-    """REQ-GEO-01: six corners on an arc of 300 mm. Hem pairs are off from mirrored by 4 and 10 mm,
-    the neck pair by ``neck_offset``: the neck pair carries the sleeve top difference too, so it has
-    its own, larger tolerance (hem 25 mm, neck 40 mm)."""
-    other, arc = 100, 300
+# The production suppression radius: three windows of contour.joints.corner_window_mm, in samples.
+RADIUS = 3 * 8
+OTHER, ARC = 100, 500
+
+
+def _six(arc_positions: list[int], weak: tuple[int, ...] = ()):
+    """_six_corners() on corners given as positions along an arc of 500 mm that starts at sample 100."""
+    score = _peak_scores([OTHER + a for a in arc_positions], weak=tuple(OTHER + w for w in weak))
+    return contour._six_corners(score, OTHER, OTHER + ARC, radius=RADIUS)
+
+
+@pytest.mark.parametrize("shift, ok", [(30, True), (55, False)])
+def test_req_geo_01_neck_corner_may_be_further_off_than_the_sleeve_lengths(shift, ok):
+    """REQ-GEO-01: six corners on an arc of 500 mm with sleeves of the same length and the same cuff
+    width. The left neck corner is ``shift`` mm nearer its cuff, so the two runs from cuff top to neck
+    corner differ by ``shift``: 40 mm is allowed (sleeve length 25 mm), 55 mm is not."""
     tol = get_config().contour.joints
     assert tol.pair_tol_hem_mm < 30 < tol.pair_tol_neck_mm < 55   # the two cases sit between the tolerances
-    # positions on the arc, from the first underarm point: (outer), (middle), (neck)
-    pairs = [(20, 284), (60, 250), (100, 200 + neck_offset)]
-    score = _peak_scores([other + a for a, _ in pairs] + [other + b for _, b in pairs])
+    positions = [30, 120, 210 - shift, 290, 380, 470]
     if ok:
-        got = contour._six_corners(score, other, other + arc, radius=4)
-        assert got == [other + 20, other + 60, other + 100, other + 230, other + 250, other + 284]
-    else:
-        with pytest.raises(contour.CornersNotMirrored, match="neck corners do not mirror") as exc:
-            contour._six_corners(score, other, other + arc, radius=4)
-        assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
-        # the closest pair inside the cuff pairs is (100, 250), 50 mm off, not the intended (100, 255)
-        assert exc.value.offset_mm == pytest.approx(50, abs=1.0)
+        assert _six(positions) == [OTHER + a for a in positions]
+        return
+    with pytest.raises(contour.CornersNotMirrored, match="shoulders are not about equally long") as exc:
+        _six(positions)
+    assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
+    assert exc.value.offset_mm == pytest.approx(shift, abs=1.0)
 
 
-def test_req_geo_01_uneven_cuff_tops_say_what_did_not_mirror_and_by_how_much():
-    """REQ-GEO-01: outer cuff pair off by 16 mm (passes), closest cuff top pair off by 60 mm (limit 25 mm),
-    as on a real photo with one sleeve laid wider than the other. The error names the stage, the
-    offset and the action, and keeps the numbers."""
-    other, arc = 100, 300
-    hem = get_config().contour.joints.pair_tol_hem_mm
-    assert 16 < hem < 60
-    pairs = [(20, 296), (60, 178), (90, 180)]   # offsets 16, -62, -30; the closest cuff top pair is (60, 180), 60 mm
-    score = _peak_scores([other + a for a, _ in pairs] + [other + b for _, b in pairs])
+def test_req_geo_01_sleeves_laid_with_cuffs_of_different_widths_are_accepted():
+    """REQ-GEO-01: a real photo had cuffs 46 mm apart in width (138 and 92 mm) with the sleeve lengths
+    16 mm apart. Here the left cuff is 100 mm wide and the right one 55 mm, with a weak wiggle in the
+    left cuff that must not be taken. The old rule (cuff top pair mirrored within 25 mm) refused it."""
+    tol = get_config().contour.joints
+    positions = [30, 130, 200, 345, 415, 470]    # cuff widths 100 and 55, tops of 70 and 70 mm
+    assert tol.pair_tol_hem_mm < 45 < tol.cuff_width_diff_mm
+    assert _six(positions, weak=(80,)) == [OTHER + a for a in positions]
+
+
+def test_req_geo_01_a_cuff_top_is_never_taken_from_the_other_side_of_the_arc():
+    """REQ-GEO-01: four strong corners on one side of the middle of the arc and two on the other cannot be
+    three and three. The error says the count, not an offset that no retake would fix."""
+    with pytest.raises(ValueError, match=r"4 and 2 convex corners on the two sides") as exc:
+        _six([30, 130, 200, 240, 415, 470])
+    assert not isinstance(exc.value, contour.CornersNotMirrored)
+
+
+def test_req_geo_01_uneven_cuff_widths_say_what_did_not_match_and_by_how_much():
+    """REQ-GEO-01: the cuffs are 120 and 40 mm wide, 80 mm apart (limit 70 mm), sleeves of the same
+    length. The error names the measure, the difference and the action, and keeps the numbers."""
+    tol = get_config().contour.joints
     with pytest.raises(contour.CornersNotMirrored) as exc:
-        contour._six_corners(score, other, other + arc, radius=1)
+        _six([30, 150, 210, 370, 430, 470])
     err = exc.value
-    assert err.stage == "cuff_top" and err.limit_mm == hem and err.offset_mm == pytest.approx(60, abs=1.0)
+    assert err.stage == "cuff_top" and err.limit_mm == tol.cuff_width_diff_mm
+    assert err.offset_mm == pytest.approx(80, abs=1.0)
+    assert err.log_details() == "stage cuff_top, offset 80.0 mm, limit 70.0 mm"
     text = str(err)
-    assert "inner sleeve cuff corners do not mirror" in text and "60 mm off (limit 25 mm)" in text
-    assert "same angle down from the shoulder" in text and "marker paper" in text
+    assert "cuffs are not about equally wide" in text and "80 mm (limit 70 mm)" in text
+    assert "same angle down from the shoulder" in text and "marker away" in text and "marker paper" not in text
     assert "whole t-shirt" not in text
+
+
+def test_req_geo_01_the_report_names_the_measure_that_is_furthest_over_its_limit():
+    """REQ-GEO-01: the right sleeve is 52 mm shorter (limit 25 mm); the cuffs (52 mm apart, limit 70 mm) and
+    the shoulders (0 mm) are fine. The report names the sleeve length, with the measured difference."""
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six([30, 120, 210, 290, 380, 418])
+    assert exc.value.stage == "cuff_bottom" and exc.value.offset_mm == pytest.approx(52, abs=1.0)
+    assert "sleeves are not about equally long" in str(exc.value)
 
 
 def test_req_geo_01_fewer_than_six_corners_keep_the_mask_hint():
@@ -215,7 +267,7 @@ def test_req_geo_01_fewer_than_six_corners_keep_the_mask_hint():
     other, arc = 100, 300
     score = _peak_scores([other + a for a in (20, 100, 200, 284)])
     with pytest.raises(ValueError, match="4 convex corners.*whole t-shirt") as exc:
-        contour._six_corners(score, other, other + arc, radius=5)
+        contour._six_corners(score, other, other + arc, radius=RADIUS)
     assert not isinstance(exc.value, contour.CornersNotMirrored)
 
 

@@ -209,7 +209,7 @@ case of 32,000 output tokens (about $0.14 per Spark call, $0.1396 on the Day 1 t
 **Values that need your confirmation** (marked in `sewtrace/config.toml`):
 
 - NEEDS USER CONFIRMATION: `[inference]` `front_minus_back_min_mm`, `fallback_front_minus_back_mm`; `[proof]` `neck_gap_tolerance_mm`, `fold_bow_limit_frac`.
-- NEEDS REAL PHOTOS: `[contour.joints]` `corner_window_mm`, `pair_tol_hem_mm`, `pair_tol_neck_mm`, `shoulder_plateau_mm`; `[contour.labels]` `corner_window_mm`.
+- NEEDS REAL PHOTOS: `[contour.joints]` `corner_window_mm`, `underarm_window_mm`, `pair_tol_hem_mm`, `cuff_width_diff_mm`, `pair_tol_neck_mm`, `shoulder_plateau_mm`; `[contour.labels]` `corner_window_mm`.
 
 The synthetic numbers are a best case. Real SAM edges, fabric that isn't
 perfectly flat and lens distortion will add error; the real proof number comes
