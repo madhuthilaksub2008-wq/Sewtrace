@@ -112,6 +112,8 @@ class JointsConfig(_Strict):
     rounding_deg: float = Field(gt=0, lt=180)
     rounding_margin_mm: float = Field(ge=0)
     underarm_rounding_deg_mm: float = Field(gt=0)
+    underarm_fit_mm: float = Field(gt=0)
+    underarm_sharp_deg: float = Field(gt=0, lt=180)
 
 
 class LabelsConfig(_Strict):

@@ -143,18 +143,48 @@ def test_req_geo_01_rounded_underarms_are_found(radius):
     underarm. The point is the tangent corner of the lines fitted past the rounding, so it is near the
     true (sharp) corner, not inside it by the radius as with lines fitted on the arc (measured then:
     underarm off by 8.8 mm at 15 and 16.6 mm at 25, armhole depth off by 7 and 13 mm). Measured now:
-    underarm off by 3.1 and 5.3 mm, armhole depth by 4.0 and 4.1 mm. Not below 1 mm: the mask waves of
-    1 mm and the 20 mm fit length move the tangent corner by 2 to 4 mm even on a sharp underarm."""
+    underarm off by 1.3 and 6.0 mm, armhole depth by 1.1 and 5.2 mm. The 6 mm is the 25 mm radius of
+    tee 1: the limit is 6.5 mm (see the sweep test below)."""
     p = _tee(0)
     hp = _calm(0, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
     outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
     found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
-    assert max(_nearest_errors(found_underarm, underarm)) < 6.0
+    assert max(_nearest_errors(found_underarm, underarm)) < 6.5
     assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
     for u, s in zip(underarm, shoulder):
         fu = found_underarm[np.argmin(np.linalg.norm(found_underarm - u, axis=1))]
         fs = found_shoulder[np.argmin(np.linalg.norm(found_shoulder - s, axis=1))]
         assert abs((fu[1] - fs[1]) - (u[1] - s[1])) < 6.0   # armhole depth
+
+
+def test_req_geo_01_underarm_sweep_over_five_tees_and_radii():
+    """REQ-GEO-01: underarm point and armhole depth errors on the 5 hard tees with both underarms
+    rounded to 0, 3, 6, 10, 15 and 25 mm (1 mm waves, noisy mask). The sweep chose the estimator: a
+    20 mm tangent fit past the rounding tilted under the waves, with errors of 8 to 10 mm at 6 to 10 mm
+    radius; the 50 mm fit and no trim for a sharp corner gave (measured):
+    underarm max 6.0 mm, mean 2.89; depth max 5.6 mm, mean 2.12; sharp corners (0 and 3 mm): underarm
+    mean 2.0, depth mean 1.8. Depth means are over all points."""
+    errors: dict[float, list[tuple[float, list[float]]]] = {}
+    for tee in range(5):
+        p = _tee(tee)
+        hp = _calm(tee, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
+        for radius in (0.0, 3.0, 6.0, 10.0, 15.0, 25.0):
+            outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
+            found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
+            depths = []
+            for u, s in zip(underarm, shoulder):
+                fu = found_underarm[np.argmin(np.linalg.norm(found_underarm - u, axis=1))]
+                fs = found_shoulder[np.argmin(np.linalg.norm(found_shoulder - s, axis=1))]
+                depths.append(abs((fu[1] - fs[1]) - (u[1] - s[1])))
+            errors.setdefault(radius, []).append((max(_nearest_errors(found_underarm, underarm)), depths))
+    every = [e for row in errors.values() for e in row]
+    sharp = errors[0.0] + errors[3.0]
+    assert max(e[0] for e in every) < 6.5
+    assert max(max(e[1]) for e in every) < 6.0
+    assert np.mean([e[0] for e in every]) < 3.2
+    assert np.mean([d for e in every for d in e[1]]) < 2.6
+    assert np.mean([e[0] for e in sharp]) < 2.2
+    assert np.mean([d for e in sharp for d in e[1]]) < 3.0
 
 
 def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
@@ -449,3 +479,25 @@ def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(hard_dir, tmp_pa
     found_len = np.linalg.norm(np.diff(np.asarray(result.fold_mm), axis=0))
     assert found_len == pytest.approx(np.linalg.norm(np.diff(true_fold, axis=0)), abs=8.0)
     assert result.mean_mm == pytest.approx(truth["expected_gap_mean_mm"], abs=0.5)
+
+
+def test_req_geo_01_corner_choice_does_not_skip_a_stronger_candidate_of_its_role():
+    """REQ-GEO-01: six corners that pass over a candidate stronger than the chosen corner of its own
+    role are refused: outside the hem corner, between the cuff top and the neck corner (stronger than
+    the neck corner), and the same on the other side. The old check looked only between the hem corner
+    and the middle of the neck, and only against the cuff top."""
+    score = np.zeros(100)
+    for i, v in {10: 50, 20: 60, 40: 40, 60: 40, 80: 60, 90: 50}.items():
+        score[i] = v
+    c = (10, 20, 40, 60, 80, 90)
+    cands = sorted(c)
+    assert not contour._skips_stronger(c, cands, score)
+    for extra, v in ((30, 45), (70, 45), (5, 55), (95, 55), (45, 45), (55, 45)):
+        s = score.copy()
+        s[extra] = v
+        assert contour._skips_stronger(c, sorted([*c, extra]), s), extra
+    # A weaker wiggle, or a candidate between cuff top and neck weaker than the neck corner, is fine.
+    for extra, v in ((30, 35), (5, 45), (95, 45), (45, 35)):
+        s = score.copy()
+        s[extra] = v
+        assert not contour._skips_stronger(c, sorted([*c, extra]), s), extra

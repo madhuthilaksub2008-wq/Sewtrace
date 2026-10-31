@@ -445,14 +445,25 @@ def _side_differences(c: tuple[int, ...], other: int, n: int) -> tuple[float, fl
 
 
 def _skips_stronger(c: tuple[int, ...], cands: list[int], score: np.ndarray) -> bool:
-    """True when the six corners pass over a candidate that is stronger than the cuff top (c1 or c4)
-    of its side, between the sleeve hem corner (c0 or c5) and the middle of the neck. A cuff top
-    weaker than a wiggle on the same sleeve is a wiggle taken for the cuff top: the real cuff top
-    broke a mirror limit and was skipped. The same holds for a sleeve corner taken for a neck corner."""
+    """True when the six corners pass over a candidate that is stronger than the chosen corner of its
+    own role on the same side of the middle of the neck. Walking from the sleeve hem inward, the
+    roles are: sleeve hem corner (c0 or c5), cuff top (c1 or c4), neck corner (c2 or c3). A candidate
+    outside the hem corner is held against the hem corner, one between the hem corner and the cuff top
+    against the cuff top, one between the cuff top and the neck corner against the weaker of the two,
+    and one past the neck corner against the neck corner. A cuff top weaker than a wiggle on the same
+    sleeve is a wiggle taken for the cuff top: the real cuff top broke a mirror limit and was
+    skipped. The same holds for a sleeve corner taken for a neck corner."""
     neck_mid = (c[2] + c[3]) / 2
-    for lo, hi, top in ((c[0], neck_mid, c[1]), (neck_mid, c[5], c[4])):
-        if any(score[x] > score[top] for x in cands if lo < x < hi and x not in c):
-            return True
+    for corners, sign, side in (((c[0], c[1], c[2]), 1, lambda x: x < neck_mid),
+                                ((c[5], c[4], c[3]), -1, lambda x: x > neck_mid)):
+        hem, top, neck = corners
+        limits = (score[hem], score[top], min(score[top], score[neck]), score[neck])
+        for x in cands:
+            if x in c or not side(x):
+                continue
+            role = sum(sign * x > sign * k for k in corners)   # 0 outside the hem corner ... 3 past the neck corner
+            if score[x] > limits[role]:
+                return True
     return False
 
 
@@ -538,8 +549,11 @@ def _underarm_corner(pts: np.ndarray, fine: np.ndarray, at: int, room_in: int, r
     ``room_*`` are the samples free on each side before the next corner."""
     cfg = get_config().contour.joints
     peak = float(fine[np.arange(at - 3, at + 4) % len(fine)].max())
-    trim = int(np.clip(round(cfg.underarm_rounding_deg_mm / max(peak, 1.0)), UNDERARM_TRIM_MIN_MM, UNDERARM_TRIM_MAX_MM))
-    reach = min(trim + JOINT_REACH_MM, room_in, room_out)
+    # A sharp corner has no rounding to skip. Past the rounding the line is long, so that mask waves
+    # do not tilt it (REQ-GEO-01).
+    trim = UNDERARM_TRIM_MIN_MM if peak >= cfg.underarm_sharp_deg else int(
+        np.clip(round(cfg.underarm_rounding_deg_mm / max(peak, 1.0)), UNDERARM_TRIM_MIN_MM, UNDERARM_TRIM_MAX_MM))
+    reach = min(trim + cfg.underarm_fit_mm / JOINT_SPACING_MM, room_in, room_out)
     trim = int(min(trim, reach - MIN_FIT_MM))
     point = _corner(_ring_run(pts, at - int(reach), at), _ring_run(pts, at, at + int(reach)),
                     reach, reach, float(max(trim, 1)), float(max(trim, 1)))

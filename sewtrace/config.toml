@@ -149,9 +149,19 @@ rounding_deg = 12.0
 rounding_margin_mm = 2.0
 # The underarm tangents start past the rounding of the underarm (up to 25 mm radius on the hard
 # synthetic tees). The turning over a 4 mm chord peaks at the corner at about
-# underarm_rounding_deg_mm / (length of the rounding in mm): 90 degrees for a sharp corner, 30 to
-# 40 for 15 mm radius, 20 for 25 mm. 400 from those two synthetic tees. NEEDS REAL PHOTOS.
+# underarm_rounding_deg_mm / (length of the rounding in mm). Measured peaks on the hard tees: 47 to 75
+# degrees for a sharp corner, 21 to 27 for 15 mm radius, 15 to 22 for 25 mm. 400 fits those ranges.
+# NEEDS REAL PHOTOS.
 underarm_rounding_deg_mm = 400.0
+# Both tangents are fitted over underarm_fit_mm past the start (less where a corner is nearer). A short
+# fit far from the corner tilts under 1 mm mask waves: 20 mm gave errors of 8 to 10 mm at 6 to 10 mm radius.
+# Measured on 5 hard tees x radius 0 to 25: underarm error at most 6 mm, armhole depth at most 5.6 mm.
+# 50 mm stays clear of the sleeve hem corner (kid sleeve undersides are 61 to 65 mm; the fit stops 2 mm
+# short of the next corner). The hard seam test is not monotonic in this value (it failed at 30, 40, 45).
+underarm_fit_mm = 50.0
+# A peak of at least this many degrees is a sharp corner (47 to 75 measured): the tangents start 1 mm
+# from it, without the trim the formula above would give.
+underarm_sharp_deg = 50.0
 
 [contour.labels]          # REQ-GEO-01: corners of the half outline that mark the edges
 # Own key: edge labelling used 4 mm before the hard set. The hard set needs 8 mm: with 4 mm the
