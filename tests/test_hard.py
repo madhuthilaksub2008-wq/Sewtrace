@@ -617,8 +617,8 @@ def test_req_geo_01_body_from_sam_seams_matches_the_outline_method_where_both_wo
 
 @pytest.mark.parametrize("index", [0, 2, 4])
 def test_req_geo_01_a_quarter_short_sam_sleeve_mask_falls_back(index, caplog):
-    """Cut 25% off one sleeve mask at the body end: the underarm moves only 11 to 17 mm (under the
-    25 mm limit), but the shoulder seams then differ by 30+ mm, which the symmetry check refuses."""
+    """Cut 25% off one sleeve mask at the body end: the underarm moves only 11 to 17 mm, but the
+    shoulder seams then differ by 30+ mm, which the symmetry check refuses."""
     garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
     outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
     cols = np.nonzero(sleeves[0].any(axis=0))[0]
@@ -651,3 +651,38 @@ def test_req_geo_01_a_bad_or_missing_sam_sleeve_answer_falls_back_to_the_outline
     body = body_without_sleeves(_SleeveClient(answer), "front.jpg", garment, hom, outline)[0]
     assert np.allclose(body.array(), contour.remove_sleeves(outline).array())
     assert "finding them from the outline" in caplog.text
+
+
+def _cut_from_body(mask: np.ndarray, frac: float, width_px: int) -> np.ndarray:
+    cols = np.nonzero(mask.any(axis=0))[0]
+    w = cols[-1] - cols[0]
+    keep = slice(cols[0] + int(w * frac), None) if cols.mean() > width_px / 2 else slice(None, cols[-1] - int(w * frac))
+    out = np.zeros_like(mask)
+    out[:, keep] = mask[:, keep]
+    return out
+
+
+@pytest.mark.parametrize("index, radius, frac", [(1, 0.0, 0.25), (2, 15.0, 0.35), (3, 25.0, 0.5)])
+def test_req_geo_01_two_equally_short_sam_sleeve_masks_are_refused(index, radius, frac):
+    """Both sleeve masks cut short by the same amount pass both left/right checks; the shoulder share
+    refuses them instead of leaving part of both sleeves on the body."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index), radius)
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    short = [_cut_from_body(m, frac, garment.shape[1]) for m in sleeves]
+    with pytest.raises(ValueError, match="neck to cuff edge"):
+        contour._find_joints(outline, contour.seam_points(garment, short, hom))
+
+
+def test_req_geo_01_an_underarm_bitten_out_of_one_sam_sleeve_mask_is_refused_by_the_armhole_check():
+    """Sleeve pixels near one true underarm removed: the shoulder end stays right, so only the
+    armhole length check sees it."""
+    garment, sleeves, hom, _, underarm = _sleeve_scene(_tee(0), _calm(0))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    ys, xs = np.mgrid[: garment.shape[0], : garment.shape[1]]
+    mm = hom.px_to_mm(np.c_[xs.ravel(), ys.ravel()]).reshape(*garment.shape, 2)
+    bitten = []
+    for m in sleeves:
+        d = np.minimum(np.linalg.norm(mm - underarm[0], axis=2), np.linalg.norm(mm - underarm[1], axis=2))
+        bitten.append(m & (d > 45.0) if not bitten else m)
+    with pytest.raises(ValueError, match="seams are .* mm long"):
+        contour._find_joints(outline, contour.seam_points(garment, bitten, hom))

@@ -14,6 +14,7 @@ outlines pass through remove_sleeves() first.
 from __future__ import annotations
 
 import itertools
+import logging
 from dataclasses import dataclass
 
 import cv2
@@ -26,6 +27,8 @@ from sewtrace.config import get_config
 from sewtrace.types import TEE_EDGES, Edge, Outline
 from sewtrace.vision.marker import Homography
 from sewtrace.vision.measure import _corner
+
+log = logging.getLogger(__name__)
 
 UPSAMPLE = 2           # mask upsampling before tracing, for a sub-pixel edge
 CORNER_DEG = 30.0      # turning angle that counts as a corner
@@ -641,8 +644,10 @@ def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
     cost = [np.linalg.norm(pairs[0][1] - pts[other]) + np.linalg.norm(pairs[1][1] - pts[0]),
             np.linalg.norm(pairs[1][1] - pts[other]) + np.linalg.norm(pairs[0][1] - pts[0])]
     (shoulder_a, under_a), (shoulder_b, under_b) = pairs if cost[0] <= cost[1] else pairs[::-1]
-    # A SAM sleeve mask that stops short of the seam puts its ends mid-sleeve, still on the outline.
-    # The outline's own underarm corners (pts[0], pts[other]) are coarse but never that far off.
+    # Gross check only: the outline's own underarm corners (pts[0], pts[other]) are coarse, and on a
+    # soft, rounded underarm they can be 30 to 40 mm from the real seam end (real back photo, Nov 1).
+    # One short sleeve mask is caught by the left/right symmetry checks below, two equally short ones
+    # by the shoulder share.
     limit = get_config().contour.joints.sam_seam_max_off_mm
     for found, corner in ((under_a, pts[other]), (under_b, pts[0])):
         off = float(np.linalg.norm(found - corner))
@@ -670,10 +675,28 @@ def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
         raise ValueError("a SAM sleeve seam ends at the cuff, not at the shoulder")
     # The same check the outline method makes: the two shoulder seams are about equally long. A sleeve
     # mask that stops short of its seam leaves sleeve on the body and makes its shoulder seam longer.
+    joints_cfg = get_config().contour.joints
     la, lb = float(np.linalg.norm(pts[c2] - pts[ia])), float(np.linalg.norm(pts[c3] - pts[ib]))
-    if abs(la - lb) > get_config().contour.joints.shoulder_symmetry_mm:
+    if abs(la - lb) > joints_cfg.shoulder_symmetry_mm:
         raise ValueError(f"the SAM sleeve seams give shoulder seams of {la:.0f} and {lb:.0f} mm: "
                          "a sleeve mask stops short of its seam")
+    # Both armholes are about equally deep: a sleeve mask that stops short moves its underarm end
+    # along the sleeve, and this seam gets much longer or shorter than the other one.
+    aa, ab = float(np.linalg.norm(pts[ua] - pts[ia])), float(np.linalg.norm(pts[0] - pts[ib]))
+    # Share of the top edge from the neck corner to the cuff top that is shoulder seam. Two sleeve masks
+    # that stop equally short pass both symmetry checks, but they move both shoulder ends out along
+    # the sleeves: the share grows (0.33 to 0.37 on correct seams, 0.50 at 25% short, 0.67 at half).
+    share_a = la / float(np.linalg.norm(pts[c2] - pts[c1]))
+    share_b = lb / float(np.linalg.norm(pts[c3] - pts[c4]))
+    # Logged at WARNING on purpose until real photos have set the limits (shown by `sewtrace run`).
+    log.warning("SAM sleeve seams (for calibration): shoulder seams %.0f / %.0f mm, armholes %.0f / %.0f mm, "
+                "shoulder share %.2f / %.2f", la, lb, aa, ab, share_a, share_b)
+    if max(share_a, share_b) > joints_cfg.sam_shoulder_share_max:
+        raise ValueError(f"the SAM sleeve seams give shoulder seams {share_a:.2f} and {share_b:.2f} of the "
+                         f"neck to cuff edge (limit {joints_cfg.sam_shoulder_share_max:g}): the sleeve masks stop short of their seams")
+    if abs(aa - ab) > joints_cfg.sam_armhole_symmetry_mm:
+        raise ValueError(f"the SAM sleeve seams are {aa:.0f} and {ab:.0f} mm long "
+                         f"(limit {joints_cfg.sam_armhole_symmetry_mm:g} mm apart): a sleeve mask stops short of its seam")
     reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
 
     def unit(v: np.ndarray) -> np.ndarray:
