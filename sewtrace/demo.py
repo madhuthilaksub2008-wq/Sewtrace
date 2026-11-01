@@ -547,6 +547,8 @@ def load_bundle(name: str, demo_dir: Path = DEMO_DIR) -> Bundle:
     seam_log = _read_json(folder, name, "seam_log.json")
     if not isinstance(measurements, dict) or not isinstance(seam_log, list):
         raise DemoError(f"demo '{name}': measurements.json or seam_log.json has the wrong shape. {_hint(name)}")
+    # measurements.json also holds the "provenance" labels of the run; the demo page draws the six numbers.
+    measurements = {k: v for k, v in measurements.items() if k in MEASUREMENT_KEYS}
     proof = _read(folder, name, "proof_result.json", ProofShow) if manifest.has_proof else None
     table = _read(folder, name, "eval.json", EvalTable) if manifest.has_eval else None
     return Bundle(

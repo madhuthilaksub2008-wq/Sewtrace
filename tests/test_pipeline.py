@@ -108,7 +108,9 @@ def test_req_sew_03_small_side_mismatch_is_fixed_and_exported(tmp_path, monkeypa
     truth = json.loads((tee / "truth.json").read_text())["measurements"]
     for k in MEASUREMENT_KEYS:
         assert result.measurements[k] == pytest.approx(truth[k], abs=2.0), k
-    assert json.loads(result.files["measurements"].read_text()) == result.measurements
+    stored = json.loads(result.files["measurements"].read_text())
+    assert stored.pop("provenance") == result.provenance  # one key was added; the six are unchanged
+    assert stored == result.measurements
 
 
 def test_req_sew_03_cli_prints_one_line_per_edge_changed_by_the_pair_fix(tmp_path, monkeypatch, capsys):

@@ -292,6 +292,14 @@ neck_search_mm = 15.0      # how far from the neck end of the shoulder line the 
 [ground_truth]
 repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third
 
+[edits]                    # sewtrace edit and the page's Co-pilot box: one Spark call per request
+max_delta_mm = 80.0        # a body, chest or sleeve change larger than this is refused (about 1/5 of a kid's tee)
+scale_min_pct = 90.0       # overall size, 100 = unchanged
+scale_max_pct = 115.0
+max_text_chars = 300       # the request text is sent to the model; a longer text is refused
+mock_a_bit_mm = 10.0       # mock mode only: "a bit longer" with no number
+mock_size_step_pct = 5.0   # mock mode only: "size up" with no number
+
 [web]                      # sewtrace serve: the one-page test UI (SPEC 6)
 max_upload_mb = 20         # per photo; a larger file is refused before any run
 job_retention_min = 120    # an uploaded job folder is deleted this long after it was created

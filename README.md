@@ -103,6 +103,17 @@ sewtrace verify data/synth/tee1/proof.jpg
 The proof photo is a paper half front, cut exactly on the stitch line (scale 1.0, no shift), laid on the t-shirt.
 The mean edge gap is under 0.1 mm. Add `--scale 1.02` to cut the paper 2% too big.
 
+Change a finished pattern with a plain request (the Co-pilot). One Muse Spark call makes the proposal. Code makes the change.
+
+```bash
+sewtrace edit out/tee1 "make it 2 cm longer"          # prints the proposal. No file changes.
+sewtrace edit out/tee1 "make it 2 cm longer" --yes    # applies it and writes the files again
+```
+
+Allowed requests: body length, chest width, sleeve length, overall size. The limits are in `[edits]` in `sewtrace/config.toml`.
+One request costs about $0.01 in REAL mode. The same request again is served from the cache. In mock mode it costs nothing.
+Every number on the page and in `measurements.json` has a source label: from photo, averaged front/back, your tape, inferred by Muse, drafted, or co-pilot edit.
+
 Open the test page with `sewtrace serve`. Then open `http://127.0.0.1:8000`. To deploy it, read `docs/DEPLOY.md`.
 In mock mode, the page works with the sample tee only.
 
@@ -148,6 +159,8 @@ The Day 1 test replaces that estimate with a measured value.
 | `sewtrace/reason/panels.py` | Panel spec: prompt, schema, validation |
 | `sewtrace/reason/seams.py` | Seam check loop |
 | `sewtrace/reason/reshape.py` | Neck and sleeve cap reshaping |
+| `sewtrace/reason/edits.py` | Co-pilot: plain request to proposal (one Spark call), then the change by code |
+| `sewtrace/reason/provenance.py` | Where each value came from: photo, average, tape, model, draft, edit |
 | `sewtrace/output/` | Tiled A4 PDF, SVG, DXF, marker PDF |
 | `sewtrace/pipeline.py` | One run, from three photos to pattern files |
 | `sewtrace/eval.py` | Error table against ground truth |

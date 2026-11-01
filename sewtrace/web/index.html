@@ -36,6 +36,9 @@
   .links a { margin-right: 14px; }
   .scroll { overflow-x: auto; }
   .small { font-size: 13px; color: #555; }
+  .tag { display: inline-block; font-size: 11px; line-height: 16px; color: #555; background: #eee; border-radius: 8px;
+         padding: 0 7px; margin-left: 6px; white-space: nowrap; font-weight: 400; }
+  .tag.edit { background: #e3efff; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -161,6 +164,7 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 const mm = (v, d = 1) => (v === null || v === undefined ? "n/a" : v.toFixed(d) + " mm");
+const tag = (label) => (label ? h("span", {class: "tag" + (label === "co-pilot edit" ? " edit" : "")}, label) : "");
 const signed = (v) => { v = Math.abs(v) < 0.05 ? 0 : v; return (v >= 0 ? "+" : "") + v.toFixed(1) + " mm"; };
 function note(box, kind, text, title) {
   box.replaceChildren(h("div", {class: "msg " + kind}, title ? h("b", {}, title + ". ") : "", text));
@@ -232,18 +236,25 @@ const file = (id, name) => "/api/jobs/" + id + "/files/" + name;
 
 function renderRun(id, r, box) {
   const out = [];
+  if (r.edits && r.edits.length) out.push(editedBox(r));
   out.push(h("h3", {}, "Photos with the SAM mask outline"));
   const photos = h("div", {class: "photos"});
   for (const p of r.photos) photos.append(h("figure", {}, h("img", {src: file(id, p.file), alt: p.view + " photo with mask outline"}), h("figcaption", {}, p.view)));
   out.push(photos);
 
   out.push(h("h3", {}, "Measurements"));
-  const mt = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Measured"), ...(r.synthetic ? [h("th", {}, "Truth"), h("th", {}, "Error")] : [])));
+  const mt = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Measured"), ...(r.synthetic ? [h("th", {}, "Truth"), h("th", {}, "Error")] : []), h("th", {}, "Source")));
   for (const m of r.measurements) {
     mt.append(h("tr", {}, h("td", {}, m.key.replace("_", " ")), h("td", {}, mm(m.value_mm)),
-      ...(r.synthetic ? [h("td", {}, mm(m.truth_mm)), h("td", {}, m.error_mm === null ? "n/a" : signed(m.error_mm))] : [])));
+      ...(r.synthetic ? [h("td", {}, mm(m.truth_mm)), h("td", {}, m.error_mm === null ? "n/a" : signed(m.error_mm))] : []), h("td", {}, tag(m.provenance))));
   }
   out.push(mt);
+  if (r.inferred && r.inferred.length) {
+    out.push(h("p", {class: "small"}, "Values no photo measures:"));
+    const it = h("table", {}, h("tr", {}, h("th", {}, "Value"), h("th", {}, "Length"), h("th", {}, "Source")));
+    for (const v of r.inferred) it.append(h("tr", {}, h("td", {}, v.label), h("td", {}, mm(v.value_mm)), h("td", {}, tag(v.provenance))));
+    out.push(it);
+  }
 
   for (const n of r.lay_notes || []) out.push(h("div", {class: "msg info"}, n));
   if (r.cap_note) out.push(h("div", {class: "msg warn"}, r.cap_note));
@@ -269,6 +280,7 @@ function renderRun(id, r, box) {
   const links = h("p", {class: "links"});
   for (const name of r.downloads) links.append(h("a", {href: file(id, name), download: ""}, r.download_files[name]));
   out.push(h("h3", {}, "Downloads"), links);
+  out.push(copilotBox(id));
   box.replaceChildren(...out);
 }
 
@@ -394,7 +406,7 @@ function reviewBox(id, review, sample) {
     inputs[r.edge] = box;
     const used = r.used_mm === null ? "too far apart" : mm(r.used_mm) + (r.source === "user" ? " (yours)" : " (average)");
     t.append(h("tr", {}, h("td", {}, r.edge), h("td", {}, mm(r.front_mm)), h("td", {}, mm(r.back_mm)),
-      h("td", {class: r.used_mm === null ? "bad" : ""}, used), h("td", {}, box)));
+      h("td", {class: r.used_mm === null ? "bad" : ""}, used, tag(r.provenance)), h("td", {}, box)));
   }
   const check = review.filter((r) => r.check_photos || r.used_mm === null).map((r) => r.edge);
   const warn = check.length ? h("p", {}, h("b", {}, "Check the photos below for " + check.join(" and ") + ". "),
@@ -428,6 +440,72 @@ function debugBox(id, items, hideMissing) {
     box);
 }
 
+const EDIT_LABELS = {body_length: "Body length", chest_width: "Chest width", sleeve_length: "Sleeve length", overall_scale_pct: "Overall size"};
+const JSON_HEADERS = {"X-Sewtrace": "1", "Content-Type": "application/json"};
+const withUnit = (v, unit) => (unit === "%" ? v.toFixed(1) + " %" : mm(v));
+
+// What the last Co-pilot edit changed: each field from its old value to its new one, and every measurement that moved.
+function editedBox(r) {
+  const list = h("ul", {});
+  for (const e of r.edits) list.append(h("li", {}, (EDIT_LABELS[e.edit] || e.edit) + ": " + withUnit(e.from, e.unit) + " to " + withUnit(e.to, e.unit)));
+  const moved = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Before"), h("th", {}, "After")));
+  for (const c of r.edit_changes || []) moved.append(h("tr", {}, h("td", {}, c.key.replace("_", " ")), h("td", {}, mm(c.from_mm)), h("td", {}, mm(c.to_mm))));
+  return h("div", {class: "msg info"}, h("b", {}, "Co-pilot edit applied. "), "The seam check passed and the files below are the new pattern.", list, moved);
+}
+
+async function waitJob(id, msgBox) {
+  for (;;) {
+    const job = await api("/api/jobs/" + id);
+    if (job.state !== "running") return job;
+    note(msgBox, "info", job.step + "...");
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
+
+// Co-pilot: a plain request, one Spark call for the proposal, then the user approves it. Code makes the change.
+function copilotBox(id) {
+  const input = h("input", {type: "text", maxlength: "300", placeholder: "for example: make it 2 cm longer", style: "width: 100%; max-width: 420px"});
+  const ask = h("button", {type: "button", class: "primary"}, "Ask the Co-pilot");
+  const msg = h("div", {}), out = h("div", {});
+  const cost = state.mode === "REAL" ? "Uses one Spark call, about $0.01." : state.mode === "MOCK" ? "MOCK mode: no paid call." : "OFFLINE mode: the answer must be in the cache.";
+  const go = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    out.replaceChildren(); ask.disabled = true; note(msg, "info", "Asking...");
+    try {
+      const {id: editId} = await api("/api/edit", {method: "POST", headers: JSON_HEADERS, body: JSON.stringify({run: id, text})});
+      const job = await waitJob(editId, msg);
+      if (job.state === "error") { note(msg, "err", job.error.message, job.error.title); return; }
+      msg.replaceChildren();
+      out.replaceChildren(proposalView(id, editId, job.result, msg, out));
+    } catch (e) { note(msg, "err", e.message, e.title); } finally { ask.disabled = false; refreshStatus(); }
+  };
+  ask.addEventListener("click", go);
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); go(); } });
+  return h("div", {}, h("h3", {}, "Co-pilot"),
+    h("p", {class: "small"}, "Ask for a change in plain words: make it 2 cm longer, sleeves 1 cm shorter, a bit wider at the chest, size up 5%. Nothing changes until you press Apply. " + cost),
+    input, " ", ask, msg, out);
+}
+
+function proposalView(id, editId, res, msg, box) {
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Field"), h("th", {}, "Now"), h("th", {}, "Proposed")));
+  for (const row of res.rows) t.append(h("tr", {}, h("td", {}, row.label), h("td", {}, withUnit(row.now, row.unit)), h("td", {}, withUnit(row.proposed, row.unit))));
+  const apply = h("button", {type: "button", class: "primary"}, "Apply");
+  const cancel = h("button", {type: "button"}, "Cancel");
+  cancel.addEventListener("click", () => { box.replaceChildren(); msg.replaceChildren(); });
+  apply.addEventListener("click", async () => {
+    apply.disabled = cancel.disabled = true; setBusy(true); note(msg, "info", "Applying...");
+    try {
+      const {id: newId} = await api("/api/edit/apply", {method: "POST", headers: JSON_HEADERS, body: JSON.stringify({run: id, edit: editId})});
+      const job = await waitJob(newId, msg);
+      if (job.state === "error") { note(msg, "err", job.error.message, job.error.title); apply.disabled = cancel.disabled = false; return; }
+      msg.replaceChildren();
+      renderRun(newId, job.result, $("runOut"));
+    } catch (e) { note(msg, "err", e.message, e.title); apply.disabled = cancel.disabled = false; } finally { setBusy(false); refreshStatus(); }
+  });
+  return h("div", {class: "msg info"}, h("b", {}, "Proposal. "), res.explanation, t, apply, " ", cancel);
+}
+
 function seamLog(log, names) {
   if (!log.length) return h("p", {class: "small"}, "No log.");
   const all = names.length ? names : [...new Set(log.flatMap((row) => Object.keys(row.diffs || {})))];
@@ -436,6 +514,7 @@ function seamLog(log, names) {
     const failing = new Set(row.failing || []);
     const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm`
       : (c.sleeve_cap || c.flat_cap) ? `sleeve.cap ${c.from_mm.toFixed(1)} to ${c.to_mm.toFixed(1)} mm` + (c.flat_cap ? `, sleeve top straight, ${c.sleeve_width_mm.toFixed(0)} mm wide, sleeve.underarm ${c.underarm_from_mm.toFixed(1)} to ${c.underarm_to_mm.toFixed(1)} mm` : "")
+      : c.edit ? `${EDIT_LABELS[c.edit] || c.edit} ${c.from.toFixed(1)} to ${c.to.toFixed(1)} ${c.unit} (co-pilot edit)`
       : JSON.stringify(c)).join("; ");
     t.append(h("tr", {}, h("td", {}, row.iteration + " " + row.source),
       ...all.map((n) => (n in (row.diffs || {})) ? h("td", {class: failing.has(n) ? "bad" : "ok"}, signed(row.diffs[n])) : h("td", {}, "")),
