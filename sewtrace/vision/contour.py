@@ -631,6 +631,8 @@ def _find_joints(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | 
 
 
 SEAM_SNAP_MAX_MM = 15.0  # a SAM seam end further than this from the outline is not trusted
+SEAM_RESTORE_FRAC = 0.5  # give back body pixels this share of the sliver radius from the kept body
+SEAM_SLIVER_MM = 6.0     # garment strips thinner than about twice this, left out of SAM's sleeve masks, are not body
 
 
 def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
@@ -723,19 +725,38 @@ def seam_points(garment: np.ndarray, sleeves: list[np.ndarray], homography: Homo
         raise ValueError(f"SAM found {len(found)} separate sleeve mask(s) on the t-shirt, 2 are needed")
     found = found[:2]
     body = garment & ~(found[0] | found[1])
+    # SAM's sleeve mask can miss a thin strip along the sleeve's lower edge (real kid tee, back photo).
+    # Left in "body", the strip makes the sleeve/body boundary run along the sleeve underside and puts
+    # the underarm 30 to 40 mm out on the sleeve. Opening removes strips thinner than about 2 x 6 mm;
+    # the body is then its largest piece.
+    ys, xs = np.nonzero(body)
+    radius = max(int(round(SEAM_SLIVER_MM * px_per_mm(homography, np.array([xs.mean(), ys.mean()])))), 1)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    opened = cv2.morphologyEx(body.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened)
+    if count < 2:
+        raise ValueError("no body left between the SAM sleeve masks")
+    core = (labels == 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))).astype(np.uint8)
+    # Opening also rounds the body's sharp corners at the shoulder ends; give back the body pixels within
+    # SEAM_RESTORE_FRAC of the radius from the kept core. That restores the corners, and only the first
+    # few mm of a strip running away from the core.
+    back = max(int(round(SEAM_RESTORE_FRAC * radius)), 1)
+    body = body & cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * back + 1, 2 * back + 1))).astype(bool)
     ys, xs = np.nonzero(body)
     centre = np.array([xs.mean(), ys.mean()])
     sides = [np.argwhere(m)[:, ::-1].mean(axis=0) - centre for m in found]
     if float(sides[0] @ sides[1]) >= 0:
         raise ValueError("the two SAM sleeve masks are on the same side of the t-shirt")
-    edge = garment & ~cv2.erode(garment.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    # Seam ends are the seam points nearest the edge of the t-shirt. A sleeve mask that misses a strip
+    # along its lower edge stops a few mm short of the edge at the underarm, so accept up to the strip size.
+    edge_dist = cv2.distanceTransform(np.pad(garment.astype(np.uint8), 1), cv2.DIST_L2, 5)[1:-1, 1:-1]
     out = []
     for sleeve in found[:2]:
         grown = cv2.dilate(sleeve.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
         seam = np.argwhere(grown & body)[:, ::-1].astype(float)  # (x, y) px along the seam
         if len(seam) < 20:
             raise ValueError("a SAM sleeve mask does not touch the body")
-        ends = seam[edge[seam[:, 1].astype(int), seam[:, 0].astype(int)]]
+        ends = seam[edge_dist[seam[:, 1].astype(int), seam[:, 0].astype(int)] <= radius + 1]
         if len(ends) < 2:
             ends = seam
         d = np.linalg.norm(ends[:, None] - ends[None], axis=2)

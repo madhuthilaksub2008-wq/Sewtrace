@@ -686,3 +686,20 @@ def test_req_geo_01_an_underarm_bitten_out_of_one_sam_sleeve_mask_is_refused_by_
         bitten.append(m & (d > 45.0) if not bitten else m)
     with pytest.raises(ValueError, match="seams are .* mm long"):
         contour._find_joints(outline, contour.seam_points(garment, bitten, hom))
+
+
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_req_geo_01_a_strip_left_out_of_the_sleeve_mask_does_not_move_the_underarm(index):
+    """SAM can miss a thin strip along the sleeve's lower edge. That strip is garment but not sleeve; it
+    must not count as body, or the underarm moves out along the sleeve underside (real back photo)."""
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index))
+    edge_dist = cv2.distanceTransform(garment.astype(np.uint8), cv2.DIST_L2, 5)
+    rows = np.arange(garment.shape[0])[:, None]
+    stripped = []
+    for m in sleeves:
+        ys = np.nonzero(m.any(axis=1))[0]
+        lower = rows > (ys.min() + ys.max()) / 2
+        stripped.append(m & ~((edge_dist < 4.0 * PX) & lower))  # a 4 mm strip along the lower half
+    seams = contour.seam_points(garment, stripped, hom)
+    assert max(_nearest_errors(np.array([u for _, u in seams]), underarm)) < 4.0
+    assert max(_nearest_errors(np.array([s for s, _ in seams]), shoulder)) < 3.0
