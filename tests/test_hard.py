@@ -662,7 +662,7 @@ def _cut_from_body(mask: np.ndarray, frac: float, width_px: int) -> np.ndarray:
     return out
 
 
-@pytest.mark.parametrize("index, radius, frac", [(1, 0.0, 0.25), (2, 15.0, 0.35), (3, 25.0, 0.5)])
+@pytest.mark.parametrize("index, radius, frac", [(1, 0.0, 0.4), (2, 15.0, 0.4), (3, 25.0, 0.5)])
 def test_req_geo_01_two_equally_short_sam_sleeve_masks_are_refused(index, radius, frac):
     """Both sleeve masks cut short by the same amount pass both left/right checks; the shoulder share
     refuses them instead of leaving part of both sleeves on the body."""

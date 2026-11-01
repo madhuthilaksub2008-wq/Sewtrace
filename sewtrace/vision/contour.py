@@ -673,11 +673,11 @@ def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
     gap = get_config().contour.joints.sam_shoulder_min_from_cuff_mm / JOINT_SPACING_MM
     if ia - c1 < gap or c4 - ib < gap:
         raise ValueError("a SAM sleeve seam ends at the cuff, not at the shoulder")
-    # The same check the outline method makes: the two shoulder seams are about equally long. A sleeve
-    # mask that stops short of its seam leaves sleeve on the body and makes its shoulder seam longer.
+    # Like the outline method's check: the two shoulder seams are about equally long. A sleeve mask that
+    # stops short of its seam leaves sleeve on the body and makes its shoulder seam longer.
     joints_cfg = get_config().contour.joints
     la, lb = float(np.linalg.norm(pts[c2] - pts[ia])), float(np.linalg.norm(pts[c3] - pts[ib]))
-    if abs(la - lb) > joints_cfg.shoulder_symmetry_mm:
+    if abs(la - lb) > joints_cfg.sam_shoulder_symmetry_mm:
         raise ValueError(f"the SAM sleeve seams give shoulder seams of {la:.0f} and {lb:.0f} mm: "
                          "a sleeve mask stops short of its seam")
     # Both armholes are about equally deep: a sleeve mask that stops short moves its underarm end
@@ -685,7 +685,8 @@ def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
     aa, ab = float(np.linalg.norm(pts[ua] - pts[ia])), float(np.linalg.norm(pts[0] - pts[ib]))
     # Share of the top edge from the neck corner to the cuff top that is shoulder seam. Two sleeve masks
     # that stop equally short pass both symmetry checks, but they move both shoulder ends out along
-    # the sleeves: the share grows (0.33 to 0.37 on correct seams, 0.50 at 25% short, 0.67 at half).
+    # the sleeves: the share grows (synthetic: 0.33 to 0.37 correct, 0.50 at 25% short, 0.67 at half;
+    # real kid tee: 0.44 to 0.46 correct).
     share_a = la / float(np.linalg.norm(pts[c2] - pts[c1]))
     share_b = lb / float(np.linalg.norm(pts[c3] - pts[c4]))
     # Logged at WARNING on purpose until real photos have set the limits (shown by `sewtrace run`).
