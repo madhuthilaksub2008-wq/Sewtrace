@@ -291,3 +291,24 @@ def test_req_geo_01_default_armhole_geometry():
     start, end = arm[1] - arm[0], arm[-1] - arm[-2]
     assert abs(start @ np.array([-1.0, -0.15]) / np.linalg.norm(start) / 1.011) < 0.05
     assert abs(end @ np.array([0.02, 1.0]) / np.linalg.norm(end)) < 0.05
+
+
+def test_req_geo_01_sleeve_edges_come_from_the_layout_not_from_bends():
+    """Real kid tee (Nov 1): a rounded cap end and a crease in the middle of the cap made the bend finder
+    take a point mid-cap for the cap end. The corners are now the outline's extreme points."""
+    import numpy as np
+
+    from sewtrace.types import Outline
+    from sewtrace.vision import contour
+
+    cap = [(x, 2 + (6 if 60 < x < 70 else 0)) for x in range(0, 120, 4)]
+    cap += [(120 + 20 * np.sin(t), 2 + 20 * (1 - np.cos(t))) for t in np.linspace(0, np.pi / 2, 10)]
+    outline = contour._resample_closed(np.array(cap + [(140, 40), (144, 94), (105, 113), (14, 133)], float), 1.0)
+    half = contour.sleeve_half(Outline.from_array(outline))
+    pts = half.array()
+    lengths = {}
+    for e in contour.label_sleeve_edges(half):
+        run = pts[e.start : e.end + 1] if e.start <= e.end else np.vstack([pts[e.start :], pts[: e.end + 1]])
+        lengths[e.name] = float(np.linalg.norm(np.diff(run, axis=0), axis=1).sum())
+    assert 130 < lengths["cap"] < 150 and 70 < lengths["underarm"] < 100
+    assert 125 < lengths["hem"] < 145 and 120 < lengths["fold"] < 140

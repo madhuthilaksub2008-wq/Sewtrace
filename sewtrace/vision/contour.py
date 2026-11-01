@@ -1040,15 +1040,23 @@ def label_body_edges(half: Outline) -> list[Edge]:
 
 
 def label_sleeve_edges(half: Outline) -> list[Edge]:
-    """Edges in TEE_EDGES["sleeve"] order: cap, underarm, hem, fold."""
+    """Edges in TEE_EDGES["sleeve"] order: cap, underarm, hem, fold.
+
+    The half sleeve lies with the fold on x = 0 and the cap top at the start (y down). Its other three
+    corners are the outline's extreme points, as the capture layout fixes the orientation: the cap end
+    is the most top-right point (largest x - y), the cuff's underarm end the most bottom-right (largest
+    x + y), the cuff's fold end the most bottom-left (largest y - x). This needs no bend detection, so a
+    rounded corner or a crease in the middle of an edge cannot be taken for a corner (real kid tee,
+    Nov 1: both happened). If the three are not in outline order, the strongest turns are used."""
     pts = half.array()
     n = len(pts)
+    cap_end = int(np.argmax(pts[:, 0] - pts[:, 1]))
+    hem_side = int(np.argmax(pts[:, 0] + pts[:, 1]))
+    hem_fold = int(np.argmax(pts[:, 1] - pts[:, 0]))
+    if 0 < cap_end < hem_side < hem_fold < n:
+        return _edges(TEE_EDGES["sleeve"], [0, cap_end, hem_side, hem_fold])
     k = max(int(round(get_config().contour.labels.corner_window_mm / _spacing(pts))), 1)
     turn = _turning(pts, k)
-    # The half sleeve is a four-cornered shape starting at the cap top on the fold: its other three
-    # corners (cap end, cuff underarm end, cuff fold end) are its three strongest turns. The fold's
-    # bottom end is not simply the lowest point on x = 0: a real fold edge bends a little near the
-    # cuff (kid tee, Nov 1), and that cut the cuff off as a 20 mm "hem".
     inner = np.full(n, -np.inf)
     inner[2 * k : n - 2 * k] = turn[2 * k : n - 2 * k]
     corners = sorted(_peaks(inner, 0.0, 2 * k)[:3])
