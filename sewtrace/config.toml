@@ -223,7 +223,11 @@ max_adjust_calls = 3       # REQ-SEW-02
 # between the photo's end points reaches the armhole length, the code fix makes the cap taller: it lowers
 # the cap end straight down (same width) and runs the underarm seam straight to the cuff. Limits (a
 # misplaced armpit on a body photo makes the armhole too long; that must still fail loudly):
-cap_drop_handle_frac = 0.55        # handle length / cap width for the taller cap: a smooth bell, not a step
+# Handle lengths of the taller cap, as a share of the cap width: a full crown over the shoulder (0.6),
+# and a short scoop into the underarm (0.25). Equal handles of 0.55 left a 25 mm flat "ledge" at the
+# underarm end on the real kid tee.
+cap_drop_crown_frac = 0.6
+cap_drop_underarm_frac = 0.25
 cap_height_max_ratio = 0.8         # cap height / cap width at most (kid tee patterns: about 0.4 to 0.7)
 cap_drop_min_underarm_frac = 0.3   # the underarm seam keeps at least this share of its photo length
 # Shoulder and side pairs are the same seam measured in two photos. A code fix sets both edges to

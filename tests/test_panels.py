@@ -523,3 +523,20 @@ def test_req_api_02_retry_prompt_is_the_same_for_a_live_failure_and_a_stored_rep
 
     live = second_prompt(ApiError("cut off at max_tokens"))
     assert second_prompt(StoredAnswerRejected("cut off at max_tokens", "k.rejected.json")) == live
+
+
+def test_req_geo_01_the_sleeve_cuff_is_cut_straight():
+    """A crease in the photo's cuff (real kid tee: a kink near the underarm) must not reach the pattern."""
+    import numpy as np
+
+    from sewtrace.reason.reshape import with_straight_hem
+    from sewtrace.types import Edge, Panel
+
+    pts = [(0, 0), (70, 10), (140, 50), (140, 120), (120, 128), (110, 124), (60, 132), (0, 135)]
+    edges = [Edge(name="cap", start=0, end=2), Edge(name="underarm", start=2, end=3),
+             Edge(name="hem", start=3, end=7), Edge(name="fold", start=7, end=0)]
+    sleeve = with_straight_hem(Panel(name="sleeve", cut="2 on fold", outline_mm=pts, edges=edges))
+    hem = sleeve.edge_points("hem")
+    chord, rel = hem[-1] - hem[0], hem - hem[0]
+    off = np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)
+    assert off.max() < 1e-6 and np.allclose(hem[0], (140, 120)) and np.allclose(hem[-1], (0, 135))

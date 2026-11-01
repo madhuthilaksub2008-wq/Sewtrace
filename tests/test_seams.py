@@ -464,6 +464,7 @@ def test_req_sew_02_a_cap_laid_flat_in_the_photo_is_made_taller_and_passes(tees,
     width = cap_width_mm(sleeve)
     cap = change["sleeve_cap"]
     assert max(cap["crown_run_mm"], cap["underarm_run_mm"]) <= 0.8 * width  # a bell, not a step
+    assert cap["underarm_run_mm"] <= 0.35 * width  # a short scoop into the underarm, not a flat ledge
     under = sleeve.edge_points("underarm")
     chord, rel = under[-1] - under[0], under - under[0]
     assert (np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)).max() < 0.5  # straight

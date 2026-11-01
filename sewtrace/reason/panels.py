@@ -40,7 +40,15 @@ from sewtrace.api.client import (
 )
 from sewtrace.config import get_config
 from sewtrace.mock.fixtures import NECKBAND_RATIO, NECKBAND_WIDTH_MM, default_tee_seams
-from sewtrace.reason.reshape import SleeveCap, cap_width_mm, fit_cap, neck_depth_mm, with_neck_depth, with_sleeve_cap
+from sewtrace.reason.reshape import (
+    SleeveCap,
+    cap_width_mm,
+    fit_cap,
+    neck_depth_mm,
+    with_neck_depth,
+    with_sleeve_cap,
+    with_straight_hem,
+)
 from sewtrace.reason.seams import check_seams, edge_length
 from sewtrace.types import TEE_EDGES, TEE_PANELS, Edge, Outline, Panel, PanelSpec, PhotoSet
 from sewtrace.vision.measure import measure_tee
@@ -85,6 +93,7 @@ def draft_spec(
         for name, outline, edges in (("front", front, front_edges), ("back", back, back_edges),
                                      ("sleeve", sleeve, sleeve_edges))
     ]
+    panels = [with_straight_hem(p) if p.name == "sleeve" else p for p in panels]  # a cuff is cut straight
     return _assemble(panels)
 
 

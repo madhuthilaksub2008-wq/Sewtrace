@@ -102,11 +102,25 @@ def scale_cap_to_length(points: np.ndarray, cap: SleeveCap, target_mm: float, it
     return scaled((lo + hi) / 2)
 
 
-def cap_length_at(points: np.ndarray, frac: float) -> float:
-    """Cap length between these end points with both handles at ``frac`` of the cap width."""
+def cap_length_at(points: np.ndarray, frac: float, underarm_frac: float | None = None) -> float:
+    """Cap length between these end points with the crown handle at ``frac`` of the cap width and the
+    underarm handle at ``underarm_frac`` (``frac`` when None)."""
     start, end = points[0], points[-1]
-    run = frac * abs(end[0] - start[0])
-    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=run, underarm_run_mm=run)))
+    width = abs(end[0] - start[0])
+    under = frac if underarm_frac is None else underarm_frac
+    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=frac * width, underarm_run_mm=under * width)))
+
+
+def with_straight_hem(panel: Panel) -> Panel:
+    """Sleeve with its hem (cuff) drawn straight between its two corners. The photo's cuff edge carries
+    creases and wrinkles of the fabric (real kid tee: a kink near the underarm); a cuff is cut straight."""
+    hem = panel.edge_points("hem")
+    chord, rel = hem[-1] - hem[0], hem - hem[0]
+    if np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]).max() / max(np.linalg.norm(chord), 1e-9) < 1.0:
+        return panel  # already straight: keep the points as they are
+    n = max(int(np.ceil(np.linalg.norm(hem[-1] - hem[0]) / CAP_STEP_MM)), 2)
+    t = np.linspace(0.0, 1.0, n + 1)[:, None]
+    return replace_edges(panel, {"hem": hem[0] + t * (hem[-1] - hem[0])})
 
 
 def max_cap_length(points: np.ndarray) -> float:

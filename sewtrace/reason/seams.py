@@ -346,8 +346,9 @@ def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
         spec = _replace_panel(spec, with_cap_drop(sleeve, drop))
     pts = spec.panel("sleeve").edge_points("cap")
     if drop:  # the cap edge is a straight placeholder now: start from the smooth handles the drop was sized for
-        run = get_config().seam.cap_drop_handle_frac * abs(float(pts[-1, 0] - pts[0, 0]))
-        start = SleeveCap(crown_run_mm=run, underarm_run_mm=run)
+        cfg_seam, width = get_config().seam, abs(float(pts[-1, 0] - pts[0, 0]))
+        start = SleeveCap(crown_run_mm=cfg_seam.cap_drop_crown_frac * width,
+                          underarm_run_mm=cfg_seam.cap_drop_underarm_frac * width)
     else:
         start = fit_cap(pts)
     spec, applied = _set_cap(spec, scale_cap_to_length(pts, start, target))
@@ -363,7 +364,8 @@ def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
 
 
 def _cap_drop(sleeve: Panel, target_half_mm: float) -> float:
-    """Least drop of the cap end (mm) that lets a smooth cap (handles at ``cap_drop_handle_frac`` of the width)
+    """Least drop of the cap end (mm) that lets a smooth cap (handles at ``cap_drop_crown_frac`` and
+    ``cap_drop_underarm_frac`` of the width)
     reach ``target_half_mm``; 0.0 when the limits do not allow it, so the seam fails loudly (REQ-SEW-04)."""
     cfg = get_config().seam
     cap, under = sleeve.edge_points("cap"), sleeve.edge_points("underarm")
@@ -374,7 +376,8 @@ def _cap_drop(sleeve: Panel, target_half_mm: float) -> float:
         return 0.0
 
     def reach(d: float) -> float:
-        return cap_length_at(with_cap_drop(sleeve, d).edge_points("cap"), cfg.cap_drop_handle_frac)
+        return cap_length_at(with_cap_drop(sleeve, d).edge_points("cap"), cfg.cap_drop_crown_frac,
+                             cfg.cap_drop_underarm_frac)
 
     if reach(hi) < target_half_mm:
         return 0.0
