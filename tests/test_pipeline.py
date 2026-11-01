@@ -362,3 +362,21 @@ def test_req_sew_03_a_user_length_far_from_agreeing_photos_does_not_blame_the_ph
         {"pair": "front.side~back.side", "panel": "front", "edge": "side", "from_mm": 300.0, "to_mm": 320.0, "end_point_shift_mm": 20.0},
         {"pair": "front.side~back.side", "panel": "back", "edge": "side", "from_mm": 301.0, "to_mm": 320.0, "end_point_shift_mm": 19.0}]}]
     assert pipeline.pair_review(log, warn_shift_mm=5.0)[0]["check_photos"] is False
+
+
+@pytest.mark.parametrize("deg", [-90, -35, 0, 25, 90, 180])
+def test_req_geo_01_outlines_are_measured_with_the_photos_up_as_up(deg):
+    """The marker paper can lie at any angle (real kid tee: sideways on the sleeve photo, which made the cuff
+    look like the fold). The px -> mm map is turned so the photo's up is up; lengths do not change."""
+    import numpy as np
+
+    from sewtrace.vision.marker import Homography
+
+    t = np.radians(deg)
+    H = np.eye(3)
+    H[:2, :2] = 0.5 * np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    turned = pipeline.upright(Homography(H), (1000, 800))
+    a, b = turned.px_to_mm(np.array([[400.0, 500.0], [400.0, 400.0]]))
+    assert np.allclose(b - a, [0.0, -50.0], atol=1e-6)
+    p, q = turned.px_to_mm(np.array([[10.0, 20.0], [310.0, 420.0]]))
+    assert np.linalg.norm(q - p) == pytest.approx(0.5 * 500.0)

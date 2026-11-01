@@ -114,6 +114,21 @@ def body_without_sleeves(
     return contour.cut_sleeves_flagged(outline, report=report)
 
 
+def upright(h: Homography, shape: tuple[int, ...]) -> Homography:
+    """The photo's px -> mm map, turned so the photo's own up is -y in mm. The mm frame comes from the
+    marker and turns with the marker paper; the tracers look for the fold within 30 degrees of up, and the
+    capture rules (neck up; sleeve: fold on the left, cap at the top) are about the photo. A rotation keeps
+    every length. Real kid tee: the marker paper lay sideways on the sleeve photo, and the sleeve came out
+    skewed (the cuff was taken as the fold)."""
+    height, width = shape[:2]
+    a, b = h.px_to_mm(np.array([[width / 2, height / 2], [width / 2, height / 2 - 100.0]]))
+    up = (b - a) / np.linalg.norm(b - a)              # the photo's up, in mm
+    angle = -np.arctan2(up[0], -up[1])                # turn that brings it to (0, -1)
+    c, s_ = np.cos(angle), np.sin(angle)
+    turn = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+    return Homography(turn @ h.H, marker_error_mm=h.marker_error_mm)
+
+
 def _debug(debug_dir: Path | None, view: str, photo: str, h: Homography, *args) -> None:
     """Write debug_<view>.png; a failure to draw never fails the run."""
     if debug_dir is None:
@@ -133,6 +148,7 @@ def trace(
     With ``debug_dir``, also writes debug_<view>.png there (see sewtrace/output/debug.py)."""
     mask = client.segment(photo, prompt)
     view = Path(photo).stem
+    h = upright(h, mask.shape)
     try:
         outline = contour.smooth_outline(contour.mask_to_outline(mask, h))
         if sleeve:
