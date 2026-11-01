@@ -217,7 +217,7 @@ def test_req_geo_01_contour_failure_names_the_photo(tmp_path, monkeypatch):
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)
 
-    def no_joints(outline, seams=None):
+    def no_joints(outline, seams=None, report=None):
         raise ValueError("found no underarm corners")
 
     monkeypatch.setattr(contour, "cut_sleeves_flagged", no_joints)
@@ -232,7 +232,7 @@ def test_req_geo_01_unmirrored_corners_say_to_lay_the_sleeves_the_same_way(tmp_p
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)
 
-    def refuse(outline, seams=None):
+    def refuse(outline, seams=None, report=None):
         raise contour.CornersNotMirrored(
             "the inner sleeve cuff corners do not mirror: the closest pair is 62 mm off (limit 25 mm). "
             "Lay both sleeves the same way", "cuff_top", 62.0, 25.0)

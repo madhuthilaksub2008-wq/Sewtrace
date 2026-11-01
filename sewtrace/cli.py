@@ -129,6 +129,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
+        for note in result.lay_notes:
+            print("note:", note)
         _print_review(result.seam_log, args.garment_dir)
         for k, path in result.files.items():
             print(f"{k:12s} {path}")

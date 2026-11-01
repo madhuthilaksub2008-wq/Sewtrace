@@ -30,6 +30,23 @@ class RunResult:
     seam_log: list[dict]
     files: dict[str, Path] = field(default_factory=dict)
     model_calls: int = 0
+    lay_notes: list[str] = field(default_factory=list)  # what was evened out in each photo, for the user
+
+
+LAY_NOTE_MM = 8.0  # a left/right difference above this is reported to the user
+
+
+def lay_note(view: str, report: dict) -> str | None:
+    """A plain sentence on how crooked the t-shirt lies in a photo and that it was evened out, or None."""
+    parts = []
+    for key, what in (("underarm_mm", "armpit"), ("shoulder_mm", "shoulder point")):
+        mm = report.get(key)
+        if mm is not None and abs(mm) > LAY_NOTE_MM:
+            parts.append(f"one {what} lies {abs(mm):.0f} mm lower than the other")
+    if not parts:
+        return None
+    return (f"{view} photo: the t-shirt is not laid straight ({'; '.join(parts)}). Corrected: both sides were "
+            "averaged into one even half. If the pattern looks off, smooth the t-shirt flat and take the photo again.")
 
 
 def photo_set(garment_dir: Path) -> PhotoSet:
@@ -78,6 +95,7 @@ def sleeve_seams(client: MetaClient, photo: str | Path, garment: np.ndarray, h: 
 
 def body_without_sleeves(
     client: MetaClient, photo: str | Path, garment: np.ndarray, h: Homography, outline: Outline,
+    report: dict | None = None,
 ) -> tuple[Outline, np.ndarray, np.ndarray]:
     """``contour.cut_sleeves_flagged`` with the sleeve seams from SAM when they can be trusted, else
     from the outline shape. A SAM seam that disagrees with the outline is logged and not used; a
@@ -85,14 +103,14 @@ def body_without_sleeves(
     seams = sleeve_seams(client, photo, garment, h)
     if seams is not None:
         try:
-            cut = contour.cut_sleeves_flagged(outline, seams)
+            cut = contour.cut_sleeves_flagged(outline, seams, report)
             log.info("sleeve seams from SAM used for %s", photo)
             return cut
         except contour.ContourRefused:
             raise
         except ValueError as err:
             log.warning("sleeve seams from SAM rejected for %s (%s); finding them from the outline", photo, err)
-    return contour.cut_sleeves_flagged(outline)
+    return contour.cut_sleeves_flagged(outline, report=report)
 
 
 def _debug(debug_dir: Path | None, view: str, photo: str, h: Homography, *args) -> None:
@@ -108,6 +126,7 @@ def _debug(debug_dir: Path | None, view: str, photo: str, h: Homography, *args) 
 
 def trace(
     client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False, debug_dir: Path | None = None,
+    notes: list[str] | None = None,
 ) -> tuple[Outline, list[Edge]]:
     """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt.
     With ``debug_dir``, also writes debug_<view>.png there (see sewtrace/output/debug.py)."""
@@ -120,10 +139,16 @@ def trace(
             edges = contour.label_sleeve_edges(half)
             _debug(debug_dir, view, photo, h, outline, half, edges)
             return half, edges
-        body, invented, _ = body_without_sleeves(client, photo, mask, h, outline)
+        report: dict = {}
+        body, invented, _ = body_without_sleeves(client, photo, mask, h, outline, report)
         half = contour.body_half(body)
         edges = contour.label_body_edges(half)
-        _debug(debug_dir, view, photo, h, outline, half, edges, body, invented)
+        note = lay_note(view, report)
+        if note:
+            log.warning(note)
+            if notes is not None:
+                notes.append(note)
+        _debug(debug_dir, view, photo, h, outline, half, edges, body, invented, note)
         return half, edges
     except contour.ContourRefused as err:
         # The numbers let refusals on real photos recalibrate the limits in contour.joints.
@@ -166,8 +191,9 @@ def run(
     # Debug images go in <out>_debug, written before the seam check so a failed run still shows what
     # the outline step found. Not in out_dir: a failed run leaves that empty (REQ-SEW-04).
     debug_dir = out_dir.parent / f"{out_dir.name}_debug" if debug else None
-    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug_dir)
-    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug_dir)
+    notes: list[str] = []
+    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug_dir, notes=notes)
+    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug_dir, notes=notes)
     sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True, debug_dir=debug_dir)
     measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
@@ -203,4 +229,4 @@ def run(
     files["spec"].write_text(spec.model_dump_json(indent=1))
     files["measurements"].write_text(json.dumps(measurements, indent=1))
     files["seam_log"].write_text(json.dumps(seam_log, indent=1, default=str))
-    return RunResult(spec, measurements, seam_log, files, client.calls - calls_before)
+    return RunResult(spec, measurements, seam_log, files, client.calls - calls_before, notes)

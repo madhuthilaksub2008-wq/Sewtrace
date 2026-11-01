@@ -104,6 +104,7 @@ def run_pattern(
         "seam_log": json.loads(json.dumps(result.seam_log, default=str)),
         # Seams the front and back photos measured differently: the length picked, to show and correct.
         "review": pipeline.pair_review(result.seam_log),
+        "lay_notes": result.lay_notes,  # how crooked each photo was, and that it was evened out
         "debug": [{"view": v, "file": f"debug_{v}"} for v in debug],
         "sample": sample,
         "model_calls": result.model_calls,

@@ -35,7 +35,7 @@ def _poly(img: np.ndarray, pts_px: np.ndarray, colour: tuple[int, int, int], wid
 
 def write_debug(
     path: Path, photo: str | Path, h: Homography, outline: Outline, half: Outline, edges: list[Edge],
-    body: Outline | None = None, invented: np.ndarray | None = None,
+    body: Outline | None = None, invented: np.ndarray | None = None, note: str | None = None,
 ) -> Path:
     image = cv2.imread(str(photo))
     width = max(3, round(max(image.shape[:2]) / 600))
@@ -67,6 +67,14 @@ def write_debug(
         cv2.putText(panel, text, (PANEL_PX - 250, 40 + 30 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
     cv2.putText(panel, "half panel (fold on x=0), stitch line lengths", (40, PANEL_PX - 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 80, 80), 1)
+    if note:  # the lay correction, wrapped under the edge lengths
+        words, line, y = note.split(), "", 40 + 30 * len(lines) + 20
+        for word in words:
+            if len(line) + len(word) > 34:
+                cv2.putText(panel, line, (PANEL_PX - 330, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 90, 200), 1)
+                line, y = "", y + 22
+            line += word + " "
+        cv2.putText(panel, line, (PANEL_PX - 330, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 90, 200), 1)
     path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(path), np.hstack([left, panel]))
     return path

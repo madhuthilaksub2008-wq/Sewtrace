@@ -703,3 +703,21 @@ def test_req_geo_01_a_strip_left_out_of_the_sleeve_mask_does_not_move_the_undera
     seams = contour.seam_points(garment, stripped, hom)
     assert max(_nearest_errors(np.array([u for _, u in seams]), underarm)) < 4.0
     assert max(_nearest_errors(np.array([s for s, _ in seams]), shoulder)) < 3.0
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_req_geo_01_a_straight_synthetic_tee_reports_an_even_lay(index):
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    report: dict = {}
+    contour.cut_sleeves_flagged(outline, contour.seam_points(garment, sleeves, hom), report)
+    assert abs(report["underarm_mm"]) < 3.0 and abs(report["shoulder_mm"]) < 3.0
+
+
+def test_req_geo_01_a_crooked_lay_is_reported_and_said_to_be_evened_out():
+    from sewtrace.pipeline import lay_note
+
+    assert lay_note("front", {"underarm_mm": 3.0, "shoulder_mm": -2.0}) is None
+    note = lay_note("back", {"underarm_mm": -24.4, "shoulder_mm": 1.0})
+    assert note.startswith("back photo:") and "one armpit lies 24 mm lower than the other" in note
+    assert "Corrected" in note and "shoulder" not in note.split("Corrected")[0]

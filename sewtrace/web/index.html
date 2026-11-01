@@ -243,6 +243,7 @@ function renderRun(id, r, box) {
   }
   out.push(mt);
 
+  for (const n of r.lay_notes || []) out.push(h("div", {class: "msg info"}, n));
   if (r.review && r.review.length) out.push(reviewBox(id, r.review, r.sample));
   if (r.debug && r.debug.length) out.push(debugBox(id, r.debug, false));
 

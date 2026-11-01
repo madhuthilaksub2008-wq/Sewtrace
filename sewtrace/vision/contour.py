@@ -830,7 +830,19 @@ def cut_sleeves(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | N
     return body, invented
 
 
-def cut_sleeves_flagged(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None) -> tuple[Outline, np.ndarray, np.ndarray]:
+def lay_report(j: _Joints) -> dict[str, float]:
+    """How crooked the t-shirt lies, from its sleeve joints (mm): how much lower one underarm, and one
+    shoulder point, is than the other along the body's own up-down axis. ``body_half`` evens both out by
+    averaging the two sides into one half panel."""
+    down = (j.underarm_a + j.underarm_b) / 2 - (j.shoulder_a + j.shoulder_b) / 2
+    down /= np.linalg.norm(down)
+    return {"underarm_mm": float((j.underarm_a - j.underarm_b) @ down),
+            "shoulder_mm": float((j.shoulder_a - j.shoulder_b) @ down)}
+
+
+def cut_sleeves_flagged(
+    outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None, report: dict | None = None,
+) -> tuple[Outline, np.ndarray, np.ndarray]:
     """cut_sleeves(), plus a boolean array that is True for each body point on the neck.
 
     The neck is the outline between the two neck corners. On a front flat-lay it follows
@@ -838,6 +850,8 @@ def cut_sleeves_flagged(outline: Outline, seams: list[tuple[np.ndarray, np.ndarr
     edge is not on the outline (front neck depth is inferred, REQ-RSN-04).
     """
     j = _find_joints(outline, seams)
+    if report is not None:
+        report.update(lay_report(j))
     pts = j.pts
     centre = _centroid(pts)
     arm_a = default_armhole(j.shoulder_a, j.underarm_a, j.shoulder_dir_a, j.side_dir_a, centre)
