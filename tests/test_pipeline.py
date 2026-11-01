@@ -51,11 +51,14 @@ def test_req_rsn_05_correct_front_depth_is_accepted_first_try_in_the_pipeline(tm
 
 
 def _unfixable(monkeypatch):
-    """The back shoulder is 6 mm too long. Two measured edges disagree, so nothing may fix it."""
+    """The back shoulder is 6 mm too long, over the code fix limit (pinned to 4 mm here; D-02 is 40 mm in
+    config). Two measured edges disagree, so nothing may fix it."""
     real = pipeline.adjust_loop
 
     def broken(client, spec):
         back = spec.panel("back")
+        cfg = client.config
+        client.config = cfg.model_copy(update={"seam": cfg.seam.model_copy(update={"measured_pair_max_fix_mm": 4.0})})
         longer = set_edge_length(back, "shoulder", seams.edge_length(back, "shoulder") + 6)
         spec = spec.model_copy(update={"panels": [longer if p.name == "back" else p for p in spec.panels]})
         return real(client, spec)
@@ -292,3 +295,26 @@ def test_req_geo_01_run_writes_a_debug_image_per_photo_even_when_the_seam_check_
         image = cv2.imread(str(tmp_path / "out_debug" / f"debug_{view}.png"))
         assert image is not None and image.shape[0] == 900
     assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())  # REQ-SEW-04
+
+
+def test_req_sew_03_user_length_sets_both_edges_of_a_measured_pair(tmp_path, capsys, monkeypatch):
+    """D-02 (Nov 1): a seam the front and back photos disagree on can be set to the user's tape
+    measurement; both edges then have that length, and the CLI shows it."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    result = run(tee, tmp_path / "out", _client(tmp_path), overrides={"side": 240.0})
+    for panel in ("front", "back"):
+        assert seams.edge_length(result.spec.panel(panel), "side") == pytest.approx(240.0, abs=0.5)
+    assert result.seam_log[0]["source"] == "user"
+    real_run = pipeline.run
+    client = _client(tmp_path)
+    monkeypatch.setattr(pipeline, "run", lambda d, o, **k: real_run(d, o, client, **k))
+    cli.main(["run", str(tee), "--out", str(tmp_path / "out2"), "--set", "side=241"])
+    out = capsys.readouterr().out
+    assert "-> used  241.0 mm (your --set value)" in out
+
+
+def test_req_sew_03_cli_refuses_a_bad_set(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["run", str(tmp_path), "--set", "chest=300"])
+    assert "only shoulder or side" in capsys.readouterr().err

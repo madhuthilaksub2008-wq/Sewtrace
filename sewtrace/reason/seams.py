@@ -191,6 +191,24 @@ def balance_measured_pairs(spec: PanelSpec, pairs: list[Seam]) -> tuple[PanelSpe
     return spec, applied
 
 
+def set_measured_pairs(spec: PanelSpec, targets: dict[str, float]) -> tuple[PanelSpec, list[dict]]:
+    """The user's own lengths (a tape measure on the tee) for shoulder or side: both the front and the
+    back edge are set to the given length, as the pair fix does with the mean. Returns the new spec and
+    one log row per edge, in mm."""
+    applied: list[dict] = []
+    for edge, target_mm in targets.items():
+        if edge not in MEASURED_PAIR_EDGES:
+            raise ValueError(f"only {', '.join(MEASURED_PAIR_EDGES)} can be set, not {edge!r}")
+        for name in ("front", "back"):
+            panel = spec.panel(name)
+            moved, shift_mm = _set_edge_length(panel, edge, float(target_mm))
+            applied.append({"pair": f"front.{edge}~back.{edge}", "panel": name, "edge": edge,
+                            "from_mm": round(edge_length(panel, edge), 2), "to_mm": round(float(target_mm), 2),
+                            "end_point_shift_mm": round(shift_mm, 2)})
+            spec = _replace_panel(spec, moved)
+    return spec, applied
+
+
 def _edge_indices(start: int, end: int, n: int) -> list[int]:
     return list(range(start, end + 1)) if start <= end else list(range(start, n)) + list(range(end + 1))
 

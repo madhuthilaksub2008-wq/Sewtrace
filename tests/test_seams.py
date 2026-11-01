@@ -66,6 +66,13 @@ def _back_shoulder_6mm_long(spec: PanelSpec) -> PanelSpec:
     return _replace(spec, set_edge_length(back, "shoulder", edge_length(back, "shoulder") + 6))
 
 
+def _pair_limit_4mm(client) -> None:
+    """These tests check that a pair over the code fix limit is refused, not the limit's value (D-02,
+    40 mm in config): pin it to the old 4 mm so a 6 mm pair is over it."""
+    cfg = client.config
+    client.config = cfg.model_copy(update={"seam": cfg.seam.model_copy(update={"measured_pair_max_fix_mm": 4.0})})
+
+
 def _measured_edges(spec: PanelSpec) -> dict[str, np.ndarray]:
     """Every edge except the hidden ones (neck curve, armhole, sleeve cap), as arrays."""
     hidden = {"neck", "armhole", "cap"}
@@ -182,7 +189,8 @@ def test_req_sew_03_05_mock_always_fails_then_code_fix_and_log(tees, client, mon
 
 
 def test_req_sew_03_rsn_05_measured_pair_failure_is_not_edited(tees, client):
-    """REQ-RSN-05: back shoulder 6 mm long, over the code fix limit (4 mm). No model call, no edit; raises."""
+    """REQ-RSN-05: back shoulder 6 mm long, over the code fix limit (4 mm here). No model call, no edit; raises."""
+    _pair_limit_4mm(client)
     spec = _back_shoulder_6mm_long(truth_spec(tees[0]))
     out, log = adjust_loop(client, spec)
     assert client.calls == 0 and out == spec.model_copy(update={"seams": out.seams})
@@ -270,6 +278,7 @@ def test_req_sew_03_pair_fix_then_cap_loop_still_converges(tees, client):
 
 def test_req_sew_03_unfixable_measured_pair_spends_no_model_call_on_the_cap(tees, client):
     """REQ-SEW-02, REQ-SEW-04: back shoulder 6 mm long (over the limit) AND a failing cap: stop at once."""
+    _pair_limit_4mm(client)
     spec = _longer_front_armhole(_back_shoulder_6mm_long(truth_spec(tees[0])))
     failing = {seam_name(s) for s in check_seams(spec) if not s.ok}
     assert failing == {"front.shoulder~back.shoulder", CAP}

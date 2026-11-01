@@ -16,6 +16,9 @@ def main(argv: list[str] | None = None) -> None:
     r = sub.add_parser("run", help="photos in a folder -> pattern files")
     r.add_argument("garment_dir")
     r.add_argument("--out", default=None)
+    r.add_argument("--set", action="append", default=[], metavar="EDGE=MM",
+                   help="use your own tape-measured length for a seam the front and back photos disagree on, "
+                        "e.g. --set side=305 --set shoulder=110 (only shoulder and side)")
     e = sub.add_parser("eval", help="run all garments, compare with ground truth")
     e.add_argument("raw_dir", nargs="?", default="data/synth",
                    help="folder of tees: data/synth (truth.json) or data/raw (needs data/ground_truth/<tee>.json)")
@@ -72,6 +75,45 @@ def main(argv: list[str] | None = None) -> None:
         _fail(f"{args.cmd}: {err}")
 
 
+def _parse_sets(items: list[str]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for item in items:
+        name, _, value = item.partition("=")
+        try:
+            mm = float(value)
+        except ValueError:
+            _fail(f"run: --set {item!r}: give EDGE=MM, for example --set side=305")
+        if name not in ("shoulder", "side") or not 20 <= mm <= 1000:
+            _fail(f"run: --set {item!r}: only shoulder or side, between 20 and 1000 mm")
+        out[name] = mm
+    return out
+
+
+def _print_review(seam_log: list[dict], garment_dir: str) -> None:
+    """What was picked where the front and back photos disagree, and how to correct it."""
+    rows: dict[str, dict] = {}
+    for row in seam_log:
+        if row["source"] not in ("pair_fix", "user"):
+            continue
+        for change in row["applied"]:  # a measured edge was changed (REQ-SEW-03)
+            print(f"seam fix: {change['panel']}.{change['edge']} {change['from_mm']:.2f} mm -> "
+                  f"{change['to_mm']:.2f} mm (pair {change['pair']})")
+        for change in row["applied"]:
+            seen = rows.setdefault(change["edge"], {"source": row["source"], "to": change["to_mm"]})
+            seen[change["panel"]] = change["from_mm"]
+    if not rows:
+        return
+    print("\nThe front and back photos measure these seams differently. One length was picked for both:")
+    for edge, r in rows.items():
+        how = "your --set value" if r["source"] == "user" else "the average"
+        print(f"  {edge:9s} front photo {r.get('front', float('nan')):6.1f} mm, back photo {r.get('back', float('nan')):6.1f} mm"
+              f"  -> used {r['to']:6.1f} mm ({how})")
+    if any(r["source"] != "user" for r in rows.values()):
+        example = " ".join(f"--set {e}=<mm>" for e in rows)
+        print(f"Tape-measure the tee and run again with your numbers to correct them:\n"
+              f"  python -m sewtrace.cli run {garment_dir} {example}")
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "synth":
         from sewtrace.mock import synth
@@ -82,19 +124,15 @@ def _dispatch(args: argparse.Namespace) -> None:
         from sewtrace.reason.seams import SeamCheckFailed
         from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
         out = args.out or Path("out") / Path(args.garment_dir).name
+        overrides = _parse_sets(args.set)
         try:
-            result = run(args.garment_dir, out)
+            result = run(args.garment_dir, out, **({"overrides": overrides} if overrides else {}))
         except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed) as err:
             _fail(err)
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
-        for row in result.seam_log:
-            if row["source"] != "pair_fix":
-                continue
-            for change in row["applied"]:  # a measured edge was changed by the pair fix (REQ-SEW-03)
-                print(f"seam fix: {change['panel']}.{change['edge']} {change['from_mm']:.2f} mm -> "
-                      f"{change['to_mm']:.2f} mm (pair {change['pair']})")
+        _print_review(result.seam_log, args.garment_dir)
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
     elif args.cmd == "serve":

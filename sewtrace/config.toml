@@ -219,12 +219,13 @@ underarm_tol_mm = 1.0
 cap_ease_min_mm = 0.0      # open decision D-03
 cap_ease_max_mm = 12.0
 max_adjust_calls = 3       # REQ-SEW-02
-# Shoulder and side pairs are the same seam measured in two photos. A code fix may set both
-# edges to their mean length when the pair differs by at most this much (each edge then moves
-# half of it). Above it the run fails loudly. Open decision D-02: 4 mm is about the tape
-# repeat limit of a real tee (SPEC 10.3 says 2 mm per reading) and a hem corner or shoulder
-# point moves at most 2 mm.
-measured_pair_max_fix_mm = 4.0
+# Shoulder and side pairs are the same seam measured in two photos. A code fix sets both edges to
+# their mean length when the pair differs by at most this much, and the run prints what it picked
+# so the user can correct it with a tape measure (sewtrace run --set side=305). Above it the run
+# fails loudly. D-02, decided by the user on Nov 1: pick one value, show it, let the user correct
+# it. 4 mm (the old value) refused every real photo set: a hand-laid kid tee gave the same side
+# seam as 296 mm on the front photo and 327 mm on the back, and shoulders 108 and 114 mm.
+measured_pair_max_fix_mm = 40.0
 
 [pattern]
 seam_allowance_mm = 10.0   # REQ-OUT-03

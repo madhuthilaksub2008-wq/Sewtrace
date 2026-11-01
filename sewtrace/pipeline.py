@@ -14,7 +14,7 @@ from sewtrace.api.client import CacheMiss, MetaClient
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
-from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, set_measured_pairs
 from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
@@ -135,7 +135,12 @@ def trace(
         ) from err
 
 
-def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None) -> RunResult:
+def run(
+    garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None,
+    overrides: dict[str, float] | None = None,
+) -> RunResult:
+    """Photos -> pattern files. ``overrides`` sets the shoulder or side seam to the user's own length
+    (a tape measure on the tee), in place of the value picked from the front and back photos."""
     garment_dir, out_dir = Path(garment_dir), Path(out_dir)
     client = client or MetaClient()
     calls_before = client.calls
@@ -159,7 +164,12 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
         raise PanelInferenceFailed(
             f"panel inference: {err}. Take the front and back photos again with the whole neck in view."
         ) from err
+    user_rows: list[dict] = []
+    if overrides:
+        spec, applied = set_measured_pairs(spec, overrides)
+        user_rows = [{"iteration": -1, "source": "user", "applied": applied}]
     spec, seam_log = adjust_loop(client, spec)
+    seam_log = user_rows + seam_log
     spec = refresh_derived(spec)  # the cap may have changed: notches follow it
     try:
         require_seams_ok(spec, seam_log)  # REQ-SEW-04: before any file is written
