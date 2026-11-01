@@ -91,25 +91,22 @@ def _parse_sets(items: list[str]) -> dict[str, float]:
 
 def _print_review(seam_log: list[dict], garment_dir: str) -> None:
     """What was picked where the front and back photos disagree, and how to correct it."""
-    rows: dict[str, dict] = {}
+    from sewtrace.pipeline import pair_review
     for row in seam_log:
-        if row["source"] not in ("pair_fix", "user"):
-            continue
-        for change in row["applied"]:  # a measured edge was changed (REQ-SEW-03)
-            print(f"seam fix: {change['panel']}.{change['edge']} {change['from_mm']:.2f} mm -> "
-                  f"{change['to_mm']:.2f} mm (pair {change['pair']})")
-        for change in row["applied"]:
-            seen = rows.setdefault(change["edge"], {"source": row["source"], "to": change["to_mm"]})
-            seen[change["panel"]] = change["from_mm"]
+        if row["source"] in ("pair_fix", "user"):
+            for change in row["applied"]:  # a measured edge was changed (REQ-SEW-03)
+                print(f"seam fix: {change['panel']}.{change['edge']} {change['from_mm']:.2f} mm -> "
+                      f"{change['to_mm']:.2f} mm (pair {change['pair']})")
+    rows = pair_review(seam_log)
     if not rows:
         return
     print("\nThe front and back photos measure these seams differently. One length was picked for both:")
-    for edge, r in rows.items():
+    for r in rows:
         how = "your --set value" if r["source"] == "user" else "the average"
-        print(f"  {edge:9s} front photo {r.get('front', float('nan')):6.1f} mm, back photo {r.get('back', float('nan')):6.1f} mm"
-              f"  -> used {r['to']:6.1f} mm ({how})")
-    if any(r["source"] != "user" for r in rows.values()):
-        example = " ".join(f"--set {e}=<mm>" for e in rows)
+        print(f"  {r['edge']:9s} front photo {r.get('front_mm', float('nan')):6.1f} mm, "
+              f"back photo {r.get('back_mm', float('nan')):6.1f} mm  -> used {r['used_mm']:6.1f} mm ({how})")
+    if any(r["source"] != "user" for r in rows):
+        example = " ".join(f"--set {r['edge']}=<mm>" for r in rows)
         print(f"Tape-measure the tee and run again with your numbers to correct them:\n"
               f"  python -m sewtrace.cli run {garment_dir} {example}")
 

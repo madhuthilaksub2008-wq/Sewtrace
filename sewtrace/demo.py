@@ -446,7 +446,8 @@ def _write_bundle(
     client: MetaClient, garment_dir: Path, name: str, out: Path, mode: str, csv_table: EvalTable | None,
 ) -> None:
     spent_before, calls_before = client.ledger_total_usd(), client.calls
-    result = pipeline.run(garment_dir, out, client)  # writes pdf, svg, dxf, spec, measurements, seam_log
+    # writes pdf, svg, dxf, spec, measurements, seam_log; no debug images (they would sit next to the bundle)
+    result = pipeline.run(garment_dir, out, client, debug=False)
     photos = pipeline.photo_set(garment_dir)
     prompts = client.config.sam.prompts
 

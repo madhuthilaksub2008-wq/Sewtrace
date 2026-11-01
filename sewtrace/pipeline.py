@@ -135,9 +135,23 @@ def trace(
         ) from err
 
 
+def pair_review(seam_log: list[dict]) -> list[dict]:
+    """For each shoulder or side seam the front and back photos measured differently: what each photo
+    gave, the length used for both, and where it came from ("average" or "user")."""
+    rows: dict[str, dict] = {}
+    for row in seam_log:
+        if row.get("source") not in ("pair_fix", "user"):
+            continue
+        for change in row["applied"]:
+            seen = rows.setdefault(change["edge"], {"edge": change["edge"], "used_mm": change["to_mm"],
+                                                    "source": "user" if row["source"] == "user" else "average"})
+            seen.setdefault(f"{change['panel']}_mm", change["from_mm"])
+    return list(rows.values())
+
+
 def run(
     garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None,
-    overrides: dict[str, float] | None = None,
+    overrides: dict[str, float] | None = None, debug: bool = True,
 ) -> RunResult:
     """Photos -> pattern files. ``overrides`` sets the shoulder or side seam to the user's own length
     (a tape measure on the tee), in place of the value picked from the front and back photos."""
@@ -151,10 +165,10 @@ def run(
 
     # Debug images go in <out>_debug, written before the seam check so a failed run still shows what
     # the outline step found. Not in out_dir: a failed run leaves that empty (REQ-SEW-04).
-    debug = out_dir.parent / f"{out_dir.name}_debug"
-    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug)
-    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug)
-    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True, debug_dir=debug)
+    debug_dir = out_dir.parent / f"{out_dir.name}_debug" if debug else None
+    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug_dir)
+    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug_dir)
+    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True, debug_dir=debug_dir)
     measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)

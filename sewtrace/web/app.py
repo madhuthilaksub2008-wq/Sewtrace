@@ -236,8 +236,28 @@ def create_app(
     @app.post("/api/run")
     async def run(request: Request) -> JSONResponse:
         form = await request.form()
+        overrides: dict[str, float] = {}
+        for edge in ("shoulder", "side"):  # the user's own lengths, from the review table
+            raw_value = str(form.get(edge) or "").strip()
+            if not raw_value:
+                continue
+            try:
+                overrides[edge] = float(raw_value)
+            except ValueError:
+                overrides[edge] = -1.0
+            if not 20 <= overrides[edge] <= 1000:
+                return _error(400, "BadLength", "Length out of range", f"{edge}: give a length in mm between 20 and 1000.")
         if form.get("sample"):
-            return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True))
+            return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True, overrides=overrides))
+        rerun = str(form.get("rerun") or "")
+        if rerun:  # the same photos as an earlier run of the user's: no new upload, SAM answers are cached
+            earlier = store.get(rerun)
+            files = {f"{v}.jpg": earlier.dir / f"{v}.jpg" for v in service.VIEWS} if earlier else {}
+            if not files or not all(p.is_file() for p in files.values()):
+                return _error(404, "JobGone", "Photos not found", "The photos of that run were deleted. Upload them again.")
+            uploads_again = {name: p.read_bytes() for name, p in files.items()}
+            return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides),
+                         uploads_again)
         raw: dict[str, bytes] = {}
         for view in service.VIEWS:
             data, err = await _take_photo(form.get(view), view, max_bytes)
@@ -252,7 +272,8 @@ def create_app(
             if err is not None:
                 return err
             uploads[f"{view}.jpg"] = checked  # type: ignore[assignment]
-        return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False), uploads)
+        return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides),
+                     uploads)
 
     @app.post("/api/proof")
     async def proof(request: Request) -> JSONResponse:

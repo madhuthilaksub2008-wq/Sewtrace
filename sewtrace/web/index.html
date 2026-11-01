@@ -213,7 +213,11 @@ async function follow(id, msgBox, outBox, render) {
     if (job.state === "running") { note(msgBox, "info", job.step + "..."); await new Promise((r) => setTimeout(r, 700)); continue; }
     if (job.state === "error") {
       note(msgBox, "err", job.error.message, job.error.title);
-      if (job.error.seam_log) outBox.replaceChildren(seamLog(job.error.seam_log, []));
+      const parts = [];
+      if (job.error.review && job.error.review.length) parts.push(reviewBox(id, job.error.review, false));
+      if (job.kind === "run") parts.push(debugBox(id, ["front", "back", "sleeve"].map((v) => ({view: v, file: "debug_" + v})), true));
+      if (job.error.seam_log) parts.push(h("h3", {}, "Seam check log"), seamLog(job.error.seam_log, []));
+      outBox.replaceChildren(...parts);
       return;
     }
     msgBox.replaceChildren();
@@ -239,6 +243,9 @@ function renderRun(id, r, box) {
   }
   out.push(mt);
 
+  if (r.review && r.review.length) out.push(reviewBox(id, r.review, r.sample));
+  if (r.debug && r.debug.length) out.push(debugBox(id, r.debug, false));
+
   out.push(h("h3", {}, "Seam pairs"));
   const st = h("table", {}, h("tr", {}, h("th", {}, "Pair (a ~ b)"), h("th", {}, "a"), h("th", {}, "b"), h("th", {}, "Diff b - a"), h("th", {}, "Allowed"), h("th", {}, "Status")));
   for (const s of r.seams) {
@@ -257,6 +264,48 @@ function renderRun(id, r, box) {
   for (const name of r.downloads) links.append(h("a", {href: file(id, name), download: ""}, name === "spec" ? "spec.json" : "pattern." + name));
   out.push(h("h3", {}, "Downloads"), links);
   box.replaceChildren(...out);
+}
+
+// Seams the front and back photos measured differently: the length used, and a box to correct it
+// with a tape measurement. "Re-run" uses the same photos (no new upload, SAM answers are cached).
+function reviewBox(id, review, sample) {
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Seam"), h("th", {}, "Front photo"), h("th", {}, "Back photo"),
+    h("th", {}, "Used"), h("th", {}, "Your tape measure (mm)")));
+  const inputs = {};
+  for (const r of review) {
+    const box = h("input", {type: "number", step: "0.5", min: "20", max: "1000", name: r.edge,
+      value: r.used_mm === null ? "" : r.used_mm.toFixed(1), style: "width: 7em"});
+    inputs[r.edge] = box;
+    const used = r.used_mm === null ? "too far apart" : mm(r.used_mm) + (r.source === "user" ? " (yours)" : " (average)");
+    t.append(h("tr", {}, h("td", {}, r.edge), h("td", {}, mm(r.front_mm)), h("td", {}, mm(r.back_mm)),
+      h("td", {class: r.used_mm === null ? "bad" : ""}, used), h("td", {}, box)));
+  }
+  const btn = h("button", {type: "button", class: "primary"}, "Re-run with my numbers");
+  btn.addEventListener("click", () => {
+    const f = new FormData();
+    if (sample) f.append("sample", "1"); else f.append("rerun", id);
+    for (const [edge, box] of Object.entries(inputs)) if (box.value) f.append(edge, box.value);
+    start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
+  });
+  return h("div", {class: "msg warn"},
+    h("b", {}, "The front and back photos measure these seams differently. "),
+    "The same seam can't have two lengths, so one was picked for both. Measure the seam on the t-shirt with a tape and correct it if it is off.",
+    t, btn);
+}
+
+// What the outline step found on each photo: the outline, where the sleeves were cut off, and the
+// half panel with each edge length. Shown on a failed run too, to see which photo is off.
+function debugBox(id, items, hideMissing) {
+  const box = h("div", {class: "photos"});
+  for (const d of items) {
+    const img = h("img", {src: file(id, d.file), alt: d.view + ": outline, sleeve cut and edge lengths"});
+    const fig = h("figure", {}, img, h("figcaption", {}, d.view));
+    if (hideMissing) img.addEventListener("error", () => fig.remove());
+    box.append(fig);
+  }
+  return h("div", {}, h("h3", {}, "What the program found on each photo"),
+    h("p", {class: "small"}, "Left: yellow outline, green body, purple where the sleeves were cut off. Right: the half panel with each edge length."),
+    box);
 }
 
 function seamLog(log, names) {

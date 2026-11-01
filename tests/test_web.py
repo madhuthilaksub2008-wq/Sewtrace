@@ -347,7 +347,7 @@ def test_uploads_are_stored_per_job_as_jpeg(tmp_path, sample_root, monkeypatch):
 
     seen = {}
 
-    def fake(ctx, job, garment_dir, sample):
+    def fake(ctx, job, garment_dir, sample, overrides=None):
         seen.update({p.name: p.read_bytes() for p in garment_dir.glob("*.jpg")}, dir=garment_dir, sample=sample)
         return {"ok": True}
 
@@ -692,3 +692,59 @@ def test_req_api_08_muse_cache_key_uses_its_own_jpeg_quality(tmp_path):
     a = MetaClient(base)
     b = MetaClient(dataclasses.replace(base, config=other))
     assert a.config.reasoning.upload_jpeg_quality == b.config.reasoning.upload_jpeg_quality == 95
+
+
+# ---- review of the seams the photos disagree on (D-02, Nov 1) --------------------------------------
+
+def test_req_sew_03_sample_run_with_the_users_length_shows_it_and_the_debug_images(client):
+    """The page can set a seam to the user's tape measurement; the result shows the review row with the
+    length used, and the debug image of each photo."""
+    res = client.post("/api/run", data={"sample": "1", "side": "240"})
+    assert res.status_code == 202, res.text
+    job = wait_job(client, res.json()["id"])
+    assert job["state"] == "done", job
+    r = job["result"]
+    side = next(row for row in r["review"] if row["edge"] == "side")
+    assert side["used_mm"] == pytest.approx(240.0) and side["source"] == "user"
+    assert "front_mm" in side and "back_mm" in side
+    assert {d["view"] for d in r["debug"]} == {"front", "back", "sleeve"}
+    img = client.get(f"/api/jobs/{job['id']}/files/debug_front")
+    assert img.status_code == 200 and img.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_req_sew_03_a_length_out_of_range_is_refused(client):
+    res = client.post("/api/run", data={"sample": "1", "shoulder": "5"})
+    assert res.status_code == 400 and "between 20 and 1000" in res.json()["error"]["message"]
+
+
+def test_req_sew_03_rerun_uses_the_photos_of_the_earlier_run_with_the_users_lengths(tmp_path, sample_root, monkeypatch):
+    from sewtrace.web import service
+
+    seen: list[dict] = []
+
+    def fake(ctx, job, garment_dir, sample, overrides=None):
+        seen.append({"photos": {p.name: p.read_bytes() for p in garment_dir.glob("*.jpg")}, "overrides": overrides})
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "run_pattern", fake)
+    client = make_client(tmp_path, sample_root, mock=False, offline=True)
+    jpg = photo_bytes(sample_root, "front")
+    files = {v: (f"{v}.jpg", jpg, "image/jpeg") for v in ("front", "back", "sleeve")}
+    first = client.post("/api/run", files=files).json()["id"]
+    assert wait_job(client, first)["state"] == "done"
+    res = client.post("/api/run", data={"rerun": first, "side": "305", "shoulder": "110"})
+    assert res.status_code == 202, res.text
+    assert wait_job(client, res.json()["id"])["state"] == "done"
+    assert seen[1]["photos"] == seen[0]["photos"] and seen[1]["overrides"] == {"shoulder": 110.0, "side": 305.0}
+    gone = client.post("/api/run", data={"rerun": "nope", "side": "305"})
+    assert gone.status_code == 404
+
+
+def test_req_sew_04_a_seam_too_far_apart_is_reported_with_both_photo_lengths():
+    from sewtrace.reason.seams import SeamCheckFailed
+    from sewtrace.types import Seam
+    from sewtrace.web.errors import describe_error
+
+    side = Seam(a="front.side", b="back.side", len_a_mm=296.5, len_b_mm=350.0, min_diff_mm=-1, max_diff_mm=1)
+    out = describe_error(SeamCheckFailed([side], []))
+    assert out["review"] == [{"edge": "side", "front_mm": 296.5, "back_mm": 350.0, "used_mm": None, "source": "none"}]

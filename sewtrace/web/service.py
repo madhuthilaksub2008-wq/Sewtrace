@@ -62,11 +62,18 @@ def mask_overlay(photo: Path, mask: np.ndarray, out: Path) -> Path:
     return out
 
 
-def run_pattern(ctx: Context, job: Job, garment_dir: Path, sample: bool) -> dict:
+def run_pattern(
+    ctx: Context, job: Job, garment_dir: Path, sample: bool, overrides: dict[str, float] | None = None,
+) -> dict:
     # A failed run must not leave the old pattern for a later proof check to use without a word.
     ctx.last_spec, ctx.last_sample_dir, ctx.last_source = None, None, None
     job.step = "Running the pipeline: marker, SAM, Muse, seam check"
-    result = pipeline.run(garment_dir, job.dir / "out", ctx.client)
+    try:
+        result = pipeline.run(garment_dir, job.dir / "out", ctx.client, overrides=overrides or None)
+    finally:  # the debug images are written before the seam check, so a failed run still shows them
+        for view in VIEWS:
+            if (job.dir / "out_debug" / f"debug_{view}.png").is_file():
+                job.files[f"debug_{view}"] = job.dir / "out_debug" / f"debug_{view}.png"
 
     job.step = "Drawing the results"
     prompts = ctx.client.config.sam.prompts
@@ -75,6 +82,7 @@ def run_pattern(ctx: Context, job: Job, garment_dir: Path, sample: bool) -> dict
         prompt = prompts.sleeve if view == "sleeve" else prompts.garment
         job.files[f"mask_{view}"] = mask_overlay(Path(path), ctx.client.segment(path, prompt), job.dir / f"mask_{view}.jpg")
     job.files["preview"] = render_preview(result.spec, job.dir / "preview.png")
+    debug = [v for v in VIEWS if f"debug_{v}" in job.files]
     for name, filename in DOWNLOADS.items():
         job.files[name] = job.dir / "out" / filename
 
@@ -94,6 +102,10 @@ def run_pattern(ctx: Context, job: Job, garment_dir: Path, sample: bool) -> dict
                    "min_diff_mm": s.min_diff_mm, "max_diff_mm": s.max_diff_mm, "ok": s.ok}
                   for s in result.spec.seams],
         "seam_log": json.loads(json.dumps(result.seam_log, default=str)),
+        # Seams the front and back photos measured differently: the length picked, to show and correct.
+        "review": pipeline.pair_review(result.seam_log),
+        "debug": [{"view": v, "file": f"debug_{v}"} for v in debug],
+        "sample": sample,
         "model_calls": result.model_calls,
         "preview": "preview",
         "downloads": list(DOWNLOADS),

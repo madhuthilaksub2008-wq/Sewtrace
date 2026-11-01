@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, SegmentationFailed
 from sewtrace.pipeline import ContourFailed, PanelInferenceFailed, PhotoMissing
-from sewtrace.reason.seams import SeamCheckFailed
+from sewtrace.reason.seams import SeamCheckFailed, is_measured_pair
 from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
 
 log = logging.getLogger(__name__)
@@ -47,4 +47,11 @@ def describe_error(err: BaseException, scrub: Sequence[str] = ()) -> dict:
     out = {"kind": type(err).__name__, "title": title, "message": message}
     if isinstance(err, SeamCheckFailed):
         out["seam_log"] = err.seam_log
+        # Shoulder or side pairs too far apart to pick one length: what each photo gave, so the page
+        # can ask for the user's own tape measurement.
+        out["review"] = [
+            {"edge": s.a.partition(".")[2], "front_mm": round(s.len_a_mm, 2), "back_mm": round(s.len_b_mm, 2),
+             "used_mm": None, "source": "none"}
+            for s in err.failed if is_measured_pair(s)
+        ]
     return out
