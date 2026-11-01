@@ -12,6 +12,7 @@ import numpy as np
 
 from sewtrace.api.client import CacheMiss, MetaClient
 from sewtrace.config import get_config
+from sewtrace.output import manufacture
 from sewtrace.output.layout import unfold_spec
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
@@ -278,6 +279,8 @@ def run(
         err.measurements = measurements  # lets eval report what was measured
         raise
 
+    # Nested before any file is written: a piece wider than the roll leaves no half-written folder.
+    made = manufacture.plan_manufacture(spec, client.config)
     out_dir.mkdir(parents=True, exist_ok=True)
     printed = unfold_spec(spec) if full else spec  # whole pieces, cut flat; the check above used the halves
     files = {
@@ -291,4 +294,7 @@ def run(
     files["spec"].write_text(spec.model_dump_json(indent=1))
     files["measurements"].write_text(json.dumps(measurements, indent=1))
     files["seam_log"].write_text(json.dumps(seam_log, indent=1, default=str))
+    # Manufacturing files come after the pattern files, and only on success (REQ-SEW-04).
+    files.update(manufacture.write_files(made, out_dir))
+    files["bundle"] = manufacture.write_bundle(out_dir, debug_dir)
     return RunResult(spec, measurements, seam_log, files, client.calls - calls_before, notes)

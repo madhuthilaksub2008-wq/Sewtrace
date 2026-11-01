@@ -224,6 +224,24 @@ class WebConfig(_Strict):
     auth_fail_delay_s: float = Field(ge=0)  # wait before a 401 for a wrong password
 
 
+class ManufactureConfig(_Strict):
+    """Cut plan, illustrative cutter profile, thread rule. A sample profile, not a real machine."""
+
+    roll_width_mm: float = Field(gt=0)  # fabric roll, selvedge to selvedge
+    margin_mm: float = Field(ge=0)  # kept free along the selvedges and at both roll ends
+    gap_mm: float = Field(ge=0)  # kept free between two pieces
+    cut_speed_mm_s: float = Field(gt=0)
+    travel_speed_mm_s: float = Field(gt=0)
+    pierce_s: float = Field(ge=0)  # tool down at the start of each piece
+    thread_factor: float = Field(gt=0)  # thread length per seam length, lockstitch rule of thumb
+
+    @model_validator(mode="after")
+    def _room(self) -> ManufactureConfig:
+        if self.roll_width_mm <= 2 * self.margin_mm:
+            raise ValueError("roll_width_mm leaves no usable width after the two margins")
+        return self
+
+
 class AppConfig(_Strict):
     api: ApiConfig
     models: ModelsConfig
@@ -238,6 +256,7 @@ class AppConfig(_Strict):
     marker: MarkerConfig
     ground_truth: GroundTruthConfig
     web: WebConfig
+    manufacture: ManufactureConfig
 
     @property
     def reasoning_model(self) -> ModelConfig:

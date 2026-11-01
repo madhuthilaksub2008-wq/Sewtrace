@@ -487,7 +487,8 @@ def test_second_recording_of_the_same_photos_changes_no_file(tee, tmp_path):
     again = {p.relative_to(first): (p.stat().st_mtime_ns, p.read_bytes()) for p in first.rglob("*") if p.is_file()}
     assert again.keys() == seen.keys()
     # The PDF and DXF hold a creation time and the manifest holds this run's call count: they differ by design.
-    volatile = {Path("pattern.pdf"), Path("pattern.dxf"), Path("manifest.json")}
+    # bundle.zip holds the PDF and the DXF, so it differs with them.
+    volatile = {Path("pattern.pdf"), Path("pattern.dxf"), Path("bundle.zip"), Path("manifest.json")}
     assert [k for k in seen if k not in volatile and seen[k] != again[k]] == []  # same bytes, not rewritten
     assert len(seen) - len(volatile) > 10
     (first / "stale.txt").write_text("x")

@@ -265,10 +265,121 @@ function renderRun(id, r, box) {
 
   out.push(h("h3", {}, "Pattern preview"));
   out.push(h("img", {src: file(id, r.preview), alt: "pattern panels preview"}));
+  if (r.cutplan) out.push(cutPlanBox(id, r.cutplan));
   const links = h("p", {class: "links"});
-  for (const name of r.downloads) links.append(h("a", {href: file(id, name), download: ""}, name === "spec" ? "spec.json" : "pattern." + name));
+  for (const name of r.downloads) links.append(h("a", {href: file(id, name), download: ""}, r.download_files[name]));
   out.push(h("h3", {}, "Downloads"), links);
   box.replaceChildren(...out);
+}
+
+// Cut plan: the roll with the nested pieces, and a marker that follows the cut paths. The cutter speeds
+// are an illustrative profile, not a real machine. All text goes in with createTextNode (h()).
+let cutAnim = null;  // the animation of the last cut plan; stopped when a new one is drawn
+function cutPlanBox(id, c) {
+  if (cutAnim) cutAnim.stop();
+  const s = c.summary;
+  const secs = (v) => v.toFixed(1) + " s";
+  const rows = [
+    ["Roll width", mm(s.roll_width_mm, 0)], ["Used length", mm(s.used_length_mm, 0)],
+    ["Utilisation", (100 * s.utilisation).toFixed(1) + " %"], ["Waste", (100 * s.waste_frac).toFixed(1) + " %"],
+    ["Cut length", mm(s.cut_length_mm, 0)], ["Est. cut time", secs(s.est_duration_s)],
+  ];
+  const t = h("table", {});
+  for (const [k, v] of rows) t.append(h("tr", {}, h("td", {}, k), h("td", {}, v)));
+
+  const view = h("div", {style: "position:relative"});
+  const img = h("img", {src: file(id, c.image), alt: "cut plan: pieces nested on the fabric roll", style: "display:block;width:100%"});
+  const svgNS = "http://www.w3.org/2000/svg";
+  const overlay = document.createElementNS(svgNS, "svg");
+  overlay.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%");
+  overlay.setAttribute("viewBox", "0 0 " + s.roll_width_mm + " " + s.used_length_mm);
+  const trail = document.createElementNS(svgNS, "path");
+  trail.setAttribute("fill", "none"); trail.setAttribute("stroke", "#c62828"); trail.setAttribute("stroke-width", "3");
+  const head = document.createElementNS(svgNS, "circle");
+  head.setAttribute("r", "9"); head.setAttribute("fill", "#c62828"); head.setAttribute("stroke", "#fff"); head.setAttribute("stroke-width", "2");
+  overlay.append(trail, head);
+  view.append(img, overlay);
+
+  const play = h("button", {type: "button", class: "primary"}, "Play");
+  const reset = h("button", {type: "button"}, "Reset");
+  const speed = h("select", {});
+  for (const k of [1, 5, 20, 50]) speed.append(h("option", {value: String(k), ...(k === 5 ? {selected: ""} : {})}, k + "x"));
+  const status = h("span", {class: "small"}, "");
+  const controls = h("p", {}, play, " ", reset, " Speed ", speed, " ", status);
+
+  const box = h("div", {},
+    h("h3", {}, "Cut plan"),
+    h("p", {class: "small"}, "Illustrative cutter profile. A sample profile, not a real machine."),
+    h("div", {class: "cols"}, h("div", {}, t), h("div", {}, controls)), view);
+
+  cutAnim = cutterAnimation(id, c.paths, {trail, head, play, reset, speed, status});
+  return box;
+}
+
+// Moves the marker along the cut paths with requestAnimationFrame. Sim time = real time x speed. The
+// head travels to the start of a piece at the travel speed, waits for the pierce time, then cuts.
+function cutterAnimation(id, jsonName, ui) {
+  let plan = null, frame = 0, last = 0, simT = 0, playing = false, stopped = false;
+  let legs = [], total = 0;
+  const startPlan = async () => {
+    plan = await api(file(id, jsonName));
+    let at = plan.home, t = 0;
+    for (const p of plan.paths) {
+      const pts = p.points;
+      legs.push({kind: "travel", from: at, to: pts[0], t0: t, dur: dist(at, pts[0]) / plan.travel_speed_mm_s, piece: p.piece});
+      t += legs[legs.length - 1].dur;
+      legs.push({kind: "pierce", from: pts[0], to: pts[0], t0: t, dur: plan.pierce_s, piece: p.piece});
+      t += plan.pierce_s;
+      for (let i = 1; i < pts.length; i++) {
+        legs.push({kind: "cut", from: pts[i - 1], to: pts[i], t0: t, dur: dist(pts[i - 1], pts[i]) / plan.cut_speed_mm_s, piece: p.piece});
+        t += legs[legs.length - 1].dur;
+      }
+      at = pts[0];
+    }
+    legs.push({kind: "travel", from: at, to: plan.home, t0: t, dur: dist(at, plan.home) / plan.travel_speed_mm_s, piece: ""});
+    total = t + legs[legs.length - 1].dur;
+    draw();
+  };
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const draw = () => {
+    let i = legs.findIndex((l) => simT < l.t0 + l.dur);
+    if (i < 0) i = legs.length - 1;
+    const l = legs[i], f = l.dur > 0 ? Math.min(1, Math.max(0, (simT - l.t0) / l.dur)) : 1;
+    const x = l.from[0] + (l.to[0] - l.from[0]) * f, y = l.from[1] + (l.to[1] - l.from[1]) * f;
+    ui.head.setAttribute("cx", x); ui.head.setAttribute("cy", y);
+    ui.head.setAttribute("fill", l.kind === "cut" ? "#c62828" : "#1f5fbf");
+    // The red line shows the cut so far: every finished cut leg, plus the part of this one.
+    let d = "";
+    for (let k = 0; k <= i; k++) {
+      const q = legs[k];
+      if (q.kind !== "cut") continue;
+      const begin = k === 0 || legs[k - 1].kind !== "cut";
+      d += (begin ? "M" + q.from[0] + "," + q.from[1] : "") + "L" + (k === i ? x + "," + y : q.to[0] + "," + q.to[1]);
+    }
+    ui.trail.setAttribute("d", d);
+    ui.status.textContent = (simT >= total ? "Done. " : l.kind === "cut" ? "Cutting " : l.kind === "pierce" ? "Piercing " : "Moving ") +
+      (simT >= total ? "" : l.piece + ". ") + simT.toFixed(1) + " of " + total.toFixed(1) + " s";
+  };
+  const tick = (now) => {
+    if (stopped || !playing) return;
+    simT = Math.min(total, simT + ((now - last) / 1000) * Number(ui.speed.value));
+    last = now;
+    draw();
+    if (simT >= total) { playing = false; ui.play.textContent = "Play"; return; }
+    frame = requestAnimationFrame(tick);
+  };
+  ui.play.addEventListener("click", () => {
+    if (!legs.length) return;
+    if (playing) { playing = false; cancelAnimationFrame(frame); ui.play.textContent = "Play"; return; }
+    if (simT >= total) simT = 0;
+    playing = true; ui.play.textContent = "Pause"; last = performance.now();
+    frame = requestAnimationFrame(tick);
+  });
+  ui.reset.addEventListener("click", () => {
+    playing = false; cancelAnimationFrame(frame); simT = 0; ui.play.textContent = "Play"; if (legs.length) draw();
+  });
+  startPlan().catch((e) => { ui.status.textContent = "The cut paths could not be loaded."; });
+  return {stop() { stopped = true; cancelAnimationFrame(frame); }};
 }
 
 // Seams the front and back photos measured differently: the length used, and a box to correct it

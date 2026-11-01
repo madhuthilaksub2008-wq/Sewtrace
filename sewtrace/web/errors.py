@@ -6,6 +6,7 @@ import logging
 from collections.abc import Sequence
 
 from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, SegmentationFailed
+from sewtrace.output.manufacture import PieceTooWide
 from sewtrace.pipeline import ContourFailed, LengthRejected, PanelInferenceFailed, PhotoMissing, pair_review
 from sewtrace.reason.seams import SeamCheckFailed, is_measured_pair
 from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
@@ -20,6 +21,7 @@ _LABELS: tuple[tuple[type[BaseException], str], ...] = (
     (SegmentationFailed, "Segmentation failed"),
     (ContourFailed, "Outline failed"),
     (LengthRejected, "Length not used"),
+    (PieceTooWide, "A piece does not fit the fabric roll"),
     (SeamCheckFailed, "Seam check failed (no pattern was exported)"),
     (PanelInferenceFailed, "Panel inference failed"),
     (BudgetExceeded, "Budget limit reached (no call was made)"),
