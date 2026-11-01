@@ -3,11 +3,13 @@
 Owner: Madhu. Joined seams must match within the seam's own range from config
 (SPEC 7.6.1), e.g. the whole sleeve cap against front plus back armhole (ease).
 
-Measured geometry is never edited here (REQ-RSN-05). The only quantity that can
-change to fix a seam is the sleeve cap shape, one of the inferred quantities of
-REQ-RSN-04: it is the one edge that is hidden in the photos. The model proposes the
-two cap handle lengths (`SeamAdjustment`); the code fix scales the handles to hit the
-middle of the allowed ease range. The cap end points stay fixed. A shoulder, side or
+The model never edits measured geometry (REQ-RSN-05). The quantity changed to fix a seam
+is the sleeve cap shape, one of the inferred quantities of REQ-RSN-04: it is the one edge
+that is hidden in the photos. The model proposes the two cap handle lengths
+(`SeamAdjustment`); the code fix scales the handles to hit the middle of the allowed ease
+range. When no handles reach it, the code fix makes the cap taller within config limits:
+the cap end moves down and the underarm seam (measured) gets shorter; it is logged in mm and
+shown to the user (decision of Nov 1, not yet in SPEC). A shoulder, side or
 underarm pair that fails comes from two measured edges, so the model never edits it.
 Front and back shoulder (and side) are the same physical seam measured in two photos, so
 a small mismatch is photo noise, not a pattern fault. A code fix (not the model, so
@@ -32,6 +34,7 @@ from sewtrace.api.client import ApiError, ApiRequestRejected, BudgetExceeded, Ca
 from sewtrace.config import get_config
 from sewtrace.reason.reshape import (
     SleeveCap,
+    cap_length_at,
     cap_width_mm,
     fit_cap,
     max_cap_length,
@@ -139,11 +142,14 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             log.warning("adjust_loop: %s fail between measured edges; nothing may change them",
                         [seam_name(s) for s in failing if s not in fixable])
             break
-        out_of_reach = any(max_cap_length(spec.panel("sleeve").edge_points("cap")) < _target_half_cap(s)
+        cap_pts = spec.panel("sleeve").edge_points("cap")
+        out_of_reach = any(max_cap_length(cap_pts) * s.b_count < s.len_a_mm + s.min_diff_mm
+                           or cap_length_at(cap_pts, 0.0) * s.b_count > s.len_a_mm + s.max_diff_mm
                            for s in fixable)
         if out_of_reach and source != "fallback":
-            # The model only chooses the two handle lengths; no handles reach this armhole length, so a
-            # model call cannot help. Go straight to the code fix, which can make the cap taller.
+            # The model only chooses the two handle lengths; no handles give a cap in the allowed range, so a
+            # model call cannot help (an exception to REQ-SEW-02's model step, Nov 1). Go straight to the
+            # code fix, which can make the cap taller within limits, or leaves the seam failing loudly.
             log.warning("adjust_loop: the cap cannot reach the armhole length with any handles; no model call")
             spec, applied = fallback_fix(spec)
             source = "fallback"
@@ -327,40 +333,58 @@ def apply_adjustment(spec: PanelSpec, answer: dict) -> tuple[PanelSpec, list[dic
 
 
 def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
-    """Code fix: scale the cap handles so the whole cap sits in the middle of its ease range."""
+    """Code fix: scale the cap handles so the whole cap sits in the middle of its ease range. When no
+    handles reach it, make the cap taller within the limits in ``config.seam`` (see ``_cap_drop``)."""
     cap_seam = next((s for s in check_seams(spec) if s.b == CAP_REF and not s.ok), None)
     if cap_seam is None:
         return spec, []
     target = _target_half_cap(cap_seam)
     sleeve = spec.panel("sleeve")
-    drop = 0.0
-    if max_cap_length(sleeve.edge_points("cap")) < target:
-        # The cap is too short for its armhole even at its fullest: a flat sleeve photo shows the cap seam
-        # laid straight, not the cap height. Lower the cap end straight down (a taller cap at the same width,
-        # as a drafter sets the cap height) by the least amount that lets the curve reach the target.
-        under = sleeve.edge_points("underarm")
-        lo, hi = 0.0, max(float(under[-1, 1] - under[0, 1]) - 5.0, 0.0)  # at most down to near the cuff
-
-        def reach(d: float) -> float:
-            return max_cap_length(with_cap_drop(sleeve, d).edge_points("cap"))
-
-        if hi > 0 and reach(hi) >= target:
-            for _ in range(40):
-                mid = (lo + hi) / 2
-                lo, hi = (mid, hi) if reach(mid) < target else (lo, mid)
-            drop = hi
-            spec = _replace_panel(spec, with_cap_drop(sleeve, drop))
+    cap_before, under_before = edge_length(sleeve, "cap"), edge_length(sleeve, "underarm")
+    drop = _cap_drop(sleeve, target) if max_cap_length(sleeve.edge_points("cap")) < target else 0.0
+    if drop:
+        spec = _replace_panel(spec, with_cap_drop(sleeve, drop))
     pts = spec.panel("sleeve").edge_points("cap")
-    if drop:  # the cap edge is a straight placeholder now: start from full handles, which reach the target
-        width = abs(float(pts[-1, 0] - pts[0, 0]))
-        start = SleeveCap(crown_run_mm=width, underarm_run_mm=width)
+    if drop:  # the cap edge is a straight placeholder now: start from the smooth handles the drop was sized for
+        run = get_config().seam.cap_drop_handle_frac * abs(float(pts[-1, 0] - pts[0, 0]))
+        start = SleeveCap(crown_run_mm=run, underarm_run_mm=run)
     else:
         start = fit_cap(pts)
     spec, applied = _set_cap(spec, scale_cap_to_length(pts, start, target))
+    if applied:
+        applied[0]["from_mm"] = round(cap_before, 2)  # the cap before the fix, not the placeholder
     if drop and applied:
-        applied[0]["cap_drop_mm"] = round(drop, 2)
-        log.warning("fallback_fix: cap made %.1f mm taller to reach the armhole length (a flat sleeve photo hides the cap height)", drop)
+        under_after = edge_length(spec.panel("sleeve"), "underarm")
+        applied[0].update({"cap_drop_mm": round(drop, 2), "underarm_from_mm": round(under_before, 2),
+                           "underarm_to_mm": round(under_after, 2)})
+        log.warning("fallback_fix: sleeve cap made %.1f mm taller to reach the armhole length (a flat sleeve "
+                    "photo hides the cap height); underarm seam %.1f -> %.1f mm", drop, under_before, under_after)
     return spec, applied
+
+
+def _cap_drop(sleeve: Panel, target_half_mm: float) -> float:
+    """Least drop of the cap end (mm) that lets a smooth cap (handles at ``cap_drop_handle_frac`` of the width)
+    reach ``target_half_mm``; 0.0 when the limits do not allow it, so the seam fails loudly (REQ-SEW-04)."""
+    cfg = get_config().seam
+    cap, under = sleeve.edge_points("cap"), sleeve.edge_points("underarm")
+    width = abs(float(cap[-1, 0] - cap[0, 0]))
+    height_now = float(cap[-1, 1] - cap[0, 1])
+    hi = min(float(under[-1, 1] - under[0, 1]) - 5.0, cfg.cap_height_max_ratio * width - height_now)
+    if hi <= 0:
+        return 0.0
+
+    def reach(d: float) -> float:
+        return cap_length_at(with_cap_drop(sleeve, d).edge_points("cap"), cfg.cap_drop_handle_frac)
+
+    if reach(hi) < target_half_mm:
+        return 0.0
+    lo = 0.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if reach(mid) < target_half_mm else (lo, mid)
+    if edge_length(with_cap_drop(sleeve, hi), "underarm") < cfg.cap_drop_min_underarm_frac * edge_length(sleeve, "underarm"):
+        return 0.0
+    return hi
 
 
 def _set_cap(spec: PanelSpec, cap: SleeveCap) -> tuple[PanelSpec, list[dict]]:

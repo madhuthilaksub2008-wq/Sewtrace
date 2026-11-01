@@ -219,6 +219,13 @@ underarm_tol_mm = 1.0
 cap_ease_min_mm = 0.0      # open decision D-03
 cap_ease_max_mm = 12.0
 max_adjust_calls = 3       # REQ-SEW-02
+# A flat sleeve photo shows the cap seam laid straight, so it hides the cap height. When no cap curve
+# between the photo's end points reaches the armhole length, the code fix makes the cap taller: it lowers
+# the cap end straight down (same width) and runs the underarm seam straight to the cuff. Limits (a
+# misplaced armpit on a body photo makes the armhole too long; that must still fail loudly):
+cap_drop_handle_frac = 0.55        # handle length / cap width for the taller cap: a smooth bell, not a step
+cap_height_max_ratio = 0.8         # cap height / cap width at most (kid tee patterns: about 0.4 to 0.7)
+cap_drop_min_underarm_frac = 0.3   # the underarm seam keeps at least this share of its photo length
 # Shoulder and side pairs are the same seam measured in two photos. A code fix sets both edges to
 # their mean length when the pair differs by at most this much, and the run prints what it picked
 # so the user can correct it with a tape measure (sewtrace run --set side=305). Above it the run

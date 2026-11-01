@@ -7,7 +7,8 @@ Sleeve cap shape: a cubic Bezier from the cap top P0 to the cap end P3 (the unde
 corner, which comes from the photo). Both end tangents are horizontal, as in the
 draft. The two numbers are the handle lengths:
     P1 = P0 + (crown_run_mm, 0)      P2 = P3 - (underarm_run_mm, 0)
-So the cap end points and the sleeve width and height never move.
+So the model never moves the cap end points or the sleeve width. Only the code fix may make the cap
+taller (``with_cap_drop``), when no curve between the photo's end points reaches the armhole length.
 
 Neck depth: the draft neck curve is scaled in y about the neck point. The neck point
 and every x value stay as measured, so the neck width is bound by the photo.
@@ -101,11 +102,16 @@ def scale_cap_to_length(points: np.ndarray, cap: SleeveCap, target_mm: float, it
     return scaled((lo + hi) / 2)
 
 
+def cap_length_at(points: np.ndarray, frac: float) -> float:
+    """Cap length between these end points with both handles at ``frac`` of the cap width."""
+    start, end = points[0], points[-1]
+    run = frac * abs(end[0] - start[0])
+    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=run, underarm_run_mm=run)))
+
+
 def max_cap_length(points: np.ndarray) -> float:
     """Longest cap the handles can give between these end points (both handles at the cap width)."""
-    start, end = points[0], points[-1]
-    width = abs(end[0] - start[0])
-    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=width, underarm_run_mm=width)))
+    return cap_length_at(points, 1.0)
 
 
 def with_cap_drop(panel: Panel, drop_mm: float) -> Panel:

@@ -105,6 +105,7 @@ def run_pattern(
         # Seams the front and back photos measured differently: the length picked, to show and correct.
         "review": pipeline.pair_review(result.seam_log),
         "lay_notes": result.lay_notes,  # how crooked each photo was, and that it was evened out
+        "cap_note": (pipeline.cap_note(cap) if (cap := pipeline.cap_review(result.seam_log)) else None),
         "debug": [{"view": v, "file": f"debug_{v}"} for v in debug],
         "sample": sample,
         "model_calls": result.model_calls,

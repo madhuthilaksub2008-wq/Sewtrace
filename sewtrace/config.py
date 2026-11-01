@@ -158,6 +158,9 @@ class SeamConfig(_Strict):
     cap_ease_min_mm: float
     cap_ease_max_mm: float
     max_adjust_calls: int = Field(ge=0)
+    cap_drop_handle_frac: float = Field(gt=0, le=1)
+    cap_height_max_ratio: float = Field(gt=0)
+    cap_drop_min_underarm_frac: float = Field(gt=0, lt=1)
     measured_pair_max_fix_mm: float = Field(ge=0)
     user_length_max_off_mm: float = Field(gt=0)
     pair_fix_warn_shift_mm: float = Field(gt=0)

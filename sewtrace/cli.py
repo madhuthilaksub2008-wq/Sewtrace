@@ -134,6 +134,10 @@ def _dispatch(args: argparse.Namespace) -> None:
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
         for note in result.lay_notes:
             print("note:", note)
+        from sewtrace.pipeline import cap_note, cap_review
+        cap = cap_review(result.seam_log)
+        if cap:
+            print("note:", cap_note(cap))
         _print_review(result.seam_log, args.garment_dir)
         for k, path in result.files.items():
             print(f"{k:12s} {path}")

@@ -345,3 +345,20 @@ def test_req_sew_03_a_large_pair_fix_asks_to_check_the_photos():
     rows = {r["edge"]: r for r in pipeline.pair_review(log, warn_shift_mm=5.0)}
     assert rows["side"]["check_photos"] and not rows["shoulder"]["check_photos"]
     assert rows["side"]["front_mm"] == 296.5 and rows["side"]["back_mm"] == 326.7 and rows["side"]["used_mm"] == 311.6
+
+
+def test_req_sew_02_a_taller_cap_is_shown_to_the_user():
+    log = [{"source": "fallback", "applied": [{"sleeve_cap": {"crown_run_mm": 70, "underarm_run_mm": 70},
+            "from_mm": 138.2, "to_mm": 177.4, "cap_drop_mm": 63.0, "underarm_from_mm": 164.1, "underarm_to_mm": 101.3}]}]
+    review = pipeline.cap_review(log)
+    assert review["drop_mm"] == 63.0
+    note = pipeline.cap_note(review)
+    assert "63 mm taller" in note and "underarm seam is now 101 mm (photo: 164 mm)" in note
+    assert pipeline.cap_review([{"source": "model", "applied": [{"from_mm": 1, "to_mm": 2}]}]) is None
+
+
+def test_req_sew_03_a_user_length_far_from_agreeing_photos_does_not_blame_the_photos():
+    log = [{"source": "user", "applied": [
+        {"pair": "front.side~back.side", "panel": "front", "edge": "side", "from_mm": 300.0, "to_mm": 320.0, "end_point_shift_mm": 20.0},
+        {"pair": "front.side~back.side", "panel": "back", "edge": "side", "from_mm": 301.0, "to_mm": 320.0, "end_point_shift_mm": 19.0}]}]
+    assert pipeline.pair_review(log, warn_shift_mm=5.0)[0]["check_photos"] is False

@@ -245,6 +245,7 @@ function renderRun(id, r, box) {
   out.push(mt);
 
   for (const n of r.lay_notes || []) out.push(h("div", {class: "msg info"}, n));
+  if (r.cap_note) out.push(h("div", {class: "msg warn"}, r.cap_note));
   if (r.review && r.review.length) out.push(reviewBox(id, r.review, r.sample));
   if (r.debug && r.debug.length) out.push(debugBox(id, r.debug, false));
 
@@ -319,7 +320,9 @@ function seamLog(log, names) {
   const t = h("table", {}, h("tr", {}, h("th", {}, "Step"), ...all.map((n) => h("th", {}, n)), h("th", {}, "Change")));
   for (const row of log) {
     const failing = new Set(row.failing || []);
-    const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm` : JSON.stringify(c)).join("; ");
+    const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm`
+      : c.sleeve_cap ? `sleeve.cap ${c.from_mm.toFixed(1)} to ${c.to_mm.toFixed(1)} mm` + (c.cap_drop_mm ? `, cap ${c.cap_drop_mm.toFixed(0)} mm taller, sleeve.underarm ${c.underarm_from_mm.toFixed(1)} to ${c.underarm_to_mm.toFixed(1)} mm` : "")
+      : JSON.stringify(c)).join("; ");
     t.append(h("tr", {}, h("td", {}, row.iteration + " " + row.source),
       ...all.map((n) => (n in (row.diffs || {})) ? h("td", {class: failing.has(n) ? "bad" : "ok"}, signed(row.diffs[n])) : h("td", {}, "")),
       h("td", {}, applied)));

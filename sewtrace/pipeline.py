@@ -190,9 +190,32 @@ def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> lis
     limit = get_config().seam.pair_fix_warn_shift_mm if warn_shift_mm is None else warn_shift_mm
     for row in rows.values():
         # A large fix means one photo is probably off (armpit or hem in the wrong place): changing the
-        # length moves only the hem corner or shoulder point, so the user should look at the photos.
-        row["check_photos"] = row["max_shift_mm"] > limit
+        # length moves only the hem corner or shoulder point, so the user should look at the photos. For the
+        # user's own length the shift is how far it is from the photos, so judge the photos by their gap.
+        if row["source"] == "user" and "front_mm" in row and "back_mm" in row:
+            row["check_photos"] = abs(row["front_mm"] - row["back_mm"]) > 2 * limit
+        else:
+            row["check_photos"] = row["max_shift_mm"] > limit
     return list(rows.values())
+
+
+def cap_review(seam_log: list[dict]) -> dict | None:
+    """When the code fix made the sleeve cap taller: by how much, and the underarm seam before and after."""
+    for row in reversed(seam_log):
+        for change in row.get("applied") or []:
+            if isinstance(change, dict) and "cap_drop_mm" in change:
+                return {"drop_mm": change["cap_drop_mm"], "underarm_from_mm": change["underarm_from_mm"],
+                        "underarm_to_mm": change["underarm_to_mm"], "cap_from_mm": change["from_mm"],
+                        "cap_to_mm": change["to_mm"]}
+    return None
+
+
+def cap_note(review: dict) -> str:
+    return (f"The sleeve cap was made {review['drop_mm']:.0f} mm taller to fit the armholes (a flat sleeve photo "
+            f"cannot show the cap height): half cap {review['cap_from_mm']:.0f} -> {review['cap_to_mm']:.0f} mm, "
+            f"so the sleeve's underarm seam is now {review['underarm_to_mm']:.0f} mm (photo: "
+            f"{review['underarm_from_mm']:.0f} mm). Tape-measure the underarm seam of the sleeve: if it is much "
+            f"longer, the armpits on the front and back photos may be placed too low (check the debug images).")
 
 
 def run(

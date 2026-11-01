@@ -289,10 +289,10 @@ def test_req_sew_03_unfixable_measured_pair_spends_no_model_call_on_the_cap(tees
 
 
 def test_req_sew_03_cap_that_cannot_reach_range_fails_loudly(tees, client):
-    """A cap cannot grow without limit (handles stop at the cap width, the cap end cannot drop past the
-    cuff): the seam stays failing, no silent edit. 60 mm is now reached with a taller cap, so this
-    armhole is made too long for any cap height."""
-    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=400.0)
+    """A cap cannot grow without limit (handles stop at the cap width, a taller cap only within the limits in
+    config.seam): the seam stays failing, no silent edit. Up to about 60 mm more armhole is now met with a
+    taller cap (shown to the user); 80 mm is beyond the limits on this tee."""
+    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
     out, log = adjust_loop(client, spec)
     assert log[-1]["source"] == "fallback" and log[-1]["failing"] == [CAP]
     _assert_measured_unchanged(spec, out)
@@ -430,49 +430,50 @@ def test_req_sew_02_03_stored_rejected_answer_goes_straight_to_the_code_fix(tees
     assert log[-1]["failing"] == [] and all(s.ok for s in check_seams(out))
 
 
-def test_req_sew_02_fallback_deepens_a_cap_too_short_for_its_armhole(tees):
-    """A flat sleeve photo shows the cap seam laid straight, so the cap can be far too short for the armhole
-    (real kid tee: 276 mm against 349 mm). No handle length reaches it; the code fix lowers the cap end
-    straight down (a taller cap at the same width) until it does, and the cap seam then passes."""
+
+def _flat_cap(spec: PanelSpec) -> PanelSpec:
+    """The sleeve as a flat photo shows it: the cap seam laid straight, so the cap end sits only 4 mm below
+    the cap top, and the underarm runs straight to the cuff. The armholes are unchanged (real kid tee:
+    cap 276 mm against armholes 349 mm)."""
+    from sewtrace.reason.reshape import replace_edges
+
+    sleeve = spec.panel("sleeve")
+    cap, under = sleeve.edge_points("cap"), sleeve.edge_points("underarm")
+    end = np.array([cap[-1, 0], cap[0, 1] + 4.0])
+    t = np.linspace(0.0, 1.0, 30)[:, None]
+    flat = replace_edges(sleeve, {"cap": cap[0] + t * (end - cap[0]), "underarm": end + t * (under[-1] - end)})
+    return _replace(spec, flat)
+
+
+def test_req_sew_02_a_cap_laid_flat_in_the_photo_is_made_taller_and_passes(tees, client):
+    """No handles reach the armhole, so no model call (it only sets handles); the code fix makes the cap
+    taller as a smooth bell (not a step), within the limits, logs it in mm, and the seams pass."""
     import shapely
 
-    from sewtrace.reason.reshape import max_cap_length
-
-    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
-    cap_seam = next(s for s in check_seams(spec) if seam_name(s) == CAP)
-    assert not cap_seam.ok and max_cap_length(spec.panel("sleeve").edge_points("cap")) * cap_seam.b_count < cap_seam.len_a_mm
-    under_before = edge_length(spec.panel("sleeve"), "underarm")
-    fixed, applied = seams.fallback_fix(spec)
-    assert applied and applied[0]["cap_drop_mm"] > 0
-    assert next(s for s in check_seams(fixed) if seam_name(s) == CAP).ok
-    sleeve = fixed.panel("sleeve")
-    assert edge_length(sleeve, "underarm") < under_before
-    assert shapely.Polygon(sleeve.outline_mm).is_valid  # still a simple outline
-
-
-def test_req_sew_02_no_model_call_when_no_cap_shape_can_reach_the_armhole(tees, client):
-    """The model chooses only the handle lengths; when none reach the armhole, calling it is wasted money.
-    The loop goes straight to the code fix, which makes the cap taller, and the seams pass."""
-    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
+    spec = _flat_cap(truth_spec(tees[0]))
+    assert not next(s for s in check_seams(spec) if seam_name(s) == CAP).ok
     out, log = adjust_loop(client, spec)
-    assert client.calls == 0
-    assert log[-1]["source"] == "fallback" and log[-1]["failing"] == []
+    assert client.calls == 0 and log[-1]["source"] == "fallback" and log[-1]["failing"] == []
     require_seams_ok(out, log)
-
-
-def test_req_sew_02_a_taller_cap_leaves_no_spike_on_the_sleeve(tees):
-    """The deepened sleeve stays a plain shape: the underarm seam runs straight from the cap end to the cuff
-    (real kid tee: the photo's slanted underarm points left a long spike out of the sleeve)."""
-    import shapely
-
-    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
-    fixed, applied = seams.fallback_fix(spec)
-    sleeve = fixed.panel("sleeve")
+    change = log[-1]["applied"][0]
+    assert change["cap_drop_mm"] > 0 and change["underarm_to_mm"] < change["underarm_from_mm"]
+    assert change["from_mm"] == pytest.approx(edge_length(spec.panel("sleeve"), "cap"), abs=0.5)
+    sleeve = out.panel("sleeve")
     poly = shapely.Polygon(sleeve.outline_mm)
-    assert applied[0]["cap_drop_mm"] > 0 and poly.is_valid
+    assert poly.is_valid and poly.convex_hull.area / poly.area < 1.25  # no spike
+    width = cap_width_mm(sleeve)
+    cap = change["sleeve_cap"]
+    assert max(cap["crown_run_mm"], cap["underarm_run_mm"]) <= 0.8 * width  # a bell, not a step
     under = sleeve.edge_points("underarm")
-    chord = under[-1] - under[0]
-    rel = under - under[0]
-    off = np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)
-    assert off.max() < 0.5  # straight
-    assert poly.convex_hull.area / poly.area < 1.25  # no spike out of the shape
+    chord, rel = under[-1] - under[0], under - under[0]
+    assert (np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)).max() < 0.5  # straight
+
+
+def test_req_sew_04_a_cap_needing_more_than_the_limits_still_fails_loudly(tees, client):
+    """A flat cap AND an armhole 150 mm too long (a misplaced armpit): beyond the cap height limit, so no
+    taller cap is drawn and the run fails (REQ-SEW-04)."""
+    spec = _longer_front_armhole(_flat_cap(truth_spec(tees[0])), extra_mm=150.0)
+    out, log = adjust_loop(client, spec)
+    assert log[-1]["failing"] == [CAP] and "cap_drop_mm" not in (log[-1]["applied"] or [{}])[0]
+    with pytest.raises(SeamCheckFailed):
+        require_seams_ok(out, log)
