@@ -273,3 +273,22 @@ def test_req_api_08_cache_miss_message_form(tmp_path):
     client = MetaClient(Settings(api_key="", mock=False, cache_dir=tmp_path, offline=True))
     with pytest.raises(CacheMiss, match=r"^offline mode: no cached answer for reasoning call .*; run once online"):
         client.reason("p")
+
+
+def test_req_geo_01_run_writes_a_debug_image_per_photo_even_when_the_seam_check_fails(tmp_path, monkeypatch):
+    """<out>_debug/debug_<view>.png shows the outline, the cut sleeves and the labelled edge lengths, and is
+    written before the seam check, so a failed real run can be diagnosed. The pattern folder stays empty."""
+    import cv2
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+
+    def fail(*_a, **_k):
+        raise SeamCheckFailed([], [])
+
+    monkeypatch.setattr(pipeline, "require_seams_ok", fail)
+    with pytest.raises(SeamCheckFailed):
+        run(tee, tmp_path / "out", _client(tmp_path))
+    for view in ("front", "back", "sleeve"):
+        image = cv2.imread(str(tmp_path / "out_debug" / f"debug_{view}.png"))
+        assert image is not None and image.shape[0] == 900
+    assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())  # REQ-SEW-04

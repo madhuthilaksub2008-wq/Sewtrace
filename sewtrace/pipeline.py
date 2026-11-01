@@ -95,17 +95,36 @@ def body_without_sleeves(
     return contour.cut_sleeves_flagged(outline)
 
 
-def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
-    """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt."""
+def _debug(debug_dir: Path | None, view: str, photo: str, h: Homography, *args) -> None:
+    """Write debug_<view>.png; a failure to draw never fails the run."""
+    if debug_dir is None:
+        return
+    try:
+        from sewtrace.output.debug import write_debug
+        write_debug(debug_dir / f"debug_{view}.png", photo, h, *args)
+    except Exception as err:  # noqa: BLE001 - a debug picture is never worth a failed run
+        log.warning("debug image for %s not written: %s", photo, err)
+
+
+def trace(
+    client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False, debug_dir: Path | None = None,
+) -> tuple[Outline, list[Edge]]:
+    """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt.
+    With ``debug_dir``, also writes debug_<view>.png there (see sewtrace/output/debug.py)."""
     mask = client.segment(photo, prompt)
     view = Path(photo).stem
     try:
         outline = contour.smooth_outline(contour.mask_to_outline(mask, h))
         if sleeve:
             half = contour.sleeve_half(outline)
-            return half, contour.label_sleeve_edges(half)
-        half = contour.body_half(body_without_sleeves(client, photo, mask, h, outline)[0])
-        return half, contour.label_body_edges(half)
+            edges = contour.label_sleeve_edges(half)
+            _debug(debug_dir, view, photo, h, outline, half, edges)
+            return half, edges
+        body, invented, _ = body_without_sleeves(client, photo, mask, h, outline)
+        half = contour.body_half(body)
+        edges = contour.label_body_edges(half)
+        _debug(debug_dir, view, photo, h, outline, half, edges, body, invented)
+        return half, edges
     except contour.ContourRefused as err:
         # The numbers let refusals on real photos recalibrate the limits in contour.joints.
         log.warning("%s: %s, %s", err.label, photo, err.log_details())
@@ -125,9 +144,12 @@ def run(garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None 
     # Check all three photos before the first paid call (REQ-CAP-01, REQ-CAP-02, REQ-SCL-03).
     scale = {view: photo_scale(view, path) for view, path in photos}
 
-    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment)
-    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment)
-    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True)
+    # Debug images go in <out>_debug, written before the seam check so a failed run still shows what
+    # the outline step found. Not in out_dir: a failed run leaves that empty (REQ-SEW-04).
+    debug = out_dir.parent / f"{out_dir.name}_debug"
+    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug)
+    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug)
+    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True, debug_dir=debug)
     measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
