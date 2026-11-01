@@ -42,7 +42,8 @@ MAX_PIXELS_ENV = "OPENCV_IO_MAX_IMAGE_PIXELS"
 CSRF_HEADER = "x-sewtrace"
 PAGE = Path(__file__).with_name("index.html")
 DEMO_PAGE = Path(__file__).with_name("demo.html")
-DOWNLOAD_NAMES = {"pdf", "svg", "dxf", "spec"}
+# "cutplan" is left out on purpose: the page shows it inline as an image.
+DOWNLOAD_NAMES = {"pdf", "svg", "dxf", "spec", "cut_path", "toolpath", "bom", "instructions", "bundle"}
 MULTIPART_SLACK_BYTES = 64 * 1024  # form overhead on top of the photo limits
 REAL_MODE_MESSAGE = (
     "Real photos need REAL mode: set META_API_KEY and SEWTRACE_MOCK=0 on the server, "

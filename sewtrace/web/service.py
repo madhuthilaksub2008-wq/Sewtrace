@@ -18,6 +18,7 @@ from sewtrace.api.client import MetaClient
 from sewtrace.mock import proof as mock_proof
 from sewtrace.mock import synth
 from sewtrace.output.layout import render_preview, unfold_spec
+from sewtrace.output.manufacture import BUNDLE_NAME, FILE_NAMES
 from sewtrace.reason.seams import seam_name
 from sewtrace.types import MEASUREMENT_KEYS, PanelSpec
 from sewtrace.vision.marker import photo_homography
@@ -28,7 +29,10 @@ SAMPLE_TEE = "tee1"
 VIEWS = ("front", "back", "sleeve")
 SAMPLE_PROOF_SCALE = 1.01  # the sample paper is cut 1 % too big, so the gap is not zero
 OVERLAY_MAX_PX = 1100
-DOWNLOADS = {"pdf": "pattern.pdf", "svg": "pattern.svg", "dxf": "pattern.dxf", "spec": "spec.json"}
+# cutplan.json is not a download: the page fetches it for the cutter animation.
+DOWNLOADS = {"pdf": "pattern.pdf", "svg": "pattern.svg", "dxf": "pattern.dxf", "spec": "spec.json",
+             **{k: v for k, v in FILE_NAMES.items() if k != "cutplan_json"}, "bundle": BUNDLE_NAME}
+CUTPLAN_JSON = "cutplan_json"
 
 
 @dataclass
@@ -86,6 +90,8 @@ def run_pattern(
     debug = [v for v in VIEWS if f"debug_{v}" in job.files]
     for name, filename in DOWNLOADS.items():
         job.files[name] = job.dir / "out" / filename
+    job.files[CUTPLAN_JSON] = job.dir / "out" / FILE_NAMES[CUTPLAN_JSON]
+    cutplan = json.loads(job.files[CUTPLAN_JSON].read_text())["summary"]
 
     truth_file = garment_dir / "truth.json"
     truth = json.loads(truth_file.read_text())["measurements"] if sample and truth_file.exists() else {}
@@ -113,6 +119,8 @@ def run_pattern(
         "model_calls": result.model_calls,
         "preview": "preview",
         "downloads": list(DOWNLOADS),
+        "download_files": DOWNLOADS,
+        "cutplan": {"summary": cutplan, "image": "cutplan", "paths": CUTPLAN_JSON},
     }
 
 

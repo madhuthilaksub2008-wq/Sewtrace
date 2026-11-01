@@ -122,6 +122,7 @@ def _dispatch(args: argparse.Namespace) -> None:
         synth.main(["--out", args.out])
     elif args.cmd == "run":
         from sewtrace.api.client import SegmentationFailed
+        from sewtrace.output.manufacture import PieceTooWide
         from sewtrace.pipeline import LengthRejected, PhotoMissing, run
         from sewtrace.reason.seams import SeamCheckFailed
         from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
@@ -130,7 +131,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         try:
             extra = {**({"overrides": overrides} if overrides else {}), **({"full": True} if args.full else {})}
             result = run(args.garment_dir, out, **extra)
-        except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, LengthRejected) as err:
+        except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, LengthRejected,
+                PieceTooWide) as err:
             _fail(err)
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")

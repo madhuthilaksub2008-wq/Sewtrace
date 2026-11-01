@@ -300,3 +300,12 @@ max_pixels = 50_000_000    # per photo, width x height read from the file header
                            # photos are 12 to 48 MP; 50 MP leaves headroom and one decoded BGR copy is 150 MB.
 auth_fail_delay_s = 1.0    # a wrong password waits this long before the 401. The wait slows one guess at a time.
                            # The long random password is the real defence.
+
+[manufacture]              # cut plan and illustrative cutter profile. A sample profile, not a real machine.
+roll_width_mm = 1500       # usable roll width, selvedge to selvedge
+margin_mm = 15             # kept free along the selvedges and at both ends of the used length
+gap_mm = 10                # kept free between two pieces
+cut_speed_mm_s = 150       # illustrative cutter profile
+travel_speed_mm_s = 400    # illustrative cutter profile
+pierce_s = 0.8             # illustrative cutter profile: tool down at the start of each piece
+thread_factor = 2.5        # thread length per seam length: lockstitch rule of thumb
