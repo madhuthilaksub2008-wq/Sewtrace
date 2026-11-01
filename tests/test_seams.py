@@ -289,8 +289,10 @@ def test_req_sew_03_unfixable_measured_pair_spends_no_model_call_on_the_cap(tees
 
 
 def test_req_sew_03_cap_that_cannot_reach_range_fails_loudly(tees, client):
-    """A cap cannot grow without limit (handles stop at the cap width): the seam stays failing, no silent edit."""
-    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=60.0)
+    """A cap cannot grow without limit (handles stop at the cap width, the cap end cannot drop past the
+    cuff): the seam stays failing, no silent edit. 60 mm is now reached with a taller cap, so this
+    armhole is made too long for any cap height."""
+    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=400.0)
     out, log = adjust_loop(client, spec)
     assert log[-1]["source"] == "fallback" and log[-1]["failing"] == [CAP]
     _assert_measured_unchanged(spec, out)
@@ -426,3 +428,33 @@ def test_req_sew_02_03_stored_rejected_answer_goes_straight_to_the_code_fix(tees
     assert [r["source"] for r in log] == ["initial", "fallback"]
     assert [r["stored_rejected_replayed"] for r in log] == [False, True]
     assert log[-1]["failing"] == [] and all(s.ok for s in check_seams(out))
+
+
+def test_req_sew_02_fallback_deepens_a_cap_too_short_for_its_armhole(tees):
+    """A flat sleeve photo shows the cap seam laid straight, so the cap can be far too short for the armhole
+    (real kid tee: 276 mm against 349 mm). No handle length reaches it; the code fix lowers the cap end
+    straight down (a taller cap at the same width) until it does, and the cap seam then passes."""
+    import shapely
+
+    from sewtrace.reason.reshape import max_cap_length
+
+    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
+    cap_seam = next(s for s in check_seams(spec) if seam_name(s) == CAP)
+    assert not cap_seam.ok and max_cap_length(spec.panel("sleeve").edge_points("cap")) * cap_seam.b_count < cap_seam.len_a_mm
+    under_before = edge_length(spec.panel("sleeve"), "underarm")
+    fixed, applied = seams.fallback_fix(spec)
+    assert applied and applied[0]["cap_drop_mm"] > 0
+    assert next(s for s in check_seams(fixed) if seam_name(s) == CAP).ok
+    sleeve = fixed.panel("sleeve")
+    assert edge_length(sleeve, "underarm") < under_before
+    assert shapely.Polygon(sleeve.outline_mm).is_valid  # still a simple outline
+
+
+def test_req_sew_02_no_model_call_when_no_cap_shape_can_reach_the_armhole(tees, client):
+    """The model chooses only the handle lengths; when none reach the armhole, calling it is wasted money.
+    The loop goes straight to the code fix, which makes the cap taller, and the seams pass."""
+    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
+    out, log = adjust_loop(client, spec)
+    assert client.calls == 0
+    assert log[-1]["source"] == "fallback" and log[-1]["failing"] == []
+    require_seams_ok(out, log)

@@ -372,7 +372,7 @@ def test_req_geo_01_cli_verify_tells_to_take_the_proof_photo_again_on_an_unclear
     of the refusal, and logs them."""
     from sewtrace import cli
 
-    def refuse(_):
+    def refuse(_, *__, **___):
         raise contour.ShoulderPointNotClear("the shoulder point is not clear: x (spread 52 mm, limit 40 mm)", 52.0, 40.0)
 
     tee_dir, _ = proofs
@@ -391,7 +391,7 @@ def test_req_geo_01_cli_verify_tells_to_take_the_proof_photo_again_on_unmirrored
     refusal and its type, and logs them."""
     from sewtrace import cli
 
-    def refuse(_):
+    def refuse(_, *__, **___):
         raise contour.CornersNotMirrored(
             "the two cuffs are not about equally wide: their cuff corners differ by 80 mm (limit 70 mm)",
             "cuff_top", 80.0, 70.0)

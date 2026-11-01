@@ -101,6 +101,28 @@ def scale_cap_to_length(points: np.ndarray, cap: SleeveCap, target_mm: float, it
     return scaled((lo + hi) / 2)
 
 
+def max_cap_length(points: np.ndarray) -> float:
+    """Longest cap the handles can give between these end points (both handles at the cap width)."""
+    start, end = points[0], points[-1]
+    width = abs(end[0] - start[0])
+    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=width, underarm_run_mm=width)))
+
+
+def with_cap_drop(panel: Panel, drop_mm: float) -> Panel:
+    """Sleeve with the cap end point moved ``drop_mm`` straight down (y grows down): a taller cap at the
+    same width, and a shorter underarm seam, as a pattern drafter sets the cap height so the cap fits its
+    armhole. A flat photo of a sleeve shows the cap seam laid straight, so it cannot show the cap height.
+    The underarm seam keeps its points below the new end. The cap edge is a straight placeholder from
+    the cap top to the new end; the caller rebuilds the curve."""
+    cap = panel.edge_points("cap")
+    under = panel.edge_points("underarm")
+    new_end = cap[-1] + np.array([0.0, drop_mm])
+    below = under[under[:, 1] > new_end[1] + 1.0]
+    if drop_mm < 0 or len(below) < 1 or not np.array_equal(below[-1], under[-1]):
+        raise ValueError(f"sleeve: cannot lower the cap end {drop_mm:.0f} mm, the underarm seam is too short")
+    return replace_edges(panel, {"cap": np.vstack([cap[0], new_end]), "underarm": np.vstack([new_end, below])})
+
+
 def with_sleeve_cap(panel: Panel, cap: SleeveCap) -> Panel:
     """Sleeve panel with its cap edge rebuilt from `cap`; the cap end points are kept."""
     pts = panel.edge_points("cap")
