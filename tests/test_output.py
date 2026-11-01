@@ -191,3 +191,43 @@ def test_req_out_06_sewing_order_follows_seams(specs):
     spec = specs[0]
     fewer = spec.model_copy(update={"seams": spec.seams[:2]})
     assert len(fewer.sewing_order) == 2 + 2
+
+
+def test_req_out_01_whole_pieces_mirror_each_half_across_its_fold(tmp_path):
+    """--full: each on-fold half is printed as its whole piece, cut flat (the user asked, Nov 1)."""
+    import numpy as np
+    from shapely.geometry import Polygon
+
+    from sewtrace.mock import synth
+    from sewtrace.mock.fixtures import truth_spec
+    from sewtrace.output.layout import unfold_spec
+
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    half = truth_spec(tee)
+    whole = unfold_spec(half)
+    for name in ("front", "back", "sleeve"):
+        h, w = half.panel(name), whole.panel(name)
+        assert h.on_fold and not w.on_fold and "on fold" not in w.cut
+        poly = Polygon(w.outline_mm)
+        assert poly.is_valid and poly.area == pytest.approx(2 * Polygon(h.outline_mm).area, rel=1e-3)
+        pts = np.asarray(w.outline_mm)
+        assert pts[:, 0].min() == pytest.approx(-pts[:, 0].max(), abs=1e-6)  # symmetric about the centre
+        assert len(w.notches) == 2 * max(len(h.notches), 1)  # each notch, and its mirror image
+    assert whole.panel("neckband") == half.panel("neckband")
+
+
+def test_req_out_01_a_run_with_full_writes_whole_pieces(tmp_path):
+    from sewtrace.api.client import MetaClient
+    from sewtrace.config import Settings
+    from sewtrace.mock import synth
+    from sewtrace.pipeline import run
+
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache"))
+    result = run(tee, tmp_path / "out", client, full=True)
+    assert result.files["pdf"].read_bytes().startswith(b"%PDF")
+    assert result.spec.panel("front").on_fold  # the spec (and the seam check) stay on the halves
+    svg = result.files["svg"].read_text()
+    assert "PLACE ON FOLD" not in svg

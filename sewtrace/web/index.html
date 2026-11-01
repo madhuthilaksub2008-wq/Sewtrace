@@ -121,6 +121,7 @@
       <label>Front photo <input type="file" name="front" accept="image/jpeg,image/png"></label>
       <label>Back photo <input type="file" name="back" accept="image/jpeg,image/png"></label>
       <label>Sleeve photo <input type="file" name="sleeve" accept="image/jpeg,image/png"></label>
+      <label class="small"><input type="checkbox" name="full" id="fullBox"> Whole pieces (cut flat, not on the fold)</label>
       <button class="primary" id="runBtn" type="submit">Run with my photos</button>
       <div class="small" id="uploadNote"></div>
     </form>
@@ -290,6 +291,7 @@ function reviewBox(id, review, sample) {
   btn.addEventListener("click", () => {
     const f = new FormData();
     if (sample) f.append("sample", "1"); else f.append("rerun", id);
+    if ($("fullBox").checked) f.append("full", "1");
     for (const [edge, box] of Object.entries(inputs)) if (box.value) f.append(edge, box.value);
     start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
   });
@@ -357,6 +359,7 @@ $("runForm").addEventListener("submit", (ev) => {
 $("sampleBtn").addEventListener("click", () => {
   lastRunSample = true;
   const f = new FormData(); f.append("sample", "1");
+  if ($("fullBox").checked) f.append("full", "1");
   start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
 });
 $("proofForm").addEventListener("submit", (ev) => {

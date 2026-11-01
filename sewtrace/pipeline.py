@@ -12,6 +12,7 @@ import numpy as np
 
 from sewtrace.api.client import CacheMiss, MetaClient
 from sewtrace.config import get_config
+from sewtrace.output.layout import unfold_spec
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
@@ -234,10 +235,11 @@ def cap_note(review: dict) -> str:
 
 def run(
     garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None,
-    overrides: dict[str, float] | None = None, debug: bool = True,
+    overrides: dict[str, float] | None = None, debug: bool = True, full: bool = False,
 ) -> RunResult:
     """Photos -> pattern files. ``overrides`` sets the shoulder or side seam to the user's own length
-    (a tape measure on the tee), in place of the value picked from the front and back photos."""
+    (a tape measure on the tee), in place of the value picked from the front and back photos. ``full``
+    prints whole pieces (each half mirrored across its fold) instead of halves to cut on the fold."""
     garment_dir, out_dir = Path(garment_dir), Path(out_dir)
     client = client or MetaClient()
     calls_before = client.calls
@@ -277,10 +279,11 @@ def run(
         raise
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    printed = unfold_spec(spec) if full else spec  # whole pieces, cut flat; the check above used the halves
     files = {
-        "pdf": render_pdf(spec, out_dir / "pattern.pdf"),
-        "svg": render_svg(spec, out_dir / "pattern.svg"),
-        "dxf": render_dxf(spec, out_dir / "pattern.dxf"),
+        "pdf": render_pdf(printed, out_dir / "pattern.pdf"),
+        "svg": render_svg(printed, out_dir / "pattern.svg"),
+        "dxf": render_dxf(printed, out_dir / "pattern.dxf"),
         "spec": out_dir / "spec.json",
         "measurements": out_dir / "measurements.json",
         "seam_log": out_dir / "seam_log.json",

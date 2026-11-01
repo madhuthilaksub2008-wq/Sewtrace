@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> None:
     r = sub.add_parser("run", help="photos in a folder -> pattern files")
     r.add_argument("garment_dir")
     r.add_argument("--out", default=None)
+    r.add_argument("--full", action="store_true",
+                   help="print whole pieces (each half mirrored across its fold) to cut flat, not on the fold")
     r.add_argument("--set", action="append", default=[], metavar="EDGE=MM",
                    help="use your own tape-measured length for a seam the front and back photos disagree on, "
                         "e.g. --set side=305 --set shoulder=110 (only shoulder and side)")
@@ -126,7 +128,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         out = args.out or Path("out") / Path(args.garment_dir).name
         overrides = _parse_sets(args.set)
         try:
-            result = run(args.garment_dir, out, **({"overrides": overrides} if overrides else {}))
+            extra = {**({"overrides": overrides} if overrides else {}), **({"full": True} if args.full else {})}
+            result = run(args.garment_dir, out, **extra)
         except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, LengthRejected) as err:
             _fail(err)
         for k, v in result.measurements.items():

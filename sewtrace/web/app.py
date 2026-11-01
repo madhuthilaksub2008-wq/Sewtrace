@@ -247,8 +247,10 @@ def create_app(
                 overrides[edge] = -1.0
             if not 20 <= overrides[edge] <= 1000:
                 return _error(400, "BadLength", "Length out of range", f"{edge}: give a length in mm between 20 and 1000.")
+        full = bool(form.get("full"))  # whole pieces instead of halves on the fold
         if form.get("sample"):
-            return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True, overrides=overrides))
+            return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True, overrides=overrides,
+                                                                full=full))
         rerun = str(form.get("rerun") or "")
         if rerun:  # the same photos as an earlier run of the user's: no new upload, SAM answers are cached
             earlier = store.get(rerun)
@@ -256,7 +258,8 @@ def create_app(
             if not files or not all(p.is_file() for p in files.values()):
                 return _error(404, "JobGone", "Photos not found", "The photos of that run were deleted. Upload them again.")
             uploads_again = {name: p.read_bytes() for name, p in files.items()}
-            return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides),
+            return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides,
+                                                                full=full),
                          uploads_again)
         raw: dict[str, bytes] = {}
         for view in service.VIEWS:
@@ -272,7 +275,8 @@ def create_app(
             if err is not None:
                 return err
             uploads[f"{view}.jpg"] = checked  # type: ignore[assignment]
-        return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides),
+        return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides,
+                                                                full=full),
                      uploads)
 
     @app.post("/api/proof")

@@ -106,6 +106,36 @@ def cut_label(panel: Panel) -> str:
     return f"Cut {panel.cut}"
 
 
+# ---- whole pieces ------------------------------------------------------------
+
+def unfold_panel(panel: Panel) -> Panel:
+    """An on-fold half panel mirrored across its fold edge (x = 0) into the whole piece: the outline runs
+    over the half and back over its mirror image, the notches are mirrored too, and it is cut once, flat,
+    with seam allowance all round. A panel that is not on the fold is returned as it is."""
+    if not panel.on_fold or not any(e.name == "fold" for e in panel.edges):
+        return panel
+    pts = np.asarray(panel.outline_mm, float)
+    fold = next(e for e in panel.edges if e.name == "fold")
+    n = len(pts)
+    idx = list(range(fold.end, fold.start + 1)) if fold.end <= fold.start else list(range(fold.end, n)) + list(range(fold.start + 1))
+    half = pts[idx]  # every edge but the fold, from one fold end to the other
+    half[0, 0] = half[-1, 0] = 0.0
+    mirrored = (half[::-1] * [-1.0, 1.0])[1:-1]
+    whole = np.vstack([half, mirrored])
+    notches = [tuple(map(float, q)) for q in (panel.notches or _default_notches(panel))]
+    notches += [(-x, y) for x, y in notches if abs(x) > FOLD_EPS]
+    return panel.model_copy(update={
+        "outline_mm": [(float(x), float(y)) for x, y in whole], "edges": [], "notches": notches,
+        "on_fold": False, "cut": panel.cut.replace(" on fold", "").strip(),
+    })
+
+
+def unfold_spec(spec: PanelSpec) -> PanelSpec:
+    """The spec with every on-fold panel as its whole piece, for printing or a cutter (the seam check and
+    spec.json stay on the half panels)."""
+    return spec.model_copy(update={"panels": [unfold_panel(p) for p in spec.panels]})
+
+
 # ---- per-panel geometry (panel coordinates) --------------------------------
 
 def cut_polygon(panel: Panel) -> Polygon:

@@ -17,7 +17,7 @@ from sewtrace import pipeline
 from sewtrace.api.client import MetaClient
 from sewtrace.mock import proof as mock_proof
 from sewtrace.mock import synth
-from sewtrace.output.layout import render_preview
+from sewtrace.output.layout import render_preview, unfold_spec
 from sewtrace.reason.seams import seam_name
 from sewtrace.types import MEASUREMENT_KEYS, PanelSpec
 from sewtrace.vision.marker import photo_homography
@@ -64,12 +64,13 @@ def mask_overlay(photo: Path, mask: np.ndarray, out: Path) -> Path:
 
 def run_pattern(
     ctx: Context, job: Job, garment_dir: Path, sample: bool, overrides: dict[str, float] | None = None,
+    full: bool = False,
 ) -> dict:
     # A failed run must not leave the old pattern for a later proof check to use without a word.
     ctx.last_spec, ctx.last_sample_dir, ctx.last_source = None, None, None
     job.step = "Running the pipeline: marker, SAM, Muse, seam check"
     try:
-        result = pipeline.run(garment_dir, job.dir / "out", ctx.client, overrides=overrides or None)
+        result = pipeline.run(garment_dir, job.dir / "out", ctx.client, overrides=overrides or None, full=full)
     finally:  # the debug images are written before the seam check, so a failed run still shows them
         for view in VIEWS:
             if (job.dir / "out_debug" / f"debug_{view}.png").is_file():
@@ -81,7 +82,7 @@ def run_pattern(
     for view, path in photos:
         prompt = prompts.sleeve if view == "sleeve" else prompts.garment
         job.files[f"mask_{view}"] = mask_overlay(Path(path), ctx.client.segment(path, prompt), job.dir / f"mask_{view}.jpg")
-    job.files["preview"] = render_preview(result.spec, job.dir / "preview.png")
+    job.files["preview"] = render_preview(unfold_spec(result.spec) if full else result.spec, job.dir / "preview.png")
     debug = [v for v in VIEWS if f"debug_{v}" in job.files]
     for name, filename in DOWNLOADS.items():
         job.files[name] = job.dir / "out" / filename
@@ -108,6 +109,7 @@ def run_pattern(
         "cap_note": (pipeline.cap_note(cap) if (cap := pipeline.cap_review(result.seam_log)) else None),
         "debug": [{"view": v, "file": f"debug_{v}"} for v in debug],
         "sample": sample,
+        "full": full,
         "model_calls": result.model_calls,
         "preview": "preview",
         "downloads": list(DOWNLOADS),

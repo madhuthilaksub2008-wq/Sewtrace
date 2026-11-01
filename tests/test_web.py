@@ -347,7 +347,7 @@ def test_uploads_are_stored_per_job_as_jpeg(tmp_path, sample_root, monkeypatch):
 
     seen = {}
 
-    def fake(ctx, job, garment_dir, sample, overrides=None):
+    def fake(ctx, job, garment_dir, sample, overrides=None, full=False):
         seen.update({p.name: p.read_bytes() for p in garment_dir.glob("*.jpg")}, dir=garment_dir, sample=sample)
         return {"ok": True}
 
@@ -722,7 +722,7 @@ def test_req_sew_03_rerun_uses_the_photos_of_the_earlier_run_with_the_users_leng
 
     seen: list[dict] = []
 
-    def fake(ctx, job, garment_dir, sample, overrides=None):
+    def fake(ctx, job, garment_dir, sample, overrides=None, full=False):
         seen.append({"photos": {p.name: p.read_bytes() for p in garment_dir.glob("*.jpg")}, "overrides": overrides})
         return {"ok": True}
 
@@ -748,3 +748,12 @@ def test_req_sew_04_a_seam_too_far_apart_is_reported_with_both_photo_lengths():
     side = Seam(a="front.side", b="back.side", len_a_mm=296.5, len_b_mm=350.0, min_diff_mm=-1, max_diff_mm=1)
     out = describe_error(SeamCheckFailed([side], []))
     assert out["review"] == [{"edge": "side", "front_mm": 296.5, "back_mm": 350.0, "used_mm": None, "source": "none"}]
+
+
+def test_req_out_01_the_page_can_ask_for_whole_pieces(client):
+    res = client.post("/api/run", data={"sample": "1", "full": "1"})
+    assert res.status_code == 202, res.text
+    job = wait_job(client, res.json()["id"])
+    assert job["state"] == "done" and job["result"]["full"] is True
+    svg = client.get(f"/api/jobs/{job['id']}/files/svg").text
+    assert "PLACE ON FOLD" not in svg
