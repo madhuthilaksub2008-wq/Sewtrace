@@ -15,9 +15,12 @@ from sewtrace.config import get_config
 from sewtrace.output.layout import unfold_spec
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
+from sewtrace.reason.edits import PatternState
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
+from sewtrace.reason.provenance import build_provenance, edge_label
+from sewtrace.reason.reshape import neck_depth_mm
 from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, edge_length, require_seams_ok, set_measured_pairs
-from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
+from sewtrace.types import MEASUREMENT_KEYS, Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
 from sewtrace.vision.measure import measure_tee
@@ -33,6 +36,8 @@ class RunResult:
     files: dict[str, Path] = field(default_factory=dict)
     model_calls: int = 0
     lay_notes: list[str] = field(default_factory=list)  # what was evened out in each photo, for the user
+    provenance: dict[str, str] = field(default_factory=dict)  # where each value came from (reason/provenance.py)
+    inference: str = "model"  # "model" when the Muse panel answer was used, "fallback" for the draft default
 
 
 LAY_NOTE_MM = 8.0  # a left/right difference above this is reported to the user
@@ -200,8 +205,9 @@ def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> lis
         if row.get("source") not in ("pair_fix", "user"):
             continue
         for change in row["applied"]:
+            source = "user" if row["source"] == "user" else "average"
             seen = rows.setdefault(change["edge"], {"edge": change["edge"], "used_mm": change["to_mm"],
-                                                    "source": "user" if row["source"] == "user" else "average"})
+                                                    "source": source, "provenance": edge_label(source)})
             seen.setdefault(f"{change['panel']}_mm", change["from_mm"])
             seen["max_shift_mm"] = max(seen.get("max_shift_mm", 0.0), abs(change.get("end_point_shift_mm", 0.0)))
     limit = get_config().seam.pair_fix_warn_shift_mm if warn_shift_mm is None else warn_shift_mm
@@ -214,6 +220,19 @@ def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> lis
         else:
             row["check_photos"] = row["max_shift_mm"] > limit
     return list(rows.values())
+
+
+INFERRED_LABELS = {"front_neck_depth": "front neck depth", "back_neck_depth": "back neck depth",
+                   "sleeve_cap": "sleeve cap (half) length"}
+
+
+def inferred_values(spec: PanelSpec, provenance: dict[str, str]) -> list[dict]:
+    """The values that no photo measures (neck depths, sleeve cap) with their length in mm and where they came
+    from. A key with no label in ``provenance`` (a run folder from before labels existed) is left out."""
+    value_mm = {"front_neck_depth": neck_depth_mm(spec.panel("front")), "back_neck_depth": neck_depth_mm(spec.panel("back")),
+                "sleeve_cap": edge_length(spec.panel("sleeve"), "cap")}
+    return [{"key": k, "label": INFERRED_LABELS[k], "value_mm": value_mm[k], "provenance": provenance[k]}
+            for k in INFERRED_LABELS if k in provenance]
 
 
 def cap_review(seam_log: list[dict]) -> dict | None:
@@ -258,12 +277,14 @@ def run(
     measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
 
     draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
+    attempts: list[dict] = []
     try:
-        spec = infer_panels(client, photos, draft, measurements)
+        spec = infer_panels(client, photos, draft, measurements, history=attempts)
     except ValueError as err:  # e.g. a draft neck curve with no depth to scale
         raise PanelInferenceFailed(
             f"panel inference: {err}. Take the front and back photos again with the whole neck in view."
         ) from err
+    inference = "model" if any(a.get("result") == "accepted" for a in attempts) else "fallback"
     user_rows: list[dict] = []
     if overrides:
         check_overrides(spec, overrides, client.config.seam.user_length_max_off_mm)
@@ -278,17 +299,64 @@ def run(
         err.measurements = measurements  # lets eval report what was measured
         raise
 
+    provenance = build_provenance(seam_log, inference)
+    files = {**render_outputs(spec, out_dir, full), **write_records(spec, measurements, seam_log, provenance, out_dir)}
+    return RunResult(spec, measurements, seam_log, files, client.calls - calls_before, notes, provenance, inference)
+
+
+def render_outputs(spec: PanelSpec, out_dir: Path, full: bool = False) -> dict[str, Path]:
+    """pattern.pdf, pattern.svg and pattern.dxf in ``out_dir``. ``full`` prints whole pieces (each half
+    mirrored across its fold); the seam check is always made on the halves, before this."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    printed = unfold_spec(spec) if full else spec  # whole pieces, cut flat; the check above used the halves
-    files = {
+    printed = unfold_spec(spec) if full else spec
+    return {
         "pdf": render_pdf(printed, out_dir / "pattern.pdf"),
         "svg": render_svg(printed, out_dir / "pattern.svg"),
         "dxf": render_dxf(printed, out_dir / "pattern.dxf"),
-        "spec": out_dir / "spec.json",
-        "measurements": out_dir / "measurements.json",
-        "seam_log": out_dir / "seam_log.json",
     }
+
+
+def write_records(
+    spec: PanelSpec, measurements: dict[str, float], seam_log: list[dict], provenance: dict[str, str], out_dir: Path,
+) -> dict[str, Path]:
+    """spec.json, measurements.json and seam_log.json. measurements.json keeps the six measurement keys
+    as they were and adds one more, ``provenance``."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = {"spec": out_dir / "spec.json", "measurements": out_dir / "measurements.json",
+             "seam_log": out_dir / "seam_log.json"}
     files["spec"].write_text(spec.model_dump_json(indent=1))
-    files["measurements"].write_text(json.dumps(measurements, indent=1))
+    files["measurements"].write_text(json.dumps({**measurements, "provenance": provenance}, indent=1))
     files["seam_log"].write_text(json.dumps(seam_log, indent=1, default=str))
-    return RunResult(spec, measurements, seam_log, files, client.calls - calls_before, notes)
+    return files
+
+
+class RunFolderError(ValueError):
+    """The folder of a finished run is missing a file or holds one that cannot be read."""
+
+
+def load_state(out_dir: str | Path) -> PatternState:
+    """A finished run from its folder: spec.json and measurements.json are needed, seam_log.json is not.
+    A folder from before provenance existed gets the labels its seam log gives."""
+    out_dir = Path(out_dir)
+    try:
+        spec = PanelSpec.model_validate_json((out_dir / "spec.json").read_text())
+        raw = json.loads((out_dir / "measurements.json").read_text())
+        log_file = out_dir / "seam_log.json"
+        seam_log = json.loads(log_file.read_text()) if log_file.is_file() else []
+        measurements = {k: float(raw[k]) for k in MEASUREMENT_KEYS}
+    except (OSError, ValueError, KeyError, TypeError) as err:  # pydantic's ValidationError is a ValueError
+        raise RunFolderError(
+            f"{out_dir} is not a finished run folder ({type(err).__name__}: {err}). "
+            "Run sewtrace run first, or give the folder it wrote."
+        ) from err
+    provenance = raw.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = build_provenance(seam_log, None)
+    return PatternState(spec, measurements, seam_log, provenance)
+
+
+def save_state(state: PatternState, out_dir: str | Path, full: bool = False) -> dict[str, Path]:
+    """Pattern files and records of an edited pattern, in the same names as ``run`` writes."""
+    out_dir = Path(out_dir)
+    return {**render_outputs(state.spec, out_dir, full),
+            **write_records(state.spec, state.measurements, state.seam_log, state.provenance, out_dir)}

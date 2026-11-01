@@ -77,6 +77,7 @@ def test_req_api_08_pipeline_replays_offline_from_the_bundle_cache_with_zero_cal
     result = pipeline.run(bundle, tmp_path / "out", client)
     assert client.calls == 0  # nothing missed the cache
     recorded_measurements = json.loads((bundle / "measurements.json").read_text())
+    assert isinstance(recorded_measurements.pop("provenance"), dict)  # the file also tells where each value came from
     assert result.measurements == pytest.approx(recorded_measurements)
     assert all(s.ok for s in result.spec.seams)
 

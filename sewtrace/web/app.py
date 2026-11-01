@@ -31,9 +31,10 @@ from sewtrace import demo
 from sewtrace.api.client import LedgerMountError, MetaClient
 from sewtrace.config import ROOT, Settings
 from sewtrace.output.marker_pdf import marker_pdf_bytes
+from sewtrace.reason.edits import EditProposal, clean_text
 from sewtrace.web import service
 from sewtrace.web.imagesize import image_size
-from sewtrace.web.jobs import Busy, JobStore
+from sewtrace.web.jobs import Busy, Job, JobStore
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +149,7 @@ def create_app(
     scrub = (settings.api_key, str(ROOT), str(client.cache_dir), str(client.ledger_path), str(sample_root), str(sample_dir))
     store = JobStore(jobs_dir, web.job_retention_min, scrub=scrub)
     ctx = service.Context(client)
+    web_edits = settings.config.edits
     mock_only_sample = settings.mock
 
     app = FastAPI(title="Sewtrace test page", docs_url=None, redoc_url=None, openapi_url=None)
@@ -278,6 +280,55 @@ def create_app(
         return start("run", lambda job: service.run_pattern(ctx, job, job.dir, sample=False, overrides=overrides,
                                                                 full=full),
                      uploads)
+
+    async def _json_body(request: Request) -> dict | JSONResponse:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return _error(400, "BadRequest", "Request not understood", "Send a JSON object.")
+        return body
+
+    @app.post("/api/edit")
+    async def edit(request: Request) -> JSONResponse:
+        """Co-pilot step 1: the proposal for a plain request. One Spark call; nothing changes yet."""
+        body = await _json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        run_id, text = str(body.get("run") or ""), body.get("text")
+        if not isinstance(text, str):
+            return _error(400, "BadRequest", "Request not understood", "Give the request as text.")
+        try:
+            service.current_pattern(ctx, run_id)
+            text = clean_text(text, web_edits)
+        except ValueError as err:  # EditRejected is a ValueError
+            return _error(400, "EditRejected", "Check failed", str(err))
+        return start("edit", lambda job: service.propose(ctx, job, run_id, text))
+
+    @app.post("/api/edit/apply")
+    async def edit_apply(request: Request) -> JSONResponse:
+        """Co-pilot step 2: the user approved a proposal. Code changes the pattern; no model call."""
+        body = await _json_body(request)
+        if isinstance(body, JSONResponse):
+            return body
+        run_id, proposal_job = str(body.get("run") or ""), store.get(str(body.get("edit") or ""))
+        earlier = store.get(run_id)
+        done = proposal_job is not None and proposal_job.kind == "edit" and proposal_job.result is not None
+        if not done or earlier is None or proposal_job.result.get("run") != run_id:  # type: ignore[union-attr]
+            return _error(404, "JobGone", "Proposal not found", "Ask the Co-pilot again, then apply the new proposal.")
+        try:
+            service.current_pattern(ctx, run_id)
+            proposal = EditProposal.model_validate(proposal_job.result["proposal"])  # type: ignore[union-attr]
+        except ValueError as err:
+            return _error(409, "NotLatest", "Pattern changed", str(err))
+
+        def work(job: Job) -> dict:
+            result = service.apply_edit(ctx, job, earlier, run_id, proposal)
+            store.latest["run"] = job.id  # a refreshed page shows the edited pattern
+            return result
+
+        return start("edit", work)
 
     @app.post("/api/proof")
     async def proof(request: Request) -> JSONResponse:

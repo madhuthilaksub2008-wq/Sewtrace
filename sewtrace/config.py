@@ -224,6 +224,17 @@ class WebConfig(_Strict):
     auth_fail_delay_s: float = Field(ge=0)  # wait before a 401 for a wrong password
 
 
+class EditsConfig(_Strict):
+    """Co-pilot edits (sewtrace/reason/edits.py): bounds on what one request may change."""
+
+    max_delta_mm: float = Field(gt=0)  # largest |change| of a length (body, chest, sleeve) in one edit
+    scale_min_pct: float = Field(gt=0)  # overall size, in percent of the current pattern
+    scale_max_pct: float = Field(gt=0)
+    max_text_chars: int = Field(gt=0)  # longest request text that is sent to the model
+    mock_a_bit_mm: float = Field(gt=0)  # mock parser: "a bit longer" with no number
+    mock_size_step_pct: float = Field(gt=0)  # mock parser: "size up" with no number
+
+
 class AppConfig(_Strict):
     api: ApiConfig
     models: ModelsConfig
@@ -238,6 +249,7 @@ class AppConfig(_Strict):
     marker: MarkerConfig
     ground_truth: GroundTruthConfig
     web: WebConfig
+    edits: EditsConfig
 
     @property
     def reasoning_model(self) -> ModelConfig:

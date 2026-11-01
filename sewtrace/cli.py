@@ -1,4 +1,4 @@
-"""Command line: sewtrace synth | run | eval | verify | serve | day1 | probe | demo."""
+"""Command line: sewtrace synth | run | edit | eval | verify | serve | day1 | probe | demo."""
 
 from __future__ import annotations
 
@@ -21,6 +21,12 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--set", action="append", default=[], metavar="EDGE=MM",
                    help="use your own tape-measured length for a seam the front and back photos disagree on, "
                         "e.g. --set side=305 --set shoulder=110 (only shoulder and side)")
+    ed = sub.add_parser("edit", help="change a finished pattern with a plain request (one Spark call)")
+    ed.add_argument("out_dir", help="the folder 'sewtrace run' wrote (spec.json, measurements.json)")
+    ed.add_argument("text", help='the request, for example "make it 2 cm longer" or "size up 5%%"')
+    ed.add_argument("--yes", action="store_true",
+                    help="apply the proposal and rewrite the files. Without it, the proposal is only printed")
+    ed.add_argument("--full", action="store_true", help="print whole pieces, as 'run --full' did")
     e = sub.add_parser("eval", help="run all garments, compare with ground truth")
     e.add_argument("raw_dir", nargs="?", default="data/synth",
                    help="folder of tees: data/synth (truth.json) or data/raw (needs data/ground_truth/<tee>.json)")
@@ -116,6 +122,49 @@ def _print_review(seam_log: list[dict], garment_dir: str) -> None:
               f"  python -m sewtrace.cli run {garment_dir} {example}")
 
 
+def _print_inferred(spec, provenance: dict[str, str]) -> None:
+    """Values no photo measures, with where they came from."""
+    from sewtrace.pipeline import inferred_values
+    for row in inferred_values(spec, provenance):
+        print(f"{row['label']:24s} {row['value_mm']:7.1f} mm   {row['provenance']}")
+
+
+def _print_proposal(proposal, measurements: dict[str, float]) -> None:
+    from sewtrace.reason.edits import proposal_rows
+    print(proposal.explanation)
+    print(f"{'field':16s} {'now':>10s} {'proposed':>10s}")
+    for r in proposal_rows(proposal, measurements):
+        print(f"{r['field']:16s} {r['now']:>10.1f} {r['proposed']:>10.1f}  {r['unit']}")
+
+
+def _edit(out_dir: str, text: str, yes: bool, full: bool) -> None:
+    """Co-pilot: one Spark call for the proposal; the files change only with --yes, and then by code."""
+    from sewtrace.api.client import MetaClient
+    from sewtrace.pipeline import RunFolderError, load_state, save_state
+    from sewtrace.reason.edits import EditRejected, apply_proposal, propose_edit
+    from sewtrace.reason.seams import SeamCheckFailed
+    try:
+        state = load_state(out_dir)
+        client = MetaClient()
+        spent = client.ledger_total_usd()
+        proposal = propose_edit(client, text, state)
+        _print_proposal(proposal, state.measurements)
+        if client.calls:
+            print(f"model calls: {client.calls}, ledger ${spent:.4f} -> ${client.ledger_total_usd():.4f}")
+        if not yes:
+            print("No file was changed. Run again with --yes to apply it (the answer is cached: no second call).")
+            return
+        result = apply_proposal(client, state, proposal)
+        files = save_state(result.state, out_dir, full)
+    except (EditRejected, RunFolderError, SeamCheckFailed) as err:
+        _fail(err)
+    for c in result.changes:
+        print(f"{c['key']:16s} {c['from_mm']:7.1f} mm -> {c['to_mm']:7.1f} mm   {result.state.provenance[c['key']]}")
+    print("seams:", "all ok" if all(s.ok for s in result.state.spec.seams) else "FAILING")
+    for k, path in files.items():
+        print(f"{k:12s} {path}")
+
+
 def _dispatch(args: argparse.Namespace) -> None:
     if args.cmd == "synth":
         from sewtrace.mock import synth
@@ -133,7 +182,8 @@ def _dispatch(args: argparse.Namespace) -> None:
         except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, LengthRejected) as err:
             _fail(err)
         for k, v in result.measurements.items():
-            print(f"{k:16s} {v:7.1f} mm")
+            print(f"{k:16s} {v:7.1f} mm   {result.provenance.get(k, '')}")
+        _print_inferred(result.spec, result.provenance)
         print("seams:", "all ok" if all(s.ok for s in result.spec.seams) else "FAILING")
         for note in result.lay_notes:
             print("note:", note)
@@ -147,6 +197,8 @@ def _dispatch(args: argparse.Namespace) -> None:
                   "a half front or back with its fold edge on the centre of the tee: the check needs the fold edge.")
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
+    elif args.cmd == "edit":
+        _edit(args.out_dir, args.text, args.yes, args.full)
     elif args.cmd == "serve":
         import logging
 
