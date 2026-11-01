@@ -478,7 +478,7 @@ def test_req_sew_04_web_edit_proposes_then_applies_on_the_sample_tee(web):
 def test_req_sew_04_web_edit_rejects_bad_requests_before_any_job(web):
     rid = run_sample(web)["id"]
     assert _post_json(web, "/api/edit", {"run": rid, "text": "   "}).status_code == 400
-    assert _post_json(web, "/api/edit", {"run": "nope", "text": "make it longer"}).status_code == 400
+    assert _post_json(web, "/api/edit", {"run": "nope", "text": "make it longer"}).status_code == 404
     assert _post_json(web, "/api/edit", {"run": rid, "text": 5}).status_code == 400
     assert web.post("/api/edit", content=b"[1]", headers={"Content-Type": "application/json"}).status_code == 400
     too_much = _post_json(web, "/api/edit", {"run": rid, "text": "50 cm longer"})
@@ -586,3 +586,34 @@ def test_req_geo_04_web_run_result_has_labels_on_every_measurement_and_review_ro
     assert {v["key"] for v in result["inferred"]} == {"front_neck_depth", "back_neck_depth", "sleeve_cap"}
     page = web.get("/").text
     assert "Co-pilot" in page and "createTextNode" in page and "innerHTML" not in page
+
+
+def test_req_geo_04_a_scale_edit_labels_the_inferred_values_it_changed():
+    row = {"source": "edit", "applied": [{"edit": "overall_scale_pct", "from": 100.0, "to": 105.0, "unit": "%"}]}
+    prov = provenance.build_provenance([row], None, start=provenance.initial_provenance("model"))
+    for key in (*MEASUREMENT_KEYS, *provenance.INFERRED_KEYS):
+        assert prov[key] == "co-pilot edit", key
+    old = provenance.build_provenance([row], "unknown")                      # a run from before the labels
+    assert "sleeve_cap" not in old and old["body_length"] == "co-pilot edit"
+
+
+def test_req_sew_03_an_edited_pattern_keeps_the_photos_for_a_rerun(web):
+    run = run_sample(web)
+    store = web.app.state.store
+    first = store.get(run["id"]).dir
+    for view in ("front", "back", "sleeve"):                                 # as a real upload leaves them
+        (first / f"{view}.jpg").write_bytes(b"photo")
+    proposal = wait_job(web, _post_json(web, "/api/edit", {"run": run["id"], "text": "make it 2 cm longer"}).json()["id"])
+    job = wait_job(web, _post_json(web, "/api/edit/apply", {"run": run["id"], "edit": proposal["id"]}).json()["id"])
+    assert job["state"] == "done", job
+    edited = store.get(job["id"]).dir
+    assert all((edited / f"{v}.jpg").read_bytes() == b"photo" for v in ("front", "back", "sleeve"))
+    assert (edited / "out" / "cutplan.json").is_file() and job["result"]["cutplan"]["summary"]
+
+
+def test_req_api_04_web_edit_of_an_expired_pattern_is_refused_before_the_call(web):
+    rid = run_sample(web)["id"]
+    store = web.app.state.store
+    store.get(rid).created -= store.retention_s + 1                          # older than the retention time
+    res = _post_json(web, "/api/edit", {"run": rid, "text": "make it 2 cm longer"})
+    assert res.status_code == 404 and "Run the pattern again" in res.json()["error"]["message"]

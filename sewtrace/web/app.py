@@ -300,6 +300,9 @@ def create_app(
         run_id, text = str(body.get("run") or ""), body.get("text")
         if not isinstance(text, str):
             return _error(400, "BadRequest", "Request not understood", "Give the request as text.")
+        store.purge()
+        if store.get(run_id) is None:  # refuse before the paid call: a purged run cannot take the edit
+            return _error(404, "NotFound", "Pattern expired", "That pattern was cleared. Run the pattern again.")
         try:
             service.current_pattern(ctx, run_id)
             text = clean_text(text, web_edits)

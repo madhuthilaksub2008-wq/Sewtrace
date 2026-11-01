@@ -23,9 +23,9 @@ INFERRED_KEYS = ("front_neck_depth", "back_neck_depth", "sleeve_cap")
 # measurements come from one photo each; the pair fix or the user's tape changes the pattern
 # edge, so the label follows the edge.
 PAIR_MEASUREMENT = {"shoulder": "shoulder_width", "side": "chest_width"}
-# What a co-pilot edit changes. A scale changes all six.
+# What a co-pilot edit changes. A scale changes all six, and the inferred values the run has.
 EDIT_KEYS = {"body_length": ("body_length",), "chest_width": ("chest_width",),
-             "sleeve_length": ("sleeve_length",), "overall_scale_pct": MEASUREMENT_KEYS}
+             "sleeve_length": ("sleeve_length",), "overall_scale_pct": (*MEASUREMENT_KEYS, *INFERRED_KEYS)}
 
 
 def initial_provenance(inference: str) -> dict[str, str]:
@@ -71,4 +71,5 @@ def _apply_row(prov: dict[str, str], row: dict) -> None:
     elif source == "edit":
         for change in applied:
             for key in EDIT_KEYS.get(change.get("edit", ""), ()):
-                prov[key] = EDIT
+                if key in MEASUREMENT_KEYS or key in prov:  # an old folder's inferred values stay unlabelled
+                    prov[key] = EDIT

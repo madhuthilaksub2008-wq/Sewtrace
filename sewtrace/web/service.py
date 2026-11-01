@@ -172,6 +172,10 @@ def apply_edit(ctx: Context, job: Job, earlier: Job, run: str, proposal: EditPro
     edited = apply_proposal(ctx.client, state, proposal)
     job.step = "Drawing the results"
     out = job.dir / "out"
+    for view in VIEWS:  # the photos too: "run again with my tape length" reruns from this job's folder
+        photo = earlier.dir / f"{view}.jpg"
+        if photo.is_file():
+            shutil.copyfile(photo, job.dir / photo.name)
     for name, path in earlier.files.items():  # the photo overlays do not change: copy them into this job
         if name.startswith("mask_") and path.is_file():
             job.files[name] = Path(shutil.copyfile(path, job.dir / path.name))
