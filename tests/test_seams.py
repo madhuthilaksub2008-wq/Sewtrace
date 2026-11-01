@@ -458,3 +458,21 @@ def test_req_sew_02_no_model_call_when_no_cap_shape_can_reach_the_armhole(tees, 
     assert client.calls == 0
     assert log[-1]["source"] == "fallback" and log[-1]["failing"] == []
     require_seams_ok(out, log)
+
+
+def test_req_sew_02_a_taller_cap_leaves_no_spike_on_the_sleeve(tees):
+    """The deepened sleeve stays a plain shape: the underarm seam runs straight from the cap end to the cuff
+    (real kid tee: the photo's slanted underarm points left a long spike out of the sleeve)."""
+    import shapely
+
+    spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
+    fixed, applied = seams.fallback_fix(spec)
+    sleeve = fixed.panel("sleeve")
+    poly = shapely.Polygon(sleeve.outline_mm)
+    assert applied[0]["cap_drop_mm"] > 0 and poly.is_valid
+    under = sleeve.edge_points("underarm")
+    chord = under[-1] - under[0]
+    rel = under - under[0]
+    off = np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)
+    assert off.max() < 0.5  # straight
+    assert poly.convex_hull.area / poly.area < 1.25  # no spike out of the shape
