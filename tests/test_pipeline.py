@@ -214,10 +214,10 @@ def test_req_geo_01_contour_failure_names_the_photo(tmp_path, monkeypatch):
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)
 
-    def no_joints(outline):
+    def no_joints(outline, seams=None):
         raise ValueError("found no underarm corners")
 
-    monkeypatch.setattr(contour, "remove_sleeves", no_joints)
+    monkeypatch.setattr(contour, "cut_sleeves_flagged", no_joints)
     with pytest.raises(pipeline.ContourFailed, match=r"front photo .*front\.jpg: found no underarm corners"):
         run(tee, tmp_path / "out", _client(tmp_path))
 
@@ -229,12 +229,12 @@ def test_req_geo_01_unmirrored_corners_say_to_lay_the_sleeves_the_same_way(tmp_p
     tee = tmp_path / "tee1"
     synth.make_tee(synth.TEES[0], tee, seed=0)
 
-    def refuse(outline):
+    def refuse(outline, seams=None):
         raise contour.CornersNotMirrored(
             "the inner sleeve cuff corners do not mirror: the closest pair is 62 mm off (limit 25 mm). "
             "Lay both sleeves the same way", "cuff_top", 62.0, 25.0)
 
-    monkeypatch.setattr(contour, "remove_sleeves", refuse)
+    monkeypatch.setattr(contour, "cut_sleeves_flagged", refuse)
     with caplog.at_level("WARNING"), pytest.raises(pipeline.ContourFailed) as exc:
         run(tee, tmp_path / "out", _client(tmp_path))
     text = str(exc.value)

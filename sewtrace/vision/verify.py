@@ -336,9 +336,12 @@ def verify_proof(
     and back neck depths) next to the measured one."""
     prompts = client.config.sam.prompts
     paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
-    garment = mask_outline_mm(client.segment(photo, prompts.garment), homography)
+    garment_mask = client.segment(photo, prompts.garment)
+    garment = mask_outline_mm(garment_mask, homography)
+    from sewtrace.pipeline import body_without_sleeves  # here: pipeline imports the vision modules
     try:
-        body, armhole, neck = contour.cut_sleeves_flagged(contour.smooth_outline(Outline.from_array(garment)))
+        body, armhole, neck = body_without_sleeves(
+            client, photo, garment_mask, homography, contour.smooth_outline(Outline.from_array(garment)))
     except contour.ContourRefused as err:
         log.warning("%s: %s, %s", err.label, photo, err.log_details())
         raise err.with_message(f"{err}. Take the proof photo again.") from err

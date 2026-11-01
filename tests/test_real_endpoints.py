@@ -1096,3 +1096,20 @@ def test_req_seg_04_probe_prints_the_stored_facts_of_a_refused_answer_and_never_
         assert "record 0: mask confidence 0.100" in capsys.readouterr().out
     assert len(client._stream_transport.calls) == 1
     assert not (tmp_path / "o").exists()
+
+
+def test_req_geo_01_segment_all_returns_every_mask_and_shares_the_paid_answer(tmp_path, photo, monkeypatch):
+    records = [_mask("0", 10, 10, at=(10, 5, 30, 25)), _mask("1", 10, 10, at=(40, 5, 60, 25))]
+    monkeypatch.setitem(sys.modules, "meta_sam_parser", _fake_parser(_result(records, raw_output=_raw(W, H))))
+    client = _client(tmp_path)
+    masks = client.segment_all(photo, "sleeve")
+    assert len(masks) == 2 and all(m.shape == (H, W) and m.any() for m in masks)
+    client.segment(photo, "sleeve")
+    client.segment_all(photo, "sleeve")
+    assert len(client._stream_transport.calls) == 1  # one paid call for all three
+
+
+def test_req_geo_01_segment_all_is_empty_in_mock_mode(tmp_path, photo):
+    mock = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path,
+                               ledger_path=tmp_path / "l" / "ledger.csv", config=load_config()))
+    assert mock.segment_all(photo, "sleeve") == []

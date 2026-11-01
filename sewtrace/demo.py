@@ -256,9 +256,10 @@ def _view_outline(mask: np.ndarray, homography: Homography, photo: str, image: n
     )
 
 
-def _body_target_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
+def _body_target_mm(client: MetaClient, photo: str | Path, mask: np.ndarray, homography: Homography) -> np.ndarray:
+    """Body outline the pattern is placed on: sleeves cut off the same way the run cut them."""
     outline = contour.smooth_outline(contour.mask_to_outline(mask, homography))
-    return contour.remove_sleeves(outline).array()
+    return pipeline.body_without_sleeves(client, photo, mask, homography, outline)[0].array()
 
 
 def _sleeve_target_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
@@ -457,7 +458,8 @@ def _write_bundle(
         homographies[view] = pipeline.photo_scale(view, path)
         mask = client.segment(path, prompts.sleeve if view == "sleeve" else prompts.garment)
         views[view] = _view_outline(mask, homographies[view], f"{view}.jpg", image)
-        targets[view] = (_sleeve_target_mm if view == "sleeve" else _body_target_mm)(mask, homographies[view])
+        targets[view] = (_sleeve_target_mm(mask, homographies[view]) if view == "sleeve"
+                         else _body_target_mm(client, path, mask, homographies[view]))
         shutil.copyfile(path, out / f"{view}.jpg")
     masks = Masks(views=views)
 

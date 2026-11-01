@@ -560,7 +560,7 @@ def _underarm_corner(pts: np.ndarray, fine: np.ndarray, at: int, room_in: int, r
     return point, max(trim, 1)
 
 
-def _find_joints(outline: Outline) -> _Joints:
+def _find_joints(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None) -> _Joints:
     """Shoulder and underarm points of a whole t-shirt outline (REQ-GEO-01).
 
     Underarm points are the two sharpest concave corners, measured over a chord long enough
@@ -570,6 +570,10 @@ def _find_joints(outline: Outline) -> _Joints:
     chord that is long enough for rounded corners (``contour.joints``). Their order is fixed:
     sleeve hem (2), neck (2) ... The shoulder point of each sleeve lies on the run between its
     top hem corner and the neck corner. A different count or order is a ValueError that says so.
+
+    ``seams`` (from ``seam_points``: where SAM's sleeve masks meet the body) gives the shoulder and
+    underarm points directly. They replace the underarm fit and the shoulder bend search, which
+    guess the seam from the outline shape; the corner search above still runs.
     """
     cfg = get_config().contour.joints
     pts = _resample_closed(_orient_like_synth(outline.array()), JOINT_SPACING_MM)
@@ -602,6 +606,8 @@ def _find_joints(outline: Outline) -> _Joints:
     fine = gaussian_filter1d(_signed_turning(pts, max(int(round(4.0 / JOINT_SPACING_MM)), 1)), 2, mode="wrap")
     fine = np.abs(fine)
 
+    if seams is not None:
+        return _joints_from_seams(pts, other, top, seams)
     under_a, trim_a = _underarm_corner(pts, fine, other, other - prev - 2, c0 - other - 2)
     under_b, trim_b = _underarm_corner(pts, fine, 0, n - c5 - 2, h - 2)
     body_from, body_to = trim_b, other - trim_a
@@ -619,6 +625,103 @@ def _find_joints(outline: Outline) -> _Joints:
     return _Joints(pts, other, under_a, under_b, shoulder_a, shoulder_b, ia, ib, c2, c3,
                    dir_a, dir_b, side_a / np.linalg.norm(side_a), side_b / np.linalg.norm(side_b),
                    body_from, body_to)
+
+
+SEAM_SNAP_MAX_MM = 15.0  # a SAM seam end further than this from the outline is not trusted
+
+
+def _joints_from_seams(pts: np.ndarray, other: int, top: list[int],
+                       seams: list[tuple[np.ndarray, np.ndarray]]) -> _Joints:
+    """_Joints with the shoulder and underarm points taken from SAM's sleeve seams, snapped to the
+    outline. ``pts`` starts at the outline's own underarm b; it is rolled to start at SAM's."""
+    n = len(pts)
+    c0, c1, c2, c3, c4, c5 = top
+    pairs = [(np.asarray(s, float), np.asarray(u, float)) for s, u in seams]
+    # Sleeve a's underarm is near pts[other], sleeve b's near pts[0].
+    cost = [np.linalg.norm(pairs[0][1] - pts[other]) + np.linalg.norm(pairs[1][1] - pts[0]),
+            np.linalg.norm(pairs[1][1] - pts[other]) + np.linalg.norm(pairs[0][1] - pts[0])]
+    (shoulder_a, under_a), (shoulder_b, under_b) = pairs if cost[0] <= cost[1] else pairs[::-1]
+    # A SAM sleeve mask that stops short of the seam puts its ends mid-sleeve, still on the outline.
+    # The outline's own underarm corners (pts[0], pts[other]) are coarse but never that far off.
+    limit = get_config().contour.joints.sam_seam_max_off_mm
+    for found, corner in ((under_a, pts[other]), (under_b, pts[0])):
+        off = float(np.linalg.norm(found - corner))
+        if off > limit:
+            raise ValueError(f"the SAM sleeve seam ends {off:.0f} mm from the underarm corner of the outline "
+                             f"(limit {limit:g} mm)")
+
+    def nearest(p: np.ndarray, lo: int, hi: int, what: str) -> int:
+        idx = np.arange(lo, hi) % n
+        i = int(idx[np.argmin(np.linalg.norm(pts[idx] - p, axis=1))])
+        if np.linalg.norm(pts[i] - p) > SEAM_SNAP_MAX_MM:
+            raise ValueError(f"the SAM sleeve seam {what} is {np.linalg.norm(pts[i] - p):.0f} mm from the outline")
+        return i
+
+    # Search each underarm from half way to its sleeve's cuff corner to a quarter of the hem arc.
+    ub = nearest(under_b, -((n - c5) // 2), other // 4, "underarm")
+    shift = ub if ub < n // 2 else ub - n
+    pts = np.roll(pts, -shift, axis=0)
+    other, c0, c1, c2, c3, c4, c5 = ((x - shift) % n for x in (other, c0, c1, c2, c3, c4, c5))
+    ua = nearest(under_a, other - other // 4, other + (c0 - other) // 2 + 1, "underarm")
+    ia = nearest(shoulder_a, c1 + 1, c2, "shoulder end")
+    ib = nearest(shoulder_b, c3 + 1, c4, "shoulder end")
+    gap = get_config().contour.joints.sam_shoulder_min_from_cuff_mm / JOINT_SPACING_MM
+    if ia - c1 < gap or c4 - ib < gap:
+        raise ValueError("a SAM sleeve seam ends at the cuff, not at the shoulder")
+    # The same check the outline method makes: the two shoulder seams are about equally long. A sleeve
+    # mask that stops short of its seam leaves sleeve on the body and makes its shoulder seam longer.
+    la, lb = float(np.linalg.norm(pts[c2] - pts[ia])), float(np.linalg.norm(pts[c3] - pts[ib]))
+    if abs(la - lb) > get_config().contour.joints.shoulder_symmetry_mm:
+        raise ValueError(f"the SAM sleeve seams give shoulder seams of {la:.0f} and {lb:.0f} mm: "
+                         "a sleeve mask stops short of its seam")
+    reach = int(JOINT_REACH_MM / JOINT_SPACING_MM)
+
+    def unit(v: np.ndarray) -> np.ndarray:
+        return v / np.linalg.norm(v)
+
+    return _Joints(pts, ua, pts[ua], pts[0], pts[ia], pts[ib], ia, ib, c2, c3,
+                   unit(pts[min(ia + reach, c2)] - pts[ia]), unit(pts[max(ib - reach, c3)] - pts[ib]),
+                   unit(pts[max(ua - reach, 1)] - pts[ua]), unit(pts[min(reach, ua - 1)] - pts[0]),
+                   1, ua)
+
+
+def seam_points(garment: np.ndarray, sleeves: list[np.ndarray], homography: Homography) -> list[tuple[np.ndarray, np.ndarray]]:
+    """(shoulder, underarm) in mm for each sleeve: the two ends of the line where SAM's sleeve
+    mask meets the rest of the t-shirt mask, i.e. the sleeve seam. Raises ValueError when SAM did
+    not give two sleeves that touch the body; callers then use the outline method."""
+    garment = np.asarray(garment).astype(bool)
+    found: list[np.ndarray] = []
+    for m in sorted((np.asarray(m).astype(bool) & garment for m in sleeves), key=lambda m: int(m.sum()), reverse=True):
+        # SAM can return the same sleeve twice: keep a mask only if it is mostly new.
+        if m.sum() >= 0.02 * garment.sum() and all((m & k).sum() < 0.5 * m.sum() for k in found):
+            found.append(m)
+    if len(found) < 2:
+        raise ValueError(f"SAM found {len(found)} separate sleeve mask(s) on the t-shirt, 2 are needed")
+    found = found[:2]
+    body = garment & ~(found[0] | found[1])
+    ys, xs = np.nonzero(body)
+    centre = np.array([xs.mean(), ys.mean()])
+    sides = [np.argwhere(m)[:, ::-1].mean(axis=0) - centre for m in found]
+    if float(sides[0] @ sides[1]) >= 0:
+        raise ValueError("the two SAM sleeve masks are on the same side of the t-shirt")
+    edge = garment & ~cv2.erode(garment.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    out = []
+    for sleeve in found[:2]:
+        grown = cv2.dilate(sleeve.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+        seam = np.argwhere(grown & body)[:, ::-1].astype(float)  # (x, y) px along the seam
+        if len(seam) < 20:
+            raise ValueError("a SAM sleeve mask does not touch the body")
+        ends = seam[edge[seam[:, 1].astype(int), seam[:, 0].astype(int)]]
+        if len(ends) < 2:
+            ends = seam
+        d = np.linalg.norm(ends[:, None] - ends[None], axis=2)
+        i, j = np.unravel_index(int(np.argmax(d)), d.shape)
+        a, b = ends[i], ends[j]
+        # The underarm end is the one nearer the middle of the body (orientation free).
+        shoulder, underarm = (a, b) if np.linalg.norm(a - centre) > np.linalg.norm(b - centre) else (b, a)
+        mm = homography.px_to_mm(np.array([shoulder, underarm]))
+        out.append((mm[0], mm[1]))
+    return out
 
 
 def _shoulder_scan(pts: np.ndarray, fine: np.ndarray, sleeve: int, neck: int) -> _HingeScan:
@@ -669,7 +772,7 @@ def default_armhole(
             + 3 * (1 - t) * t**2 * ctrl2 + t**3 * underarm)
 
 
-def cut_sleeves(outline: Outline) -> tuple[Outline, np.ndarray]:
+def cut_sleeves(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None) -> tuple[Outline, np.ndarray]:
     """Whole t-shirt outline -> body outline: cut each sleeve off at the shoulder point
     and the underarm point and close the gap with the default armhole (REQ-GEO-01).
 
@@ -678,18 +781,18 @@ def cut_sleeves(outline: Outline) -> tuple[Outline, np.ndarray]:
     Also returns a boolean array, True for each point of the body outline that lies on
     a default armhole, so callers can leave those points out of an edge comparison.
     """
-    body, invented, _ = cut_sleeves_flagged(outline)
+    body, invented, _ = cut_sleeves_flagged(outline, seams)
     return body, invented
 
 
-def cut_sleeves_flagged(outline: Outline) -> tuple[Outline, np.ndarray, np.ndarray]:
+def cut_sleeves_flagged(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None) -> tuple[Outline, np.ndarray, np.ndarray]:
     """cut_sleeves(), plus a boolean array that is True for each body point on the neck.
 
     The neck is the outline between the two neck corners. On a front flat-lay it follows
     the BACK neckline: the back panel is seen through the neck opening, so the front neck
     edge is not on the outline (front neck depth is inferred, REQ-RSN-04).
     """
-    j = _find_joints(outline)
+    j = _find_joints(outline, seams)
     pts = j.pts
     centre = _centroid(pts)
     arm_a = default_armhole(j.shoulder_a, j.underarm_a, j.shoulder_dir_a, j.side_dir_a, centre)
@@ -713,9 +816,9 @@ def cut_sleeves_flagged(outline: Outline) -> tuple[Outline, np.ndarray, np.ndarr
     return Outline.from_array(body), invented, neck
 
 
-def remove_sleeves(outline: Outline) -> Outline:
+def remove_sleeves(outline: Outline, seams: list[tuple[np.ndarray, np.ndarray]] | None = None) -> Outline:
     """cut_sleeves() without the armhole flags."""
-    return cut_sleeves(outline)[0]
+    return cut_sleeves(outline, seams)[0]
 
 
 def body_half(outline: Outline) -> Outline:

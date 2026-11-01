@@ -108,6 +108,8 @@ class JointsConfig(_Strict):
     cuff_width_diff_mm: float = Field(gt=0)
     shoulder_symmetry_mm: float = Field(gt=0)
     shoulder_plateau_mm: float = Field(gt=0)
+    sam_seam_max_off_mm: float = Field(gt=0)
+    sam_shoulder_min_from_cuff_mm: float = Field(gt=0)
     near_best: float = Field(gt=1)
     rounding_deg: float = Field(gt=0, lt=180)
     rounding_margin_mm: float = Field(ge=0)

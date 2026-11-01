@@ -368,6 +368,20 @@ class MetaClient:
             )
         return best.mask
 
+    def segment_all(self, image_path: str | Path, prompt: str) -> list[np.ndarray]:
+        """Every SAM mask for a text prompt, not just the best one (the two sleeves of a tee).
+
+        Shares the stored raw answer with ``segment``: the same photo and prompt are paid for once.
+        Mock mode has no per-record masks and returns []; callers fall back to their own method.
+        Offline with no stored answer raises CacheMiss, like ``segment``."""
+        image_path = Path(image_path)
+        if self.settings.mock:
+            return []
+        if not self._events_file(image_path, prompt).exists():
+            self._require_online(f"segment {image_path.name!r} with prompt {prompt!r}")
+            self.calls += 1
+        return [r.mask for r in self._call_sam(image_path, prompt)]
+
     def reason(
         self,
         prompt: str,

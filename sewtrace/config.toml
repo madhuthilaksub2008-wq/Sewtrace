@@ -142,6 +142,13 @@ pair_tol_neck_mm = 40.0
 # joint plateau 28 to 35 mm, error 3.3 to 8.6 mm).
 shoulder_symmetry_mm = 8.0
 shoulder_plateau_mm = 40.0
+# Sleeve seams from SAM's "sleeve" masks (Nov 1). A SAM seam end is used only if it lies within
+# sam_seam_max_off_mm of the outline's own underarm corner (which a rounded underarm moves by about
+# 10 to 15 mm), and its shoulder end is at least sam_shoulder_min_from_cuff_mm from the cuff top
+# corner. A sleeve mask that stops short of the seam fails these, and the outline method is used.
+# One real photo so far. NEEDS REAL PHOTOS.
+sam_seam_max_off_mm = 25.0
+sam_shoulder_min_from_cuff_mm = 15.0
 near_best = 1.25           # a bend whose joint fit is within this factor of the best fit counts as possible
 # A corner's rounding ends where the outline turns less than rounding_deg over a 4 mm chord. The
 # straight-line fits for the shoulder point start rounding_margin_mm past that.

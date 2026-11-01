@@ -14,10 +14,10 @@ import numpy as np
 import pytest
 import shapely
 
-from sewtrace.api.client import MetaClient
+from sewtrace.api.client import CacheMiss, MetaClient
 from sewtrace.config import Settings, get_config
 from sewtrace.mock import proof, synth, synth_hard
-from sewtrace.pipeline import ContourFailed, run
+from sewtrace.pipeline import ContourFailed, body_without_sleeves, run
 from sewtrace.types import MEASUREMENT_KEYS
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
@@ -501,3 +501,153 @@ def test_req_geo_01_corner_choice_does_not_skip_a_stronger_candidate_of_its_role
         s = score.copy()
         s[extra] = v
         assert not contour._skips_stronger(c, sorted([*c, extra]), s), extra
+
+
+# ---- Sleeve seams from SAM's sleeve masks (REQ-GEO-01) -------------------------------------------
+
+def _sleeve_scene(p: synth.TeeParams, hp: synth_hard.HardParams, underarm_radius_mm: float = 0.0):
+    """Garment mask, two sleeve masks cut along the true armholes (as SAM's "sleeve" masks), the
+    homography, and the true shoulder and underarm points (mm)."""
+    v = synth_hard.hard_views(p, hp)["front"]
+    ring = v["garment"]
+    e = hp.asymmetry_mm / p.chest_half
+    arm = synth.armhole_curve(p)
+    origin = v["origin"]
+    if underarm_radius_mm:
+        ring = synth_hard._dense(ring)
+        for target in (arm[-1] + origin, arm[-1] * [-(1 + e), 1] + origin):
+            ring = synth_hard.round_corner(ring, target, underarm_radius_mm)
+    x0, y0 = ring.min(axis=0) - 30
+    shape = (int((ring[:, 1].max() - y0 + 30) * PX), int((ring[:, 0].max() - x0 + 30) * PX))
+
+    def raster(poly: np.ndarray) -> np.ndarray:
+        m = np.zeros(shape, np.uint8)
+        cv2.fillPoly(m, [np.round((poly - [x0, y0]) * PX).astype(np.int32)], 255)
+        return m > 0
+
+    garment = raster(ring)
+    sleeves = []
+    for side in (1, -1):
+        curve = arm * ([1, 1] if side == 1 else [-(1 + e), 1]) + origin
+        # Everything outward of the armhole curve. The sleeve hangs 30 degrees down, so the region runs
+        # out from the underarm at 40 degrees down (the body side seam goes straight down from there).
+        far = [curve[-1] + [side * 600, 500], curve[0] + [side * 600, -300]]
+        sleeves.append(raster(np.vstack([curve, far])) & garment)
+    hom = Homography(np.array([[1 / PX, 0, x0], [0, 1 / PX, y0], [0, 0, 1.0]]))
+    true_shoulder = np.array([arm[0], arm[0] * [-(1 + e), 1]]) + origin
+    true_underarm = np.array([arm[-1], arm[-1] * [-(1 + e), 1]]) + origin
+    return garment, sleeves, hom, true_shoulder, true_underarm
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_req_geo_01_seam_points_are_the_ends_of_the_sleeve_seam(index):
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index))
+    seams = contour.seam_points(garment, sleeves, hom)
+    found_s, found_u = np.array([s for s, _ in seams]), np.array([u for _, u in seams])
+    assert max(_nearest_errors(found_s, shoulder)) < 3.0
+    assert max(_nearest_errors(found_u, underarm)) < 3.0
+
+
+@pytest.mark.parametrize("index, radius", [(0, 0.0), (2, 15.0), (3, 25.0)])
+def test_req_geo_01_joints_follow_the_sam_seams_even_on_rounded_underarms(index, radius):
+    """With SAM seams the shoulder and underarm points come from the seam, not from the outline
+    shape. On a rounded underarm the seam ends where the armhole meets the rounded edge (as on a
+    real tee, where the tape measure starts), so the underarm lies on the armhole seam within the
+    rounding of the sharp corner."""
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index), radius)
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    j = contour._find_joints(outline, contour.seam_points(garment, sleeves, hom))
+    assert max(_nearest_errors(np.array([j.shoulder_a, j.shoulder_b]), shoulder)) < 3.0
+    found_u = np.array([j.underarm_a, j.underarm_b])
+    assert max(_nearest_errors(found_u, underarm)) < 3.0 + radius
+    body = contour.remove_sleeves(outline, contour.seam_points(garment, sleeves, hom))
+    assert len(body.array()) > 100
+
+
+def test_req_geo_01_seam_points_refuse_when_sam_finds_one_sleeve():
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(0), _calm(0))
+    with pytest.raises(ValueError, match="2 are needed"):
+        contour.seam_points(garment, sleeves[:1], hom)
+
+
+def test_req_geo_01_seam_points_drop_a_duplicate_sleeve_mask():
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(0), _calm(0))
+    with pytest.raises(ValueError, match="2 are needed"):
+        contour.seam_points(garment, [sleeves[0], sleeves[0].copy()], hom)
+
+
+def test_req_geo_01_a_short_sam_sleeve_mask_is_not_trusted():
+    """A sleeve mask that stops half way along the sleeve gives seam ends mid-sleeve, still on the
+    outline; they are refused instead of leaving part of the sleeve in the body."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(1), _calm(1))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    cols = np.nonzero(sleeves[0].any(axis=0))[0]
+    short = sleeves[0].copy()
+    near_body = cols[0] if cols.mean() > garment.shape[1] / 2 else cols[-1]
+    keep = slice(near_body + (cols[-1] - cols[0]) // 2, None) if near_body == cols[0] else slice(None, near_body - (cols[-1] - cols[0]) // 2)
+    cut = np.zeros_like(short)
+    cut[:, keep] = short[:, keep]
+    with pytest.raises(ValueError, match="SAM sleeve seam"):
+        contour._find_joints(outline, contour.seam_points(garment, [cut, sleeves[1]], hom))
+
+
+class _SleeveClient:
+    """Just what body_without_sleeves needs: config, settings and segment_all."""
+
+    def __init__(self, answer):
+        self.config, self.settings, self._answer = get_config(), type("S", (), {"mock": False})(), answer
+
+    def segment_all(self, photo, prompt):
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+@pytest.mark.parametrize("index", range(1, 5))
+def test_req_geo_01_body_from_sam_seams_matches_the_outline_method_where_both_work(index, caplog):
+    caplog.set_level("INFO")
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    seam_half = contour.body_half(body_without_sleeves(_SleeveClient(sleeves), "front.jpg", garment, hom, outline)[0])
+    line_half = contour.body_half(contour.remove_sleeves(outline))
+    a, b = seam_half.array(), line_half.array()
+    assert abs(np.ptp(a[:, 0]) - np.ptp(b[:, 0])) < 1.0 and abs(np.ptp(a[:, 1]) - np.ptp(b[:, 1])) < 1.0
+    assert "sleeve seams from SAM used" in caplog.text
+
+
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_req_geo_01_a_quarter_short_sam_sleeve_mask_falls_back(index, caplog):
+    """Cut 25% off one sleeve mask at the body end: the underarm moves only 11 to 17 mm (under the
+    25 mm limit), but the shoulder seams then differ by 30+ mm, which the symmetry check refuses."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    cols = np.nonzero(sleeves[0].any(axis=0))[0]
+    width = cols[-1] - cols[0]
+    cut = np.zeros_like(sleeves[0])
+    side = slice(cols[0] + width // 4, None) if cols.mean() > garment.shape[1] / 2 else slice(None, cols[-1] - width // 4)
+    cut[:, side] = sleeves[0][:, side]
+    try:
+        body = body_without_sleeves(_SleeveClient([cut, sleeves[1]]), "front.jpg", garment, hom, outline)[0]
+    except contour.ContourRefused:
+        body = None  # the outline method refuses this tee (tee 0): a refusal, never a wrong body
+    if body is not None:
+        assert np.allclose(body.array(), contour.remove_sleeves(outline).array())
+    assert "a sleeve mask stops short of its seam" in caplog.text
+
+
+@pytest.mark.parametrize("answer", ["duplicate", "short", CacheMiss("offline")])
+def test_req_geo_01_a_bad_or_missing_sam_sleeve_answer_falls_back_to_the_outline(answer, caplog):
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(1), _calm(1))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    if answer == "duplicate":
+        answer = [sleeves[0], sleeves[0].copy()]
+    elif answer == "short":
+        cols = np.nonzero(sleeves[0].any(axis=0))[0]
+        cut = np.zeros_like(sleeves[0])
+        mid = (cols[0] + cols[-1]) // 2
+        side = slice(mid, None) if cols.mean() > garment.shape[1] / 2 else slice(None, mid)
+        cut[:, side] = sleeves[0][:, side]
+        answer = [cut, sleeves[1]]
+    body = body_without_sleeves(_SleeveClient(answer), "front.jpg", garment, hom, outline)[0]
+    assert np.allclose(body.array(), contour.remove_sleeves(outline).array())
+    assert "finding them from the outline" in caplog.text

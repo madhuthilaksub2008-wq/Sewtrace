@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from sewtrace.api.client import MetaClient
+from sewtrace.api.client import CacheMiss, MetaClient
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
@@ -63,6 +63,38 @@ def photo_scale(view: str, path: str | Path) -> Homography:
     return photo_homography(load_photo(view, path), f"{view} photo {path}")
 
 
+def sleeve_seams(client: MetaClient, photo: str | Path, garment: np.ndarray, h: Homography) -> list | None:
+    """Shoulder and underarm points from where SAM's two sleeve masks meet the body (REQ-GEO-01).
+    One extra SAM call per photo (cached). None, so the outline method is used, in mock mode,
+    offline without a stored answer, or when SAM does not give two sleeves that touch the body."""
+    if client.settings.mock:
+        return None  # mock SAM has no per-record sleeve masks
+    try:
+        return contour.seam_points(garment, client.segment_all(photo, client.config.sam.prompts.sleeve), h)
+    except (CacheMiss, ValueError) as err:
+        log.warning("sleeve seams from SAM not used for %s (%s); finding them from the outline", photo, err)
+        return None
+
+
+def body_without_sleeves(
+    client: MetaClient, photo: str | Path, garment: np.ndarray, h: Homography, outline: Outline,
+) -> tuple[Outline, np.ndarray, np.ndarray]:
+    """``contour.cut_sleeves_flagged`` with the sleeve seams from SAM when they can be trusted, else
+    from the outline shape. A SAM seam that disagrees with the outline is logged and not used; a
+    refusal of the corner search (ContourRefused) is raised, since the outline method needs it too."""
+    seams = sleeve_seams(client, photo, garment, h)
+    if seams is not None:
+        try:
+            cut = contour.cut_sleeves_flagged(outline, seams)
+            log.info("sleeve seams from SAM used for %s", photo)
+            return cut
+        except contour.ContourRefused:
+            raise
+        except ValueError as err:
+            log.warning("sleeve seams from SAM rejected for %s (%s); finding them from the outline", photo, err)
+    return contour.cut_sleeves_flagged(outline)
+
+
 def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False) -> tuple[Outline, list[Edge]]:
     """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt."""
     mask = client.segment(photo, prompt)
@@ -72,7 +104,7 @@ def trace(client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bo
         if sleeve:
             half = contour.sleeve_half(outline)
             return half, contour.label_sleeve_edges(half)
-        half = contour.body_half(contour.remove_sleeves(outline))
+        half = contour.body_half(body_without_sleeves(client, photo, mask, h, outline)[0])
         return half, contour.label_body_edges(half)
     except contour.ContourRefused as err:
         # The numbers let refusals on real photos recalibrate the limits in contour.joints.
