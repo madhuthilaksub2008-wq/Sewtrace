@@ -105,6 +105,9 @@ def _print_review(seam_log: list[dict], garment_dir: str) -> None:
         how = "your --set value" if r["source"] == "user" else "the average"
         print(f"  {r['edge']:9s} front photo {r.get('front_mm', float('nan')):6.1f} mm, "
               f"back photo {r.get('back_mm', float('nan')):6.1f} mm  -> used {r['used_mm']:6.1f} mm ({how})")
+        if r.get("check_photos"):
+            print("            The photos differ a lot: check the debug images. An armpit or hem corner in the "
+                  "wrong place on one photo is the likely cause, and a length does not move it.")
     if any(r["source"] != "user" for r in rows):
         example = " ".join(f"--set {r['edge']}=<mm>" for r in rows)
         print(f"Tape-measure the tee and run again with your numbers to correct them:\n"
@@ -117,14 +120,14 @@ def _dispatch(args: argparse.Namespace) -> None:
         synth.main(["--out", args.out])
     elif args.cmd == "run":
         from sewtrace.api.client import SegmentationFailed
-        from sewtrace.pipeline import PhotoMissing, run
+        from sewtrace.pipeline import LengthRejected, PhotoMissing, run
         from sewtrace.reason.seams import SeamCheckFailed
         from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
         out = args.out or Path("out") / Path(args.garment_dir).name
         overrides = _parse_sets(args.set)
         try:
             result = run(args.garment_dir, out, **({"overrides": overrides} if overrides else {}))
-        except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed) as err:
+        except (SeamCheckFailed, PhotoMissing, MarkerNotFound, MarkerRejected, SegmentationFailed, LengthRejected) as err:
             _fail(err)
         for k, v in result.measurements.items():
             print(f"{k:16s} {v:7.1f} mm")

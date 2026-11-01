@@ -226,6 +226,13 @@ max_adjust_calls = 3       # REQ-SEW-02
 # it. 4 mm (the old value) refused every real photo set: a hand-laid kid tee gave the same side
 # seam as 296 mm on the front photo and 327 mm on the back, and shoulders 108 and 114 mm.
 measured_pair_max_fix_mm = 40.0
+# A user's own length (--set, or the page's review table) must lie within this of the shorter and
+# longer photo value; anything further is refused as a likely typing slip (30 typed for 30.5 cm).
+user_length_max_off_mm = 60.0
+# The pair fix moves only the free end of an edge (the hem corner for side, the shoulder point for
+# shoulder). Above this shift the review says to check the debug images: a misplaced armpit or hem
+# in one photo is the likely cause, and changing the length does not move it.
+pair_fix_warn_shift_mm = 5.0
 
 [pattern]
 seam_allowance_mm = 10.0   # REQ-OUT-03

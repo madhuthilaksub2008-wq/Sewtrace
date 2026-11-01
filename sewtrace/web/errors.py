@@ -6,7 +6,7 @@ import logging
 from collections.abc import Sequence
 
 from sewtrace.api.client import ApiError, BudgetExceeded, CacheMiss, SegmentationFailed
-from sewtrace.pipeline import ContourFailed, PanelInferenceFailed, PhotoMissing
+from sewtrace.pipeline import ContourFailed, LengthRejected, PanelInferenceFailed, PhotoMissing, pair_review
 from sewtrace.reason.seams import SeamCheckFailed, is_measured_pair
 from sewtrace.vision.marker import MarkerNotFound, MarkerRejected
 
@@ -19,6 +19,7 @@ _LABELS: tuple[tuple[type[BaseException], str], ...] = (
     (MarkerRejected, "Marker rejected"),
     (SegmentationFailed, "Segmentation failed"),
     (ContourFailed, "Outline failed"),
+    (LengthRejected, "Length not used"),
     (SeamCheckFailed, "Seam check failed (no pattern was exported)"),
     (PanelInferenceFailed, "Panel inference failed"),
     (BudgetExceeded, "Budget limit reached (no call was made)"),
@@ -54,4 +55,8 @@ def describe_error(err: BaseException, scrub: Sequence[str] = ()) -> dict:
              "used_mm": None, "source": "none"}
             for s in err.failed if is_measured_pair(s)
         ]
+        # Lengths that were picked or set by the user before the failure stay in the table, so a re-run
+        # from it does not drop them.
+        failed_edges = {r["edge"] for r in out["review"]}
+        out["review"] += [r for r in pair_review(err.seam_log) if r["edge"] not in failed_edges]
     return out

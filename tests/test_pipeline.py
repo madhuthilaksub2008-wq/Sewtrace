@@ -318,3 +318,30 @@ def test_req_sew_03_cli_refuses_a_bad_set(tmp_path, capsys):
     with pytest.raises(SystemExit):
         cli.main(["run", str(tmp_path), "--set", "chest=300"])
     assert "only shoulder or side" in capsys.readouterr().err
+
+
+def test_req_sew_03_a_user_length_far_from_the_photos_is_refused(tmp_path, capsys, monkeypatch):
+    """30 typed for a 30 cm seam must not silently export a broken panel."""
+    tee = tmp_path / "tee1"
+    synth.make_tee(synth.TEES[0], tee, seed=0)
+    with pytest.raises(pipeline.LengthRejected, match="mm, not cm"):
+        run(tee, tmp_path / "out", _client(tmp_path), overrides={"side": 30.0})
+    assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
+    real_run = pipeline.run
+    client = _client(tmp_path)
+    monkeypatch.setattr(pipeline, "run", lambda d, o, **k: real_run(d, o, client, **k))
+    with pytest.raises(SystemExit):
+        cli.main(["run", str(tee), "--out", str(tmp_path / "out2"), "--set", "side=30"])
+    assert "far from what the photos measured" in capsys.readouterr().err
+
+
+def test_req_sew_03_a_large_pair_fix_asks_to_check_the_photos():
+    log = [{"source": "pair_fix", "applied": [
+        {"pair": "front.side~back.side", "panel": "front", "edge": "side", "from_mm": 296.5, "to_mm": 311.6, "end_point_shift_mm": 15.1},
+        {"pair": "front.side~back.side", "panel": "back", "edge": "side", "from_mm": 326.7, "to_mm": 311.6, "end_point_shift_mm": -15.1},
+        {"pair": "front.shoulder~back.shoulder", "panel": "front", "edge": "shoulder", "from_mm": 110.0, "to_mm": 111.0, "end_point_shift_mm": 1.0},
+        {"pair": "front.shoulder~back.shoulder", "panel": "back", "edge": "shoulder", "from_mm": 112.0, "to_mm": 111.0, "end_point_shift_mm": -1.0},
+    ]}]
+    rows = {r["edge"]: r for r in pipeline.pair_review(log, warn_shift_mm=5.0)}
+    assert rows["side"]["check_photos"] and not rows["shoulder"]["check_photos"]
+    assert rows["side"]["front_mm"] == 296.5 and rows["side"]["back_mm"] == 326.7 and rows["side"]["used_mm"] == 311.6

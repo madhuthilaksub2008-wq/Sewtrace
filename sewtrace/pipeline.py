@@ -11,10 +11,11 @@ import cv2
 import numpy as np
 
 from sewtrace.api.client import CacheMiss, MetaClient
+from sewtrace.config import get_config
 from sewtrace.output.pdf import render_pdf
 from sewtrace.output.vector import render_dxf, render_svg
 from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
-from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, require_seams_ok, set_measured_pairs
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, edge_length, require_seams_ok, set_measured_pairs
 from sewtrace.types import Edge, Outline, PanelSpec, PhotoSet
 from sewtrace.vision import contour
 from sewtrace.vision.marker import Homography, photo_homography
@@ -160,7 +161,21 @@ def trace(
         ) from err
 
 
-def pair_review(seam_log: list[dict]) -> list[dict]:
+class LengthRejected(ValueError):
+    """A user's own seam length is too far from what the photos measured (a typing slip, cm for mm)."""
+
+
+def check_overrides(spec: PanelSpec, overrides: dict[str, float], max_off_mm: float) -> None:
+    """Refuse a user length more than ``max_off_mm`` outside the two photo values of that seam."""
+    for edge, target in overrides.items():
+        lo, hi = sorted(edge_length(spec.panel(name), edge) for name in ("front", "back"))
+        if not lo - max_off_mm <= target <= hi + max_off_mm:
+            raise LengthRejected(
+                f"{edge}: {target:.0f} mm is far from what the photos measured ({lo:.0f} and {hi:.0f} mm). "
+                "Give the length in mm, not cm, measured along the seam.")
+
+
+def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> list[dict]:
     """For each shoulder or side seam the front and back photos measured differently: what each photo
     gave, the length used for both, and where it came from ("average" or "user")."""
     rows: dict[str, dict] = {}
@@ -171,6 +186,12 @@ def pair_review(seam_log: list[dict]) -> list[dict]:
             seen = rows.setdefault(change["edge"], {"edge": change["edge"], "used_mm": change["to_mm"],
                                                     "source": "user" if row["source"] == "user" else "average"})
             seen.setdefault(f"{change['panel']}_mm", change["from_mm"])
+            seen["max_shift_mm"] = max(seen.get("max_shift_mm", 0.0), abs(change.get("end_point_shift_mm", 0.0)))
+    limit = get_config().seam.pair_fix_warn_shift_mm if warn_shift_mm is None else warn_shift_mm
+    for row in rows.values():
+        # A large fix means one photo is probably off (armpit or hem in the wrong place): changing the
+        # length moves only the hem corner or shoulder point, so the user should look at the photos.
+        row["check_photos"] = row["max_shift_mm"] > limit
     return list(rows.values())
 
 
@@ -206,6 +227,7 @@ def run(
         ) from err
     user_rows: list[dict] = []
     if overrides:
+        check_overrides(spec, overrides, client.config.seam.user_length_max_off_mm)
         spec, applied = set_measured_pairs(spec, overrides)
         user_rows = [{"iteration": -1, "source": "user", "applied": applied}]
     spec, seam_log = adjust_loop(client, spec)

@@ -159,6 +159,8 @@ class SeamConfig(_Strict):
     cap_ease_max_mm: float
     max_adjust_calls: int = Field(ge=0)
     measured_pair_max_fix_mm: float = Field(ge=0)
+    user_length_max_off_mm: float = Field(gt=0)
+    pair_fix_warn_shift_mm: float = Field(gt=0)
 
     @model_validator(mode="after")
     def _ease_range(self) -> SeamConfig:

@@ -176,6 +176,7 @@ async function api(url, opts) {
 }
 
 let state = {};
+let lastRunSample = false;  // a failed sample run re-runs the sample, not uploaded photos
 async function refreshStatus() {
   try {
     state = await api("/api/status");
@@ -214,7 +215,7 @@ async function follow(id, msgBox, outBox, render) {
     if (job.state === "error") {
       note(msgBox, "err", job.error.message, job.error.title);
       const parts = [];
-      if (job.error.review && job.error.review.length) parts.push(reviewBox(id, job.error.review, false));
+      if (job.error.review && job.error.review.length) parts.push(reviewBox(id, job.error.review, lastRunSample));
       if (job.kind === "run") parts.push(debugBox(id, ["front", "back", "sleeve"].map((v) => ({view: v, file: "debug_" + v})), true));
       if (job.error.seam_log) parts.push(h("h3", {}, "Seam check log"), seamLog(job.error.seam_log, []));
       outBox.replaceChildren(...parts);
@@ -281,6 +282,9 @@ function reviewBox(id, review, sample) {
     t.append(h("tr", {}, h("td", {}, r.edge), h("td", {}, mm(r.front_mm)), h("td", {}, mm(r.back_mm)),
       h("td", {class: r.used_mm === null ? "bad" : ""}, used), h("td", {}, box)));
   }
+  const check = review.filter((r) => r.check_photos || r.used_mm === null).map((r) => r.edge);
+  const warn = check.length ? h("p", {}, h("b", {}, "Check the photos below for " + check.join(" and ") + ". "),
+    "The two photos differ a lot. The likely cause is an armpit or hem corner in the wrong place on one photo; a length typed here does not move it. If the purple cut or the corners look wrong, take that photo again.") : "";
   const btn = h("button", {type: "button", class: "primary"}, "Re-run with my numbers");
   btn.addEventListener("click", () => {
     const f = new FormData();
@@ -290,8 +294,8 @@ function reviewBox(id, review, sample) {
   });
   return h("div", {class: "msg warn"},
     h("b", {}, "The front and back photos measure these seams differently. "),
-    "The same seam can't have two lengths, so one was picked for both. Measure the seam on the t-shirt with a tape and correct it if it is off.",
-    t, btn);
+    "The same seam can't have two lengths, so one was picked for both. Measure the seam on the t-shirt with a tape (in mm) and correct it if it is off.",
+    t, warn, btn);
 }
 
 // What the outline step found on each photo: the outline, where the sleeves were cut off, and the
@@ -344,9 +348,11 @@ function renderProof(id, r, box) {
 
 $("runForm").addEventListener("submit", (ev) => {
   ev.preventDefault();
+  lastRunSample = false;
   start("/api/run", new FormData($("runForm")), $("runMsg"), $("runOut"), renderRun);
 });
 $("sampleBtn").addEventListener("click", () => {
+  lastRunSample = true;
   const f = new FormData(); f.append("sample", "1");
   start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
 });
