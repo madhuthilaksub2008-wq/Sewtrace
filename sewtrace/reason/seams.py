@@ -344,8 +344,14 @@ def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
     target = _target_half_cap(cap_seam)
     sleeve = spec.panel("sleeve")
     cap_before, under_before = edge_length(sleeve, "cap"), edge_length(sleeve, "underarm")
-    if max_cap_length(sleeve.edge_points("cap")) < target and target <= cap_before * (1 + cfg.flat_cap_max_growth_frac):
-        flat = with_flat_cap(sleeve, target, cfg.flat_cap_rise_mm)
+    lowest = (cap_seam.len_a_mm + cap_seam.min_diff_mm) / cap_seam.b_count  # the shortest half cap that passes
+    flat = None
+    if max_cap_length(sleeve.edge_points("cap")) < lowest and target <= cap_before * (1 + cfg.flat_cap_max_growth_frac):
+        try:
+            flat = with_flat_cap(sleeve, target, cfg.flat_cap_rise_mm)
+        except ValueError as err:  # the cap end would fall below the cuff: leave the seam to fail loudly
+            log.warning("fallback_fix: sleeve top not redrawn: %s", err)
+    if flat is not None:
         spec = _replace_panel(spec, flat)
         cap = flat.edge_points("cap")
         applied = [{"flat_cap": True, "from_mm": round(cap_before, 2), "to_mm": round(edge_length(flat, "cap"), 2),

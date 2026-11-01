@@ -312,3 +312,24 @@ def test_req_geo_01_sleeve_edges_come_from_the_layout_not_from_bends():
         lengths[e.name] = float(np.linalg.norm(np.diff(run, axis=0), axis=1).sum())
     assert 130 < lengths["cap"] < 150 and 70 < lengths["underarm"] < 100
     assert 125 < lengths["hem"] < 145 and 120 < lengths["fold"] < 140
+
+
+def test_req_geo_01_a_steep_sleeve_cap_end_is_found_at_its_corner():
+    """The extreme point lies where the cap runs at 45 degrees; on a cap that ends steeply that is up the cap.
+    The corner is the sharpest turn near it (review, Nov 1: cap y = 55 t^3 read as 155 mm, true about 165)."""
+    import numpy as np
+
+    from sewtrace.types import Outline
+    from sewtrace.vision import contour
+
+    t = np.linspace(0, 1, 60)
+    cap = [(150 * a, 55 * a**3) for a in t]
+    rest = [(148, 95), (141, 128), (70, 132), (0, 135.4)]
+    half = contour.sleeve_half(Outline.from_array(contour._resample_closed(np.array(cap + rest, float), 1.0)))
+    pts = half.array()
+    lengths = {}
+    for e in contour.label_sleeve_edges(half):
+        run = pts[e.start : e.end + 1] if e.start <= e.end else np.vstack([pts[e.start :], pts[: e.end + 1]])
+        lengths[e.name] = float(np.linalg.norm(np.diff(run, axis=0), axis=1).sum())
+    true_cap = float(np.linalg.norm(np.diff(np.array(cap), axis=0), axis=1).sum())
+    assert abs(lengths["cap"] - true_cap) < 6.0 and 60 < lengths["underarm"] < 85

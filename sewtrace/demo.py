@@ -456,8 +456,9 @@ def _write_bundle(
     homographies: dict[str, Homography] = {}
     for view, path in photos:  # masks and scales come from the cache: the run just made them
         image = pipeline.load_photo(view, path)
-        homographies[view] = pipeline.photo_scale(view, path)
         mask = client.segment(path, prompts.sleeve if view == "sleeve" else prompts.garment)
+        # The same upright frame the run traced in, so the panels are placed back where they lie on the photo.
+        homographies[view] = pipeline.upright(pipeline.photo_scale(view, path), mask.shape)
         views[view] = _view_outline(mask, homographies[view], f"{view}.jpg", image)
         targets[view] = (_sleeve_target_mm(mask, homographies[view]) if view == "sleeve"
                          else _body_target_mm(client, path, mask, homographies[view]))

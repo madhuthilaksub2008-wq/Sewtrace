@@ -247,6 +247,7 @@ function renderRun(id, r, box) {
 
   for (const n of r.lay_notes || []) out.push(h("div", {class: "msg info"}, n));
   if (r.cap_note) out.push(h("div", {class: "msg warn"}, r.cap_note));
+  if (r.full) out.push(h("div", {class: "msg info"}, "Whole pieces were printed. For the proof check below, print the halves (untick the box and re-run): the check lays a half front or back with its fold edge on the centre of the tee."));
   if (r.review && r.review.length) out.push(reviewBox(id, r.review, r.sample));
   if (r.debug && r.debug.length) out.push(debugBox(id, r.debug, false));
 

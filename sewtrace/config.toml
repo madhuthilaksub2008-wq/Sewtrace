@@ -188,6 +188,11 @@ underarm_sharp_deg = 50.0
 # labelled at the wrong corner. With 8 mm both hard tees pass (tests/test_hard.py). The clean set is
 # checked by the full test suite and the eval. NEEDS REAL PHOTOS.
 corner_window_mm = 8.0
+# Half sleeve corners: the outline's extreme points (cap end = most top-right, and so on) are only seeds,
+# refined to the sharpest turn within this distance along the outline. A steep cap end (more than 45
+# degrees) moves the extreme point up the cap by tens of mm; a crease mid-cap is further away than this.
+sleeve_corner_search_mm = 40.0
+sleeve_corner_min_deg = 15.0     # a turn below this is no corner: the seed is kept (a cap meeting the underarm nearly in line)
 
 [contour.armhole]          # default armhole between shoulder point and underarm point
 # A flat-lay photo hides the armhole under the sleeve, so only its two end points are

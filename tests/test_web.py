@@ -757,3 +757,9 @@ def test_req_out_01_the_page_can_ask_for_whole_pieces(client):
     assert job["state"] == "done" and job["result"]["full"] is True
     svg = client.get(f"/api/jobs/{job['id']}/files/svg").text
     assert "PLACE ON FOLD" not in svg
+
+
+def test_req_out_01_full_zero_means_halves(client):
+    res = client.post("/api/run", data={"sample": "1", "full": "0"})
+    job = wait_job(client, res.json()["id"])
+    assert job["state"] == "done" and job["result"]["full"] is False

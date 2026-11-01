@@ -103,13 +103,11 @@ def scale_cap_to_length(points: np.ndarray, cap: SleeveCap, target_mm: float, it
     return scaled((lo + hi) / 2)
 
 
-def cap_length_at(points: np.ndarray, frac: float, underarm_frac: float | None = None) -> float:
-    """Cap length between these end points with the crown handle at ``frac`` of the cap width and the
-    underarm handle at ``underarm_frac`` (``frac`` when None)."""
+def cap_length_at(points: np.ndarray, frac: float) -> float:
+    """Cap length between these end points with both handles at ``frac`` of the cap width."""
     start, end = points[0], points[-1]
-    width = abs(end[0] - start[0])
-    under = frac if underarm_frac is None else underarm_frac
-    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=frac * width, underarm_run_mm=under * width)))
+    run = frac * abs(end[0] - start[0])
+    return _length(cap_curve(start, end, SleeveCap(crown_run_mm=run, underarm_run_mm=run)))
 
 
 def with_straight_hem(panel: Panel) -> Panel:

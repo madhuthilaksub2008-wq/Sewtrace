@@ -142,6 +142,9 @@ def _dispatch(args: argparse.Namespace) -> None:
         if cap:
             print("note:", cap_note(cap))
         _print_review(result.seam_log, args.garment_dir)
+        if args.full:
+            print("note: whole pieces were printed. For the proof photo (sewtrace verify), print the halves and lay "
+                  "a half front or back with its fold edge on the centre of the tee: the check needs the fold edge.")
         for k, path in result.files.items():
             print(f"{k:12s} {path}")
     elif args.cmd == "serve":

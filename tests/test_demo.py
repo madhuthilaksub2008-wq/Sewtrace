@@ -553,3 +553,22 @@ def test_req_api_08_interrupted_install_leaves_a_bundle_that_fails_check(tee, tm
     assert not (root / "a" / "manifest.json").exists()
     with pytest.raises(demo.DemoError):
         demo.load_bundle("a", root)
+
+
+def test_req_geo_01_demo_places_the_panels_in_the_frame_the_run_traced_in(tee, tmp_path, monkeypatch):
+    """The run traces each photo with the photo's up as up (pipeline.upright); the demo must place the panels in
+    that same frame, or a sideways marker misplaces the overlay (review, Nov 1)."""
+    from sewtrace.api.client import MetaClient
+    from sewtrace.config import Settings
+
+    seen = []
+    real = pipeline.upright
+
+    def spy(h, shape):
+        seen.append(shape)
+        return real(h, shape)
+
+    monkeypatch.setattr(pipeline, "upright", spy)
+    client = MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "cache", ledger_path=tmp_path / "l.csv"))
+    demo.record(tee, "u", client=client, demo_dir=tmp_path / "demo", eval_csv=None)
+    assert len(seen) >= 6  # three views traced by the run, three placed by the demo

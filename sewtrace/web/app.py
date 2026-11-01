@@ -247,7 +247,7 @@ def create_app(
                 overrides[edge] = -1.0
             if not 20 <= overrides[edge] <= 1000:
                 return _error(400, "BadLength", "Length out of range", f"{edge}: give a length in mm between 20 and 1000.")
-        full = bool(form.get("full"))  # whole pieces instead of halves on the fold
+        full = str(form.get("full") or "").lower() in ("1", "true", "on", "yes")  # whole pieces, not halves
         if form.get("sample"):
             return start("run", lambda job: service.run_pattern(ctx, job, sample_dir, sample=True, overrides=overrides,
                                                                 full=full))

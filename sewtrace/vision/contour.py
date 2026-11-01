@@ -1045,18 +1045,29 @@ def label_sleeve_edges(half: Outline) -> list[Edge]:
     The half sleeve lies with the fold on x = 0 and the cap top at the start (y down). Its other three
     corners are the outline's extreme points, as the capture layout fixes the orientation: the cap end
     is the most top-right point (largest x - y), the cuff's underarm end the most bottom-right (largest
-    x + y), the cuff's fold end the most bottom-left (largest y - x). This needs no bend detection, so a
-    rounded corner or a crease in the middle of an edge cannot be taken for a corner (real kid tee,
-    Nov 1: both happened). If the three are not in outline order, the strongest turns are used."""
+    x + y), the cuff's fold end the most bottom-left (largest y - x). These are seeds: each corner is the
+    sharpest turn within ``contour.labels.sleeve_corner_search_mm`` of its seed, so a crease far along an
+    edge cannot be taken for a corner (real kid tee, Nov 1) and a steep cap end is not cut short. If the
+    three are not in outline order, the strongest turns are used."""
     pts = half.array()
     n = len(pts)
-    cap_end = int(np.argmax(pts[:, 0] - pts[:, 1]))
-    hem_side = int(np.argmax(pts[:, 0] + pts[:, 1]))
-    hem_fold = int(np.argmax(pts[:, 1] - pts[:, 0]))
+    labels = get_config().contour.labels
+    k = max(int(round(labels.corner_window_mm / _spacing(pts))), 1)
+    turn = _turning(pts, k)
+    reach = max(int(round(labels.sleeve_corner_search_mm / _spacing(pts))), 1)
+
+    def corner_near(seed: int) -> int:
+        # The extreme point is where the edge runs at 45 degrees, which on a steep, rounded corner lies up
+        # the edge; the corner is the sharpest turn near it.
+        idx = np.arange(seed - reach, seed + reach + 1) % n
+        best = int(idx[np.argmax(turn[idx])])
+        return best if turn[best] >= labels.sleeve_corner_min_deg and turn[best] > turn[seed] else seed
+
+    cap_end = corner_near(int(np.argmax(pts[:, 0] - pts[:, 1])))
+    hem_side = corner_near(int(np.argmax(pts[:, 0] + pts[:, 1])))
+    hem_fold = corner_near(int(np.argmax(pts[:, 1] - pts[:, 0])))
     if 0 < cap_end < hem_side < hem_fold < n:
         return _edges(TEE_EDGES["sleeve"], [0, cap_end, hem_side, hem_fold])
-    k = max(int(round(get_config().contour.labels.corner_window_mm / _spacing(pts))), 1)
-    turn = _turning(pts, k)
     inner = np.full(n, -np.inf)
     inner[2 * k : n - 2 * k] = turn[2 * k : n - 2 * k]
     corners = sorted(_peaks(inner, 0.0, 2 * k)[:3])

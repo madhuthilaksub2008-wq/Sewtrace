@@ -123,6 +123,8 @@ class JointsConfig(_Strict):
 
 class LabelsConfig(_Strict):
     corner_window_mm: float = Field(gt=0)
+    sleeve_corner_search_mm: float = Field(gt=0)
+    sleeve_corner_min_deg: float = Field(gt=0, lt=180)
 
 
 class ContourConfig(_Strict):
