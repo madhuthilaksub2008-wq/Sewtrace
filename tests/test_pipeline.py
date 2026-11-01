@@ -347,13 +347,13 @@ def test_req_sew_03_a_large_pair_fix_asks_to_check_the_photos():
     assert rows["side"]["front_mm"] == 296.5 and rows["side"]["back_mm"] == 326.7 and rows["side"]["used_mm"] == 311.6
 
 
-def test_req_sew_02_a_taller_cap_is_shown_to_the_user():
-    log = [{"source": "fallback", "applied": [{"sleeve_cap": {"crown_run_mm": 70, "underarm_run_mm": 70},
-            "from_mm": 138.2, "to_mm": 177.4, "cap_drop_mm": 63.0, "underarm_from_mm": 164.1, "underarm_to_mm": 101.3}]}]
+def test_req_sew_02_a_widened_sleeve_top_is_shown_to_the_user():
+    log = [{"source": "fallback", "applied": [{"flat_cap": True, "from_mm": 156.0, "to_mm": 177.2, "sleeve_width_mm": 176.8,
+            "rise_mm": 12.0, "underarm_from_mm": 78.7, "underarm_to_mm": 121.4}]}]
     review = pipeline.cap_review(log)
-    assert review["drop_mm"] == 63.0
     note = pipeline.cap_note(review)
-    assert "63 mm taller" in note and "underarm seam is now 101 mm (photo: 164 mm)" in note
+    assert "was 156 mm on the sleeve photo" in note and "drawn straight at 177 mm" in note
+    assert "underarm seam is 121 mm (photo: 79 mm)" in note
     assert pipeline.cap_review([{"source": "model", "applied": [{"from_mm": 1, "to_mm": 2}]}]) is None
 
 

@@ -216,22 +216,20 @@ def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> lis
 
 
 def cap_review(seam_log: list[dict]) -> dict | None:
-    """When the code fix made the sleeve cap taller: by how much, and the underarm seam before and after."""
+    """When the code fix drew the sleeve's top edge straight and widened it to the arm hole: the numbers."""
     for row in reversed(seam_log):
         for change in row.get("applied") or []:
-            if isinstance(change, dict) and "cap_drop_mm" in change:
-                return {"drop_mm": change["cap_drop_mm"], "underarm_from_mm": change["underarm_from_mm"],
-                        "underarm_to_mm": change["underarm_to_mm"], "cap_from_mm": change["from_mm"],
-                        "cap_to_mm": change["to_mm"]}
+            if isinstance(change, dict) and change.get("flat_cap"):
+                return change
     return None
 
 
 def cap_note(review: dict) -> str:
-    return (f"The sleeve cap was made {review['drop_mm']:.0f} mm taller to fit the armholes (a flat sleeve photo "
-            f"cannot show the cap height): half cap {review['cap_from_mm']:.0f} -> {review['cap_to_mm']:.0f} mm, "
-            f"so the sleeve's underarm seam is now {review['underarm_to_mm']:.0f} mm (photo: "
-            f"{review['underarm_from_mm']:.0f} mm). Tape-measure the underarm seam of the sleeve: if it is much "
-            f"longer, the armpits on the front and back photos may be placed too low (check the debug images).")
+    return (f"The sleeve's top edge (the sleeve hole) was {review['from_mm']:.0f} mm on the sleeve photo but must "
+            f"match the arm hole on the body: it is drawn straight at {review['to_mm']:.0f} mm, so the sleeve is "
+            f"{review['sleeve_width_mm']:.0f} mm wide at the top (half, on the fold) and its underarm seam is "
+            f"{review['underarm_to_mm']:.0f} mm (photo: {review['underarm_from_mm']:.0f} mm). A sleeve laid flat "
+            f"bunches at that seam. Tape-measure the sleeve's underarm seam on the tee to check.")
 
 
 def run(

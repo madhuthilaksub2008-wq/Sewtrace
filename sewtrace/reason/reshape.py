@@ -7,8 +7,9 @@ Sleeve cap shape: a cubic Bezier from the cap top P0 to the cap end P3 (the unde
 corner, which comes from the photo). Both end tangents are horizontal, as in the
 draft. The two numbers are the handle lengths:
     P1 = P0 + (crown_run_mm, 0)      P2 = P3 - (underarm_run_mm, 0)
-So the model never moves the cap end points or the sleeve width. Only the code fix may make the cap
-taller (``with_cap_drop``), when no curve between the photo's end points reaches the armhole length.
+So the model never moves the cap end points or the sleeve width. Only the code fix may move the cap end
+(``with_flat_cap``): when no curve between the photo's end points reaches the arm hole length, the
+sleeve's top edge is drawn straight and widened to it.
 
 Neck depth: the draft neck curve is scaled in y about the neck point. The neck point
 and every x value stay as measured, so the neck width is bound by the photo.
@@ -128,23 +129,24 @@ def max_cap_length(points: np.ndarray) -> float:
     return cap_length_at(points, 1.0)
 
 
-def with_cap_drop(panel: Panel, drop_mm: float) -> Panel:
-    """Sleeve with the cap end point moved ``drop_mm`` straight down (y grows down): a taller cap at the
-    same width, and a shorter underarm seam, as a pattern drafter sets the cap height so the cap fits its
-    armhole. A flat photo of a sleeve shows the cap seam laid straight, so it cannot show the cap height.
-    The underarm seam becomes a straight line from the new cap end to the cuff corner. The cap edge is a
-    straight placeholder from the cap top to the new end; the caller rebuilds the curve."""
+def with_flat_cap(panel: Panel, half_cap_mm: float, rise_mm: float) -> Panel:
+    """Sleeve with a straight top edge (the half sleeve hole) ``half_cap_mm`` long, rising ``rise_mm`` from
+    the cap top on the fold to the underarm corner, and the underarm seam straight from there to the cuff
+    corner. The fold and the cuff stay as measured. A T-shirt's sleeve is set in along a nearly straight
+    seam; a flat photo shows that seam bunched, so its length comes from the arm hole on the body."""
     cap = panel.edge_points("cap")
-    under = panel.edge_points("underarm")
-    new_end = cap[-1] + np.array([0.0, drop_mm])
-    cuff = under[-1]
-    if drop_mm < 0 or new_end[1] > cuff[1] - 1.0:
-        raise ValueError(f"sleeve: cannot lower the cap end {drop_mm:.0f} mm, the underarm seam is too short")
-    # A drafted sleeve's underarm seam runs straight from the cap end to the cuff. Keeping the photo's
-    # underarm points left a spike: the photo's seam slants inward from the old cap end.
-    n = max(int(np.ceil(np.linalg.norm(cuff - new_end) / CAP_STEP_MM)), 2)
-    t = np.linspace(0.0, 1.0, n + 1)[:, None]
-    return replace_edges(panel, {"cap": np.vstack([cap[0], new_end]), "underarm": new_end + t * (cuff - new_end)})
+    cuff = panel.edge_points("underarm")[-1]
+    top = cap[0]
+    across = float(np.sqrt(max(half_cap_mm**2 - rise_mm**2, 1.0)))
+    end = top + np.array([across, rise_mm])
+    if end[1] > cuff[1] - 1.0:
+        raise ValueError("sleeve: the cap end would lie below the cuff")
+
+    def line(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        n = max(int(np.ceil(np.linalg.norm(b - a) / CAP_STEP_MM)), 2)
+        return a + np.linspace(0.0, 1.0, n + 1)[:, None] * (b - a)
+
+    return replace_edges(panel, {"cap": line(top, end), "underarm": line(end, cuff)})
 
 
 def with_sleeve_cap(panel: Panel, cap: SleeveCap) -> Panel:

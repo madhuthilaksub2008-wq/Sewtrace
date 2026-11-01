@@ -321,7 +321,7 @@ function seamLog(log, names) {
   for (const row of log) {
     const failing = new Set(row.failing || []);
     const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm`
-      : c.sleeve_cap ? `sleeve.cap ${c.from_mm.toFixed(1)} to ${c.to_mm.toFixed(1)} mm` + (c.cap_drop_mm ? `, cap ${c.cap_drop_mm.toFixed(0)} mm taller, sleeve.underarm ${c.underarm_from_mm.toFixed(1)} to ${c.underarm_to_mm.toFixed(1)} mm` : "")
+      : (c.sleeve_cap || c.flat_cap) ? `sleeve.cap ${c.from_mm.toFixed(1)} to ${c.to_mm.toFixed(1)} mm` + (c.flat_cap ? `, sleeve top straight, ${c.sleeve_width_mm.toFixed(0)} mm wide, sleeve.underarm ${c.underarm_from_mm.toFixed(1)} to ${c.underarm_to_mm.toFixed(1)} mm` : "")
       : JSON.stringify(c)).join("; ");
     t.append(h("tr", {}, h("td", {}, row.iteration + " " + row.source),
       ...all.map((n) => (n in (row.diffs || {})) ? h("td", {class: failing.has(n) ? "bad" : "ok"}, signed(row.diffs[n])) : h("td", {}, "")),

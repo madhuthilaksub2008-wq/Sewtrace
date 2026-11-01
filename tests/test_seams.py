@@ -289,9 +289,8 @@ def test_req_sew_03_unfixable_measured_pair_spends_no_model_call_on_the_cap(tees
 
 
 def test_req_sew_03_cap_that_cannot_reach_range_fails_loudly(tees, client):
-    """A cap cannot grow without limit (handles stop at the cap width, a taller cap only within the limits in
-    config.seam): the seam stays failing, no silent edit. Up to about 60 mm more armhole is now met with a
-    taller cap (shown to the user); 80 mm is beyond the limits on this tee."""
+    """A cap cannot grow without limit (handles stop at the cap width; a straight, wider sleeve top only up to
+    seam.flat_cap_max_growth_frac): the seam stays failing, no silent edit."""
     spec = _longer_front_armhole(truth_spec(tees[0]), extra_mm=80.0)
     out, log = adjust_loop(client, spec)
     assert log[-1]["source"] == "fallback" and log[-1]["failing"] == [CAP]
@@ -445,36 +444,67 @@ def _flat_cap(spec: PanelSpec) -> PanelSpec:
     return _replace(spec, flat)
 
 
-def test_req_sew_02_a_cap_laid_flat_in_the_photo_is_made_taller_and_passes(tees, client):
-    """No handles reach the armhole, so no model call (it only sets handles); the code fix makes the cap
-    taller as a smooth bell (not a step), within the limits, logs it in mm, and the seams pass."""
+def test_req_sew_02_a_short_sleeve_top_is_drawn_straight_and_widened_to_the_arm_hole(tees, client):
+    """No handles reach the arm hole, so no model call (it only sets handles). The code fix draws the sleeve's
+    top edge straight, rising seam.flat_cap_rise_mm, and widens the sleeve until the sleeve hole matches the
+    arm hole; the fold and cuff stay, the underarm runs straight to the cuff. The seams pass."""
     import shapely
 
-    spec = _flat_cap(truth_spec(tees[0]))
-    assert not next(s for s in check_seams(spec) if seam_name(s) == CAP).ok
+    spec = _shorter_cap(_flat_cap(truth_spec(tees[0])), 0.88)
     out, log = adjust_loop(client, spec)
     assert client.calls == 0 and log[-1]["source"] == "fallback" and log[-1]["failing"] == []
     require_seams_ok(out, log)
     change = log[-1]["applied"][0]
-    assert change["cap_drop_mm"] > 0 and change["underarm_to_mm"] < change["underarm_from_mm"]
-    assert change["from_mm"] == pytest.approx(edge_length(spec.panel("sleeve"), "cap"), abs=0.5)
-    sleeve = out.panel("sleeve")
-    poly = shapely.Polygon(sleeve.outline_mm)
-    assert poly.is_valid and poly.convex_hull.area / poly.area < 1.25  # no spike
-    width = cap_width_mm(sleeve)
-    cap = change["sleeve_cap"]
-    assert max(cap["crown_run_mm"], cap["underarm_run_mm"]) <= 0.8 * width  # a bell, not a step
-    assert cap["underarm_run_mm"] <= 0.35 * width  # a short scoop into the underarm, not a flat ledge
-    under = sleeve.edge_points("underarm")
-    chord, rel = under[-1] - under[0], under - under[0]
-    assert (np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)).max() < 0.5  # straight
+    assert change["flat_cap"] and change["to_mm"] > change["from_mm"]
+    sleeve, before = out.panel("sleeve"), spec.panel("sleeve")
+    assert shapely.Polygon(sleeve.outline_mm).is_valid
+    for edge in ("cap", "underarm"):  # both straight
+        pts = sleeve.edge_points(edge)
+        chord, rel = pts[-1] - pts[0], pts - pts[0]
+        assert (np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)).max() < 0.5
+    cap = sleeve.edge_points("cap")
+    assert cap[-1, 1] - cap[0, 1] == pytest.approx(get_config().seam.flat_cap_rise_mm, abs=0.01)  # flat
+    assert np.allclose(sleeve.edge_points("fold"), before.edge_points("fold"))
+    assert np.allclose(sleeve.edge_points("hem"), before.edge_points("hem"))
 
 
-def test_req_sew_04_a_cap_needing_more_than_the_limits_still_fails_loudly(tees, client):
-    """A flat cap AND an armhole 150 mm too long (a misplaced armpit): beyond the cap height limit, so no
-    taller cap is drawn and the run fails (REQ-SEW-04)."""
+def test_req_sew_02_the_flat_sleeve_matches_the_real_kid_tee_tape():
+    """Real kid tee (Nov 1): photo sleeve top 163 mm curving down 55, underarm 74, fold 135, cuff 141; arm holes
+    172.4 + 175.9 mm. Tape: arm hole 170 along the seam, underarm seam 128. The flat sleeve gives about that."""
+    from sewtrace.reason.reshape import with_flat_cap
+    from sewtrace.types import Edge, Panel
+
+    t = np.linspace(0, 1, 40)
+    cap = np.c_[150 * t, 55 * t**2]
+    under = np.array([(150, 55), (146, 95), (141, 128)], float)
+    hem = np.array([(141, 128), (70, 132), (0, 135.4)], float)
+    fold = np.array([(0, 135.4), (0, 60)], float)
+    pts = np.vstack([cap[:-1], under[:-1], hem[:-1], fold[:-1]])
+    n1, n2, n3 = len(cap) - 1, len(cap) + 1, len(cap) + 3
+    sleeve = Panel(name="sleeve", cut="2 on fold", outline_mm=[tuple(p) for p in pts],
+                   edges=[Edge(name="cap", start=0, end=n1), Edge(name="underarm", start=n1, end=n2),
+                          Edge(name="hem", start=n2, end=n3), Edge(name="fold", start=n3, end=0)])
+    flat = with_flat_cap(sleeve, (172.4 + 175.9 + 6) / 2, get_config().seam.flat_cap_rise_mm)
+    assert edge_length(flat, "cap") == pytest.approx(177.15, abs=0.5)
+    assert edge_length(flat, "underarm") == pytest.approx(128, abs=10)  # the old taller cap gave 79
+
+
+def test_req_sew_04_a_sleeve_top_needing_more_than_the_limit_still_fails_loudly(tees, client):
+    """An arm hole far longer than the sleeve top (a misplaced armpit on a body photo, not a bunched seam):
+    beyond seam.flat_cap_max_growth_frac, so nothing is redrawn and the run fails (REQ-SEW-04)."""
     spec = _longer_front_armhole(_flat_cap(truth_spec(tees[0])), extra_mm=150.0)
     out, log = adjust_loop(client, spec)
-    assert log[-1]["failing"] == [CAP] and "cap_drop_mm" not in (log[-1]["applied"] or [{}])[0]
+    assert log[-1]["failing"] == [CAP] and not (log[-1]["applied"] or [{}])[0].get("flat_cap")
     with pytest.raises(SeamCheckFailed):
         require_seams_ok(out, log)
+
+
+def _shorter_cap(spec: PanelSpec, factor: float) -> PanelSpec:
+    """The sleeve's top edge shortened along itself (a seam bunched in the photo), the rest kept."""
+    from sewtrace.reason.reshape import replace_edges
+
+    sleeve = spec.panel("sleeve")
+    cap, under = sleeve.edge_points("cap"), sleeve.edge_points("underarm")
+    end = cap[0] + factor * (cap[-1] - cap[0])
+    t = np.linspace(0.0, 1.0, 30)[:, None]
+    return _replace(spec, replace_edges(sleeve, {"cap": cap[0] + t * (end - cap[0]), "underarm": end + t * (under[-1] - end)}))
