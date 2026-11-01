@@ -125,6 +125,34 @@ The mount check works like this. In the image, REAL mode calls `os.path.ismount(
 
 Cached answers cost nothing to replay, and they let OFFLINE mode work after a redeploy. Never clear the cache to get a fresh result.
 
+## Share from your computer with a Cloudflare tunnel
+
+The quickest way to let someone else (for example Bala) use the page that runs on your computer. No
+account, no domain and no open port are needed. The link is HTTPS.
+
+1. Install cloudflared once (Windows, in PowerShell): `winget install --id Cloudflare.cloudflared`.
+   macOS: `brew install cloudflared`. Close and reopen the terminal.
+2. Start the page with a password, locally or in Docker (see above). A tunnel makes the page public, so
+   `SEWTRACE_WEB_PASSWORD` must be set to a long random password. Check that
+   `http://localhost:8000` asks for it.
+3. Start the tunnel in a second terminal:
+
+   ```
+   cloudflared tunnel --url http://localhost:8000
+   ```
+
+   After a few seconds it prints a link like `https://some-random-words.trycloudflare.com`.
+4. Send that link and the password. The browser asks for a user name and password: any user name works.
+
+Notes:
+
+- The link works only while your computer, the page and the tunnel terminal stay on. Ctrl+C stops it.
+- Each start gives a new link. A fixed address needs a Cloudflare account, a domain and a named tunnel
+  (`cloudflared tunnel login`, `cloudflared tunnel create sewtrace`, a DNS route, then
+  `cloudflared tunnel run sewtrace`).
+- In REAL mode every run on the shared page spends your Meta credits. The budget guard and the ledger
+  apply as usual.
+
 ## Deploy on Render
 
 1. Push the repository to GitHub.
