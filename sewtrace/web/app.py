@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import hashlib
 import hmac
 import logging
@@ -149,7 +150,9 @@ def create_app(
     # Server folders and the key never reach the page, even inside an error message.
     scrub = (settings.api_key, str(ROOT), str(client.cache_dir), str(client.ledger_path), str(sample_root), str(sample_dir))
     store = JobStore(jobs_dir, web.job_retention_min, scrub=scrub)
-    ctx = service.Context(client)
+    # The sample tee always runs on the mock: its photos are drawn and come with their masks.
+    sample_client = client if settings.mock else MetaClient(dataclasses.replace(settings, mock=True, offline=False))
+    ctx = service.Context(client, sample_client=sample_client)
     web_edits = settings.config.edits
     mock_only_sample = settings.mock
 

@@ -246,8 +246,13 @@ def cap_review(seam_log: list[dict]) -> dict | None:
 
 
 def cap_note(review: dict) -> str:
-    return (f"The sleeve's top edge (the sleeve hole) was {review['from_mm']:.0f} mm on the sleeve photo but must "
-            f"match the arm hole on the body: it is drawn straight at {review['to_mm']:.0f} mm, so the sleeve is "
+    if abs(review["to_mm"] - review["from_mm"]) < 2.0:  # the photo's length already matched the arm hole
+        start = (f"The sleeve's top edge (the sleeve hole) is drawn straight at {review['to_mm']:.0f} mm to match the "
+                 f"arm hole on the body, so the sleeve is ")
+    else:
+        start = (f"The sleeve's top edge (the sleeve hole) was {review['from_mm']:.0f} mm on the sleeve photo but must "
+                 f"match the arm hole on the body: it is drawn straight at {review['to_mm']:.0f} mm, so the sleeve is ")
+    return (start +
             f"{review['sleeve_width_mm']:.0f} mm wide at the top (half, on the fold) and its underarm seam is "
             f"{review['underarm_to_mm']:.0f} mm (photo: {review['underarm_from_mm']:.0f} mm). A sleeve laid flat "
             f"bunches at that seam. Tape-measure the sleeve's underarm seam on the tee to check.")

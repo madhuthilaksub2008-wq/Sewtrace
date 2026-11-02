@@ -1035,7 +1035,8 @@ def label_body_edges(half: Outline) -> list[Edge]:
     hem_fold = _bottom_fold_corner(pts)
     inner = np.full(n, -np.inf)
     inner[neck_pt + 2 * k : hem_fold - 2 * k] = turn[neck_pt + 2 * k : hem_fold - 2 * k]
-    shoulder, underarm, hem_side = sorted(_peaks(inner, 0.0, 2 * k)[:3])
+    gap = max(2 * k, int(round(get_config().contour.labels.body_corner_min_gap_mm / _spacing(pts))))
+    shoulder, underarm, hem_side = sorted(_peaks(inner, 0.0, gap)[:3])
     return _edges(TEE_EDGES["front"], [0, neck_pt, shoulder, underarm, hem_side, hem_fold])
 
 

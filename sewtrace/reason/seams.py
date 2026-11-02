@@ -108,6 +108,7 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
     and the caller's `require_seams_ok` fails loudly (REQ-SEW-04).
     """
     max_calls = client.config.seam.max_adjust_calls if max_calls is None else max_calls
+    flat_style = client.config.seam.cap_style == "flat"
     history: list[dict] = []
     calls, source, applied = 0, "initial", []
     max_fix_mm = client.config.seam.measured_pair_max_fix_mm
@@ -128,6 +129,12 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
             # Same edge on both sides: the diff is 0 by construction and proves nothing.
             "equal_by_construction": [seam_name(s) for s in seams if s.a == s.b.removesuffix(":mirror")],
         })
+        if not failing and flat_style and not _cap_is_flat(history):
+            # The cap seam passes with a curve: draw the sleeve top straight anyway (cap_style "flat").
+            flat_spec, flat_applied = fallback_fix(spec, straight=True, force=True)
+            if flat_applied and flat_applied[0].get("flat_cap"):
+                spec, applied, source = flat_spec, flat_applied, "fallback"
+                continue
         if not failing or source == "fallback":
             break
         pairs = [s for s in failing if is_measured_pair(s)]
@@ -147,6 +154,11 @@ def adjust_loop(client: MetaClient, spec: PanelSpec, max_calls: int | None = Non
         out_of_reach = any(max_cap_length(cap_pts) * s.b_count < s.len_a_mm + s.min_diff_mm
                            or cap_length_at(cap_pts, 0.0) * s.b_count > s.len_a_mm + s.max_diff_mm
                            for s in fixable)
+        if flat_style and source != "fallback":
+            # cap_style "flat": the sleeve top is drawn straight to the arm hole by code; no model call.
+            spec, applied = fallback_fix(spec, straight=True)
+            source = "fallback"
+            continue
         if out_of_reach and source != "fallback":
             # The model only chooses the two handle lengths; no handles give a cap in the allowed range, so a
             # model call cannot help (an exception to REQ-SEW-02's model step, Nov 1). Go straight to the
@@ -333,11 +345,12 @@ def apply_adjustment(spec: PanelSpec, answer: dict) -> tuple[PanelSpec, list[dic
     return _set_cap(spec, cap)
 
 
-def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
+def fallback_fix(spec: PanelSpec, straight: bool = False, force: bool = False) -> tuple[PanelSpec, list[dict]]:
     """Code fix: scale the cap handles so the whole cap sits in the middle of its ease range. When no
-    handles reach it, draw the sleeve's top edge straight and widen it to the arm hole (``with_flat_cap``),
-    within ``seam.flat_cap_max_growth_frac``; beyond that the seam fails loudly (REQ-SEW-04)."""
-    cap_seam = next((s for s in check_seams(spec) if s.b == CAP_REF and not s.ok), None)
+    handles reach it, or ``straight`` (cap_style "flat"), draw the sleeve's top edge straight to the arm hole
+    (``with_flat_cap``), changing it by at most ``seam.flat_cap_max_growth_frac``; beyond that the handle
+    fix is tried, or the seam fails loudly (REQ-SEW-04). ``force``: also when the cap seam passes."""
+    cap_seam = next((s for s in check_seams(spec) if s.b == CAP_REF and (force or not s.ok)), None)
     if cap_seam is None:
         return spec, []
     cfg = get_config().seam
@@ -346,7 +359,10 @@ def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
     cap_before, under_before = edge_length(sleeve, "cap"), edge_length(sleeve, "underarm")
     lowest = (cap_seam.len_a_mm + cap_seam.min_diff_mm) / cap_seam.b_count  # the shortest half cap that passes
     flat = None
-    if max_cap_length(sleeve.edge_points("cap")) < lowest and target <= cap_before * (1 + cfg.flat_cap_max_growth_frac):
+    if force and _is_straight(sleeve.edge_points("cap")) and abs(target - cap_before) < STRAIGHT_TOL_MM:
+        return spec, []  # already a straight sleeve top of the right length
+    reachable = max_cap_length(sleeve.edge_points("cap")) >= lowest
+    if (straight or not reachable) and abs(target - cap_before) <= cap_before * cfg.flat_cap_max_growth_frac:
         try:
             flat = with_flat_cap(sleeve, target, cfg.flat_cap_rise_mm)
         except ValueError as err:  # the cap end would fall below the cuff: leave the seam to fail loudly
@@ -358,13 +374,32 @@ def fallback_fix(spec: PanelSpec) -> tuple[PanelSpec, list[dict]]:
                     "sleeve_width_mm": round(float(cap[-1, 0] - cap[0, 0]), 2), "rise_mm": cfg.flat_cap_rise_mm,
                     "underarm_from_mm": round(under_before, 2),
                     "underarm_to_mm": round(edge_length(flat, "underarm"), 2)}]
-        log.warning("fallback_fix: sleeve top drawn straight and widened %.1f -> %.1f mm to match the arm hole "
-                    "(a flat sleeve photo bunches the seam); underarm seam %.1f -> %.1f mm",
+        log.warning("fallback_fix: sleeve top drawn straight, %.1f -> %.1f mm, to match the arm hole; underarm seam %.1f -> %.1f mm",
                     cap_before, applied[0]["to_mm"], under_before, applied[0]["underarm_to_mm"])
         return spec, applied
+    if force:  # the seam already passes: keep the curve rather than change it by more than the limit
+        return spec, []
     pts = sleeve.edge_points("cap")
     spec, applied = _set_cap(spec, scale_cap_to_length(pts, fit_cap(pts), target))
     return spec, applied
+
+
+STRAIGHT_TOL_MM = 0.5  # a sleeve top within this of a straight line, and of the target length, is left alone
+
+
+def _is_straight(pts: np.ndarray) -> bool:
+    chord, rel = pts[-1] - pts[0], pts - pts[0]
+    length = float(np.linalg.norm(chord))
+    return length > 0 and float((np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / length).max()) < STRAIGHT_TOL_MM
+
+
+def _cap_is_flat(history: list[dict]) -> bool:
+    """True when the last cap change in the log drew the sleeve top straight."""
+    for row in reversed(history):
+        for change in row.get("applied") or []:
+            if isinstance(change, dict) and (change.get("flat_cap") or change.get("sleeve_cap")):
+                return bool(change.get("flat_cap"))
+    return False
 
 
 def _set_cap(spec: PanelSpec, cap: SleeveCap) -> tuple[PanelSpec, list[dict]]:

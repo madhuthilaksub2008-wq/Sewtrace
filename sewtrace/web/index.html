@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sewtrace</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 /* Drafting-table workbench: dark step rail on the left, a status bar, one card per step. The page works
    without the web fonts (system fallbacks), so it also works with no network. */
@@ -213,6 +213,7 @@ details > .bd { padding: 0 16px 16px; }
 <div class="bar">
   <span id="mode" class="badge">...</span>
   <span class="stat" id="lastRun">No pattern yet</span>
+  <span class="stat">Spent <b id="barSpent">...</b></span>
   <span class="spacer"></span>
   <span id="busy" class="badge warn" hidden>A run is active</span>
   <a class="btn" href="/demo">Demo</a>
@@ -445,11 +446,12 @@ async function refreshStatus() {
   $("model").textContent = state.reasoning_model;
   $("ledger").textContent = "$" + state.ledger_usd.toFixed(4);
   $("limit").textContent = "$" + state.budget_limit_usd.toFixed(2);
+  $("barSpent").textContent = "$" + state.ledger_usd.toFixed(2) + " of $" + state.budget_limit_usd.toFixed(2);
   $("busy").hidden = !state.busy; $("busy").textContent = "A run is active";
   $("uploadNote").textContent = state.uploads_enabled ? "Up to " + state.max_upload_mb + " MB each, JPEG or PNG"
     : "Mock mode: your own photos need REAL mode";
   const n = $("modeNote");
-  if (state.mode === "REAL") n.replaceChildren(h("div", {class: "msg warn"}, h("b", {}, "REAL mode. "), "Every run makes paid Meta calls."));
+  if (state.mode === "REAL") n.replaceChildren(h("div", {class: "msg warn"}, h("b", {}, "REAL mode. "), "Every run with your photos makes paid Meta calls. The sample tee is free."));
   else if (state.mode === "MOCK") n.replaceChildren(h("div", {class: "msg info"}, h("b", {}, "MOCK mode. "), "No paid calls. Only the sample tee works. Real photos need REAL mode: set META_API_KEY and SEWTRACE_MOCK=0 on the server, and install the .[real] extra."));
   else n.replaceChildren(h("div", {class: "msg info"}, h("b", {}, "OFFLINE mode. "), "Answers come from the cache only."));
   if (!state.uploads_enabled) for (const el of $("runForm").querySelectorAll("input[type=file]")) el.disabled = true;
@@ -491,7 +493,7 @@ async function follow(id, msgBox, outBox, render) {
       note(msgBox, "err", job.error.message, job.error.title);
       const parts = [];
       if (job.error.review && job.error.review.length) parts.push(reviewBox(id, job.error.review, lastRunSample));
-      if (job.kind === "run") { parts.push(debugBox(id, ["front", "back", "sleeve"].map((v) => ({view: v, file: "debug_" + v})), true)); dot("dotRun", "fail"); }
+      if (job.kind === "run") { havePattern = patternIsSample = false; proofState(); parts.push(debugBox(id, ["front", "back", "sleeve"].map((v) => ({view: v, file: "debug_" + v})), true)); dot("dotRun", "fail"); }
       if (job.kind === "proof") dot("dotProof", "fail");
       if (job.error.seam_log) parts.push(card("Seam check log", "", flush(seamLog(job.error.seam_log, []))));
       outBox.replaceChildren(...parts.map((p) => h("div", {style: "margin-top:14px"}, p)));
@@ -506,7 +508,8 @@ async function follow(id, msgBox, outBox, render) {
 const file = (id, name) => "/api/jobs/" + id + "/files/" + name;
 
 function renderRun(id, r, box) {
-  havePattern = true; patternIsSample = !!r.sample; patternIsFull = !!r.full; proofState();
+  // An edited sample is no longer the sample tee: the sample proof fits only the unedited one.
+  havePattern = true; patternIsSample = !!r.sample && !(r.edits && r.edits.length); patternIsFull = !!r.full; proofState();
   dot("dotRun", r.seams.every((s) => s.ok) ? "done" : "fail");
   $("lastRun").textContent = "Pattern " + id.slice(0, 8) + (r.edits && r.edits.length ? " (edited)" : "") + (r.synthetic ? " · sample tee" : "");
   const m = Object.fromEntries(r.measurements.map((x) => [x.key, x]));

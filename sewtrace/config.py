@@ -125,6 +125,7 @@ class LabelsConfig(_Strict):
     corner_window_mm: float = Field(gt=0)
     sleeve_corner_search_mm: float = Field(gt=0)
     sleeve_corner_min_deg: float = Field(gt=0, lt=180)
+    body_corner_min_gap_mm: float = Field(gt=0)
 
 
 class ContourConfig(_Strict):
@@ -160,6 +161,7 @@ class SeamConfig(_Strict):
     cap_ease_min_mm: float
     cap_ease_max_mm: float
     max_adjust_calls: int = Field(ge=0)
+    cap_style: Literal["flat", "curve"]  # "flat": the sleeve top is always drawn straight to the arm hole
     flat_cap_rise_mm: float = Field(ge=0)
     flat_cap_max_growth_frac: float = Field(gt=0, lt=1)
     measured_pair_max_fix_mm: float = Field(ge=0)

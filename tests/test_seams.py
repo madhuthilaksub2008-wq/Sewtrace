@@ -28,9 +28,21 @@ def tees(tmp_path_factory) -> list[Path]:
     return dirs
 
 
+def _with_style(client: MetaClient, style: str) -> MetaClient:
+    cfg = client.config
+    client.config = cfg.model_copy(update={"seam": cfg.seam.model_copy(update={"cap_style": style})})
+    return client
+
+
 @pytest.fixture
 def client(tmp_path) -> MetaClient:
-    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path))
+    """The Muse cap loop (REQ-SEW-02) runs with seam.cap_style "curve"; the default "flat" has its own tests."""
+    return _with_style(MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path)), "curve")
+
+
+@pytest.fixture
+def flat_client(tmp_path) -> MetaClient:
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path / "flat"))
 
 
 def _replace(spec: PanelSpec, panel: Panel) -> PanelSpec:
@@ -400,6 +412,7 @@ def test_req_rsn_03_rejected_request_stops_the_seam_loop(tees, tmp_path):
     transport = FakeTransport(HttpError(400, "unknown parameter"))
     real = MetaClient(Settings(api_key="k", mock=False, cache_dir=tmp_path / "cache", config=get_config(),
                                ledger_path=tmp_path / "ledger.csv"), transport=transport, sleep=lambda s: None)
+    _with_style(real, "curve")  # the flat style makes no model call to reject
     with pytest.raises(ApiRequestRejected):
         adjust_loop(real, _longer_front_armhole(truth_spec(tees[0])))
     assert len(transport.calls) == 1
@@ -508,3 +521,34 @@ def _shorter_cap(spec: PanelSpec, factor: float) -> PanelSpec:
     end = cap[0] + factor * (cap[-1] - cap[0])
     t = np.linspace(0.0, 1.0, 30)[:, None]
     return _replace(spec, replace_edges(sleeve, {"cap": cap[0] + t * (end - cap[0]), "underarm": end + t * (under[-1] - end)}))
+
+
+def test_req_sew_02_default_flat_style_draws_every_sleeve_top_straight(tees, flat_client):
+    """seam.cap_style "flat" (the user's decision, Nov 2): a sleeve top that already passes with a curve is
+    still drawn straight at the arm hole's length, by code, with no model call. Fold and cuff stay."""
+    assert get_config().seam.cap_style == "flat"
+    spec = truth_spec(tees[0])
+    assert all(s.ok for s in check_seams(spec))                               # the curve would pass as it is
+    out, log = adjust_loop(flat_client, spec)
+    assert flat_client.calls == 0 and log[-1]["failing"] == [] and log[-1]["applied"][0]["flat_cap"]
+    pts = out.panel("sleeve").edge_points("cap")
+    chord, rel = pts[-1] - pts[0], pts - pts[0]
+    assert (np.abs(chord[0] * rel[:, 1] - chord[1] * rel[:, 0]) / np.linalg.norm(chord)).max() < 0.5
+    assert np.allclose(out.panel("sleeve").edge_points("fold"), spec.panel("sleeve").edge_points("fold"))
+    again, log2 = adjust_loop(flat_client, out)                                    # already straight: left alone
+    assert len(log2) == 1 and np.allclose(again.panel("sleeve").edge_points("cap"), pts)
+
+
+def test_req_sew_02_flat_style_fixes_a_failing_cap_without_a_model_call(tees, flat_client):
+    out, log = adjust_loop(flat_client, _longer_front_armhole(truth_spec(tees[0])))
+    assert flat_client.calls == 0 and log[-1]["source"] == "fallback" and log[-1]["failing"] == []
+    assert log[-1]["applied"][0]["flat_cap"]
+
+
+def test_req_sew_04_flat_style_over_the_growth_limit_still_fails_loudly(tees, flat_client):
+    """A sleeve top that would have to change by more than seam.flat_cap_max_growth_frac is not drawn
+    straight (a wrong armhole, not a bunched seam): the seam fails loudly, no file is written."""
+    out, log = adjust_loop(flat_client, _longer_front_armhole(truth_spec(tees[0]), 80.0))
+    assert not any(c.get("flat_cap") for row in log for c in row["applied"] if isinstance(c, dict))
+    with pytest.raises(SeamCheckFailed):
+        require_seams_ok(out, log)

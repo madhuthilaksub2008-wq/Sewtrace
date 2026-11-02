@@ -239,9 +239,15 @@ def test_req_sew_04_edit_is_logged_in_the_seam_log_and_the_result(finished):
     assert iterations == sorted(set(iterations))
 
 
-def test_req_sew_04_a_shape_that_crosses_itself_is_refused(finished):
+def test_req_sew_04_a_shape_that_crosses_itself_is_refused(tmp_path):
+    # A curved sleeve top crosses its shortened underarm; the default straight top would not (seam.cap_style).
+    synth.make_tee(synth.TEES[0], tmp_path / "tee1", seed=0)
+    client = _client(tmp_path)
+    cfg = client.config
+    client.config = cfg.model_copy(update={"seam": cfg.seam.model_copy(update={"cap_style": "curve"})})
+    pipeline.run(tmp_path / "tee1", tmp_path / "out", client)
     with pytest.raises(EditRejected, match="sleeve panel"):
-        apply_proposal(finished["client"], finished["state"], _proposal("sleeve_length", -CFG.max_delta_mm))
+        apply_proposal(client, pipeline.load_state(tmp_path / "out"), _proposal("sleeve_length", -CFG.max_delta_mm))
 
 
 def test_req_sew_04_edit_never_exports_a_failing_seam_pair(finished, tmp_path):
@@ -515,7 +521,8 @@ def test_req_geo_04_provenance_of_a_plain_sample_run(finished):
     for k in MEASUREMENT_KEYS:
         assert result.provenance[k] == "from photo"
     assert result.inference == "model"
-    assert [result.provenance[k] for k in ("front_neck_depth", "back_neck_depth", "sleeve_cap")] == ["inferred by Muse"] * 3
+    assert [result.provenance[k] for k in ("front_neck_depth", "back_neck_depth")] == ["inferred by Muse"] * 2
+    assert result.provenance["sleeve_cap"] == "drafted"                       # drawn straight by code (cap_style)
     stored = json.loads((finished["dir"] / "measurements.json").read_text())
     assert stored["provenance"] == result.provenance
     assert {k: stored[k] for k in MEASUREMENT_KEYS} == result.measurements     # the six keys are unchanged
@@ -553,7 +560,7 @@ def test_req_rsn_03_provenance_when_the_fallback_neck_depth_was_used(finished, t
     result = pipeline.run(finished["tee"], tmp_path / "out", _client(tmp_path))
     assert result.inference == "fallback"
     assert result.provenance["front_neck_depth"] == "drafted" and result.provenance["back_neck_depth"] == "from photo"
-    assert result.provenance["sleeve_cap"] == "from photo"
+    assert result.provenance["sleeve_cap"] == "drafted"                       # drawn straight by code (cap_style)
 
 
 def test_req_sew_02_provenance_of_the_sleeve_cap_follows_the_last_cap_change():

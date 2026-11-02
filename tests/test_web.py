@@ -763,3 +763,18 @@ def test_req_out_01_full_zero_means_halves(client):
     res = client.post("/api/run", data={"sample": "1", "full": "0"})
     job = wait_job(client, res.json()["id"])
     assert job["state"] == "done" and job["result"]["full"] is False
+
+
+def test_req_api_04_sample_tee_runs_on_the_mock_in_real_mode(tmp_path, sample_root):
+    """The sample tee is drawn by the program: real SAM finds no "sleeve" in it. In REAL mode it still runs,
+    on its stored masks, with no paid call and no ledger row."""
+    client = make_client(tmp_path, sample_root, mock=False, api_key="test-key-not-real", password="pw")
+    client.auth = ("sewtrace", "pw")
+    job = run_sample(client)
+    assert job["state"] == "done", job
+    assert all(s["ok"] for s in job["result"]["seams"])
+    assert not (tmp_path / "ledger.csv").exists() or len((tmp_path / "ledger.csv").read_text().splitlines()) <= 1
+    assert not list((tmp_path / "cache").glob("real-*"))                    # nothing was sent to Meta
+    proof = client.post("/api/proof", data={"sample": "1"})
+    assert proof.status_code == 202, proof.text
+    assert wait_job(client, proof.json()["id"])["state"] == "done"

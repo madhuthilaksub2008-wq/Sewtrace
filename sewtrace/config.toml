@@ -193,6 +193,11 @@ corner_window_mm = 8.0
 # degrees) moves the extreme point up the cap by tens of mm; a crease mid-cap is further away than this.
 sleeve_corner_search_mm = 40.0
 sleeve_corner_min_deg = 15.0     # a turn below this is no corner: the seed is kept (a cap meeting the underarm nearly in line)
+# Half body corners (shoulder end, underarm, hem side) lie at least this far apart along the outline; of two
+# turns closer than this, the sharper is the corner. Real kid tee front (Nov 2): the shoulder end showed as
+# two turns 24 mm apart (a small step where the sleeve was cut off), and the second was taken for the
+# underarm: armhole 24 mm, side 470 mm. A kid's armhole is about 170 mm, its side about 300 mm.
+body_corner_min_gap_mm = 50.0
 
 [contour.armhole]          # default armhole between shoulder point and underarm point
 # A flat-lay photo hides the armhole under the sleeve, so only its two end points are
@@ -231,6 +236,10 @@ max_adjust_calls = 3       # REQ-SEW-02
 # seam, sleeve length 140, underarm seam 128, cuff 140: a cap rising about 12 mm. The photo showed the
 # sleeve top as 156 mm (the seam bunches when the sleeve is laid flat).
 flat_cap_rise_mm = 12.0
+# "flat" (the user's decision, Nov 1): every sleeve top is drawn straight and as long as the arm hole needs,
+# never a bulged curve, and the cap needs no model call. "curve": keep the photo's cap curve when its
+# handles can reach the arm hole (the model or the handle fix), flat only when no curve can.
+cap_style = "flat"
 # More growth than this is not a bunched seam but a wrong armhole (a misplaced armpit on a body photo):
 # the seam then fails loudly (REQ-SEW-04). Real kid tee: 156 -> 177 mm, 13.5 %.
 flat_cap_max_growth_frac = 0.2

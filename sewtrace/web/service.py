@@ -39,6 +39,9 @@ CUTPLAN_JSON = "cutplan_json"
 @dataclass
 class Context:
     client: MetaClient
+    # The sample tee and its proof are drawn by the program and come with their masks, so they always run
+    # on the mock (no paid call, in every mode). Real SAM finds no "sleeve" in the drawn sleeve photo.
+    sample_client: MetaClient | None = None
     last_spec: PanelSpec | None = None  # the pattern the proof is checked against
     last_sample_dir: Path | None = None  # set when the last run was the sample tee
     last_source: str | None = None  # "sample" or the id of the run that made ``last_spec``
@@ -77,20 +80,21 @@ def run_pattern(
     # A failed run must not leave the old pattern for a later proof check to use without a word.
     ctx.last_spec, ctx.last_sample_dir, ctx.last_source = None, None, None
     ctx.last_state, ctx.last_job = None, None
+    client = ctx.sample_client if sample and ctx.sample_client is not None else ctx.client
     job.step = "Running the pipeline: marker, SAM, Muse, seam check"
     try:
-        result = pipeline.run(garment_dir, job.dir / "out", ctx.client, overrides=overrides or None, full=full)
+        result = pipeline.run(garment_dir, job.dir / "out", client, overrides=overrides or None, full=full)
     finally:  # the debug images are written before the seam check, so a failed run still shows them
         for view in VIEWS:
             if (job.dir / "out_debug" / f"debug_{view}.png").is_file():
                 job.files[f"debug_{view}"] = job.dir / "out_debug" / f"debug_{view}.png"
 
     job.step = "Drawing the results"
-    prompts = ctx.client.config.sam.prompts
+    prompts = client.config.sam.prompts
     photos = pipeline.photo_set(garment_dir)
     for view, path in photos:
         prompt = prompts.sleeve if view == "sleeve" else prompts.garment
-        job.files[f"mask_{view}"] = mask_overlay(Path(path), ctx.client.segment(path, prompt), job.dir / f"mask_{view}.jpg")
+        job.files[f"mask_{view}"] = mask_overlay(Path(path), client.segment(path, prompt), job.dir / f"mask_{view}.jpg")
     job.files["preview"] = render_preview(unfold_spec(result.spec) if full else result.spec, job.dir / "preview.png")
     debug = [v for v in VIEWS if f"debug_{v}" in job.files]
     for name, filename in DOWNLOADS.items():
@@ -201,7 +205,7 @@ def run_proof(ctx: Context, job: Job, photo: Path | None) -> dict:
     spec = ctx.last_spec
     if spec is None:
         raise ValueError("proof: there is no pattern yet. Run a pattern first, then check the proof.")
-    calls_before = ctx.client.calls
+    client = ctx.client
     if photo is None:
         if ctx.last_sample_dir is None:
             raise ValueError("proof: the sample proof fits the sample tee only. Run the sample tee first.")
@@ -209,10 +213,12 @@ def run_proof(ctx: Context, job: Job, photo: Path | None) -> dict:
         shutil.copy(ctx.last_sample_dir / "truth.json", job.dir / "truth.json")
         mock_proof.make_proof(job.dir, scale=SAMPLE_PROOF_SCALE)
         photo = job.dir / "proof.jpg"
+        client = ctx.sample_client or ctx.client
+    calls_before = client.calls
     job.step = "Reading the marker"
     homography = photo_homography(pipeline.load_photo("proof", photo), "proof photo")
     job.step = "Measuring the gap: SAM paper and t-shirt masks"
-    result = verify_proof(photo, ctx.client, homography, spec=spec)
+    result = verify_proof(photo, client, homography, spec=spec)
     job.files["proof_overlay"] = overlay_image(photo, result, homography, job.dir / "proof_overlay.png")
     neck = None
     if result.neck_mean_mm is not None:
@@ -222,4 +228,4 @@ def run_proof(ctx: Context, job: Job, photo: Path | None) -> dict:
     return {"mean_mm": result.mean_mm, "max_mm": result.max_mm, "p95_mm": result.p95_mm,
             "pct_within": 100 * result.frac_within_tol, "tol_mm": result.tol_mm, "neck": neck,
             "side_offset_mm": result.side_offset_mm,
-            "overlay": "proof_overlay", "spec_source": ctx.last_source, "model_calls": ctx.client.calls - calls_before}
+            "overlay": "proof_overlay", "spec_source": ctx.last_source, "model_calls": client.calls - calls_before}
