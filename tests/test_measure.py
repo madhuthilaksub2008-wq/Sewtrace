@@ -1,14 +1,6 @@
 import numpy as np
 import pytest
-from test_contour import (  # noqa: F401  (shared session fixtures)
-    TEE_NAMES,
-    extract,
-    halves,
-    rotate_photo,
-    session_client,
-    tees,
-    truth_homography,
-)
+from test_contour import TEE_NAMES, extract, halves, rotate_photo, session_client, tees, truth_homography  # noqa: F401  (shared session fixtures)
 
 from sewtrace.mock import synth
 from sewtrace.types import MEASUREMENT_KEYS, Edge, Outline
