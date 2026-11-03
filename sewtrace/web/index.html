@@ -912,7 +912,8 @@ function patternStudio(spec) {
   for (const p of spec.panels) {
     const pts = p.outline_mm, n = pts.length, pad = p.seam_allowance_mm;
     const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
-    const x0 = Math.min(...xs), y0 = Math.min(...ys), w = Math.max(...xs) - x0 + 2 * pad, hh = Math.max(...ys) - y0 + 2 * pad;
+    const mirror = !!p.on_fold, xmax = Math.max(...xs);
+    const x0 = mirror ? -xmax : Math.min(...xs), y0 = Math.min(...ys), w = xmax - x0 + 2 * pad, hh = Math.max(...ys) - y0 + 2 * pad;
     const area = pts.reduce((s, q, i) => s + q[0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * q[1], 0);
     const sign = area > 0 ? 1 : -1;
     const rng = (e) => { const r = []; for (let i = e.start; ; i = (i + 1) % n) { r.push(i); if (i === e.end % n && r.length > 1) break; if (r.length > n) break; } return r; };
@@ -924,29 +925,32 @@ function patternStudio(spec) {
       return [q[0] + sign * ty / L * pad, q[1] - sign * tx / L * pad];
     });
     const g = el("g", {transform: `translate(${cx - x0 + pad} ${-y0 + pad})`, style: "cursor:move"});
+    // An on-fold piece is drawn whole: the half is built once and mirrored with <use>, so layer and seam highlights apply to both sides.
+    const hid = "half" + pieces.length, hg = el("g", {id: hid}, g);
+    if (mirror) el("use", {href: "#" + hid, transform: "scale(-1 1)"}, g);
     const path = (arr, close) => "M" + arr.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join("L") + (close ? "Z" : "");
     const layers = {};
-    layers.cut = el("path", {d: path(cut, true), fill: "#E9E2D2", "fill-opacity": ".85", stroke: "#182026", "stroke-width": "1.4", "vector-effect": "non-scaling-stroke"}, g);
-    layers.stitch = el("path", {d: path(pts, true), fill: "none", stroke: "#737C82", "stroke-width": "1", "stroke-dasharray": "6 4", "vector-effect": "non-scaling-stroke"}, g);
+    layers.cut = el("path", {d: path(cut, true), fill: "#E9E2D2", "fill-opacity": ".85", stroke: "#182026", "stroke-width": "1.4", "vector-effect": "non-scaling-stroke"}, hg);
+    layers.stitch = el("path", {d: path(pts, true), fill: "none", stroke: "#737C82", "stroke-width": "1", "stroke-dasharray": "6 4", "vector-effect": "non-scaling-stroke"}, hg);
     const edges = [];
     for (const e of p.edges) {
       if (e.name === "fold") continue;
       const idx = rng(e), key = p.name + "." + e.name, line = idx.map((i) => pts[i]);
       let len = 0; for (let i = 1; i < line.length; i++) len += dist(line[i - 1], line[i]);
-      const node = el("path", {d: path(line, false), fill: "none", "stroke-width": "3.2", "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke"}, g);
+      const node = el("path", {d: path(line, false), fill: "none", "stroke-width": "3.2", "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke"}, hg);
       const mid = line[Math.floor(line.length / 2)];
       const txt = el("text", {x: mid[0], y: mid[1], "font-size": "16", "text-anchor": "middle", fill: "#182026", stroke: "#fff", "stroke-width": "4", "paint-order": "stroke"}, g);
       txt.textContent = len.toFixed(1);
       edges.push({key, node, txt, seam: edgeSeam[key]});
     }
-    const notches = (p.notches || []).map((q) => el("circle", {cx: q[0], cy: q[1], r: "3.2", fill: "#B53A2E"}, g));
-    const bx = (Math.min(...xs) + Math.max(...xs)) / 2, by = (Math.min(...ys) + Math.max(...ys)) / 2, vert = p.grain === "vertical";
-    const gr = el("g", {stroke: "#182026", "stroke-width": "1.3", "vector-effect": "non-scaling-stroke"}, g);
+    const notches = (p.notches || []).map((q) => el("circle", {cx: q[0], cy: q[1], r: "3.2", fill: "#B53A2E"}, hg));
+    const bx = mirror ? 0 : (Math.min(...xs) + Math.max(...xs)) / 2, by = (Math.min(...ys) + Math.max(...ys)) / 2, vert = p.grain === "vertical";
+    const gr = el("g", {stroke: "#182026", "stroke-width": "1.3", "vector-effect": "non-scaling-stroke"}, hg);
     const gl = (vert ? hh : w) * 0.2;
     el("path", {d: vert ? `M${bx} ${by - gl}V${by + gl}M${bx - 5} ${by - gl + 9}L${bx} ${by - gl}L${bx + 5} ${by - gl + 9}M${bx - 5} ${by + gl - 9}L${bx} ${by + gl}L${bx + 5} ${by + gl - 9}`
       : `M${bx - gl} ${by}H${bx + gl}M${bx - gl + 9} ${by - 5}L${bx - gl} ${by}L${bx - gl + 9} ${by + 5}M${bx + gl - 9} ${by - 5}L${bx + gl} ${by}L${bx + gl - 9} ${by + 5}`, fill: "none", "vector-effect": "non-scaling-stroke"}, gr);
     layers.grain = gr;
-    const name = el("text", {x: bx, y: by + (vert ? gl + 22 : 24), "font-size": "15", "text-anchor": "middle", fill: "#182026", "font-weight": "600"}, g);
+    const name = el("text", {x: bx, y: by + (vert ? gl + 22 : 24), "font-size": "20", "text-anchor": "middle", fill: "#182026", "font-weight": "600"}, g);
     name.textContent = p.name + " : cut " + p.cut;
     pieces.push({p, g, layers, edges, notches, ox: cx - x0 + pad, oy: -y0 + pad, w, h: hh});
     cx += w + 60; maxH = Math.max(maxH, hh);
@@ -1061,7 +1065,7 @@ function patternStudio(spec) {
   return [h("div", {class: "row", style: "justify-content:space-between;margin-bottom:10px"}, layerRow, h("div", {class: "row"}, play, reset)),
     h("div", {class: "studio"}, svg), cap,
     h("div", {class: "seamchips"}, ...chips),
-    h("p", {class: "small"}, "Drawn from spec.json. Half pieces are shown on the fold; the cut line is the stitch line plus the seam allowance. Edge lengths are the lengths checked in the seam table.")];
+    h("p", {class: "small"}, "Drawn from spec.json. On-fold pieces are shown whole (the half is mirrored); the cut line is the stitch line plus the seam allowance. Edge lengths are the lengths checked in the seam table.")];
 }
 
 // Guided tour: scrolls through the page, plays the sewing order and the cutter, and types a Co-pilot request.
