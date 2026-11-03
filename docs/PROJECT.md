@@ -229,3 +229,12 @@ python -m sewtrace.cli run data/synth/tee1 # pattern files in out/tee1
 python -m sewtrace.cli eval              # out/eval/results.md
 pytest
 ```
+
+## Status of open items (moved from README)
+
+- **Day 1 test:** run on Oct 30 (one real SAM call and one real Spark call, synthetic photo). Model IDs, parameters, token counts and cost are measured and set in config. The Meta Usage page comparison is pending (user).
+- **Real eval:** pending. It needs the real captures and the tape-measure ground truth (SPEC 10.3). One real tee (dreampets) has run end to end with no ground truth.
+- **SAM score field:** SAM sends no confidence (Day 1). The largest mask wins and the minimum score check is skipped with a warning. The SPEC conflict (REQ-SEG-03, REQ-SEG-04) needs a user decision.
+- **SAM edge position:** on the synthetic photo the SAM outline is 1 to 2.5 mm inside the true edge. Not yet measured on real fabric.
+- **Real model calls:** 1 of the 20 needed for REQ-RSN-06 are done. No truncation so far.
+- **Open decisions:** Spark or Wonder (D-01), seam tolerances (D-02), sleeve cap ease (D-03), seam allowance (D-04).

@@ -5,6 +5,14 @@ Three photos of a kid's t-shirt in, a 1:1 sewing pattern out, checked to sew tog
 Sewtrace is built for the Meta Global AI Developer Hackathon 2026 (Indie track).
 It uses only Meta models, through the Meta Model API.
 
+| The t-shirt (front photo) | The pattern Sewtrace made |
+| --- | --- |
+| <img src="docs/img/dreampets-front.jpg" width="380" alt="A pink child's t-shirt laid flat next to a printed marker"> | <img src="docs/img/dreampets-pattern.png" width="380" alt="Front, back and sleeve pattern panels with seam pairs marked"> |
+
+[Watch the demo (about 2 minutes, no sound)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, cut plan and a Co-pilot edit.
+The recorded run on this t-shirt: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 seam pairs matching.
+The photo backgrounds in the demo and in the image above were replaced with a plain backdrop for presentation. The pattern image and the numbers below come from the original photos, taken on a floor.
+
 ## What it does
 
 You lay a t-shirt flat next to a printed 100 mm marker. You take a front photo, a back photo and a sleeve photo.
@@ -38,6 +46,9 @@ The models feed each other two times (SPEC sections 6 and 15).
 
 Without SAM, there is no outline. Without Muse Spark, there is no hidden geometry and no seam repair.
 Every model call goes through one client, `sewtrace/api/client.py`.
+
+A run is cheap: about $0.21 in the worst case (SPEC section 8.1), $0.027 on the real run above.
+Sewtrace also says no. A bad photo is refused with the reason and how to retake it, and a pattern that fails a seam pair is never exported.
 
 ## Results
 
@@ -74,12 +85,37 @@ The shoulder width error is the weak point on hard tees.
 
 - A perfect paper gives a mean edge gap of 0.08 mm (tee1) and 0.04 mm (tee3).
 - Tests check that a paper that is 2% too big, or shifted by 4 mm, reads within 0.5 mm of the exact gap.
-- Sewtrace refuses a paper fold that bows 8 mm or more. It asks you to take the proof photo again. Bows of 3 and 5 mm are absorbed. Tested on folds of 320, 480 and 700 mm, at bows of 3, 5, 8, 12 mm (and 8 mm bowed the other way). The limit is a share of the fold length (`fold_bow_limit_frac`, to be confirmed).
+- Sewtrace refuses a paper fold that bows 8 mm or more. It asks you to take the proof photo again. Bows of 3 and 5 mm are absorbed. Tested on folds of 320, 480 and 700 mm, at bows of 3, 5, 8, 12 mm (and 8 mm bowed the other way). The limit is a share of the fold length (`fold_bow_limit_frac` in `config.toml`).
 
-**Real t-shirt results: pending (Oct 31).** No real t-shirt has been measured yet.
+**Real t-shirt run (pink child's tee, three phone photos, REAL mode).**
+
+| Item | Result |
+| --- | --- |
+| Models | SAM 3.1 (3 masks), Muse Spark 1.3 (1 call) |
+| Cost | $0.027 (the SAM answers were already cached) |
+| Seam check | First pass failed 3 of 4 pairs (side seam off by 29.8 mm). One pair fix and the final check pass: all 4 pairs match |
+| Chest width | 378.8 mm (averaged front/back) |
+| Body length | 515.8 mm |
+| Shoulder width | 360.8 mm (averaged front/back) |
+| Sleeve length | 133.1 mm |
+| Neck width | 184.0 mm |
+
+The photos were not laid straight (shoulder points 9 mm and 15 mm apart). Sewtrace said so and averaged both sides.
+SAM sent no confidence score, so the minimum-score check was skipped.
+There is no tape-measure ground truth for this tee yet, so there is no error figure for real fabric. The synthetic tables above do not cover it.
 Real SAM edges, fabric that is not flat and lens distortion will add error.
 
 ## Quick start (mock mode, no key, no cost)
+
+Fastest way to see it:
+
+```bash
+pip install -e '.[dev]' && cp .env.example .env   # no key needed: mock mode is the default
+sewtrace serve                    # then open http://127.0.0.1:8000 and run the sample tee
+sewtrace demo play tee1           # or play the recorded demo, no network
+```
+
+All the steps, one by one:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
@@ -130,7 +166,7 @@ REAL mode makes paid calls. Read `docs/CAPTURE.md` before you take photos.
 
 1. Install the SAM decoder: `pip install -e '.[real]'`.
 2. Put your key in the environment: `export META_API_KEY=...`. Never put it in a file in git.
-3. Set `SEWTRACE_MOCK=0`.
+3. Set `SEWTRACE_MOCK=0`. To use the web page in REAL mode, also set `SEWTRACE_WEB_PASSWORD` (the page asks for it; see `.env.example`).
 4. Run the Day 1 test on one photo: `sewtrace day1 <photo> --yes-spend`. It makes two paid calls.
 5. Run a garment: `sewtrace run data/raw/<tee>`.
 6. Check the ledger total in `data/ledger.csv` before you run again.
@@ -178,11 +214,6 @@ The Day 1 test replaces that estimate with a measured value.
 - `docs/PROJECT.md`: the project brief.
 - `docs/CONTRIBUTING.md`: module rules and mock mode.
 
-## Status of open items
+## Status
 
-- **Day 1 test:** run on Oct 30 (one real SAM call and one real Spark call, synthetic photo). Model IDs, parameters, token counts and cost are measured and set in config. The Meta Usage page comparison is pending (user). See `docs/PROJECT.md`.
-- **Real eval:** pending (Oct 31). It needs the real captures and the tape-measure ground truth (SPEC 10.3).
-- **SAM score field:** SAM sends no confidence (Day 1). The largest mask wins and the minimum score check is skipped with a warning. The SPEC conflict (REQ-SEG-03, REQ-SEG-04) needs a user decision.
-- **SAM edge position:** on the synthetic photo the SAM outline is 1 to 2.5 mm inside the true edge. Not yet measured on real fabric (Oct 31).
-- **Real model calls:** 1 of the 20 needed for REQ-RSN-06 are done. No truncation so far.
-- **Open decisions:** Spark or Wonder (D-01), seam tolerances (D-02), sleeve cap ease (D-03), seam allowance (D-04).
+Open items, decisions and the Day 1 results are in `docs/PROJECT.md`.
