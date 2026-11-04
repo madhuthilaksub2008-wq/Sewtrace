@@ -5,8 +5,7 @@
 > together.
 
 Meta Global AI Developer Hackathon 2026, Indie Developer track, theme *Push the
-Frontier*: turn a physical object into a manufacturable file. Team: Madhu (dev lead, on camera, submits) and Bala (marker, PDF and
-DXF modules; capture, proof, script, video).
+Frontier*: turn a physical object into a manufacturable file. Team: Madhu.
 
 ## Key dates
 

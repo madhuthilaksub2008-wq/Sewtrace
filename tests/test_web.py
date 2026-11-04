@@ -222,10 +222,10 @@ def test_password_is_required_and_checked_when_set(tmp_path, sample_root):
         res = client.get(path)
         assert res.status_code == 401 and "Basic" in res.headers["www-authenticate"]
     assert client.post("/api/run", data={"sample": "1"}).status_code == 401
-    assert client.get("/", headers=auth("bala", "wrong")).status_code == 401
-    assert client.get("/", headers=auth("bala", "s3cret")).status_code == 401
+    assert client.get("/", headers=auth("user", "wrong")).status_code == 401
+    assert client.get("/", headers=auth("user", "s3cret")).status_code == 401
     assert client.get("/", headers={"Authorization": "Basic !!!"}).status_code == 401
-    assert client.get("/", headers=auth("bala", "s3cret é")).status_code == 200
+    assert client.get("/", headers=auth("user", "s3cret é")).status_code == 200
     assert client.get("/healthz").status_code == 200
     assert not password_ok(None, "x") and not password_ok("Bearer abc", "x")
 

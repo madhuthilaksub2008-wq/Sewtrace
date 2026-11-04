@@ -127,7 +127,7 @@ Cached answers cost nothing to replay, and they let OFFLINE mode work after a re
 
 ## Share from your computer with a Cloudflare tunnel
 
-The quickest way to let someone else (for example Bala) use the page that runs on your computer. No
+The quickest way to let someone else (for example a teammate) use the page that runs on your computer. No
 account, no domain and no open port are needed. The link is HTTPS.
 
 1. Install cloudflared once (Windows, in PowerShell): `winget install --id Cloudflare.cloudflared`.

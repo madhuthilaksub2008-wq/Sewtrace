@@ -1,4 +1,4 @@
-"""T22: SVG and DXF cut files at 1:1. Owner: Bala."""
+"""T22: SVG and DXF cut files at 1:1. Owner: Madhu."""
 
 from __future__ import annotations
 
