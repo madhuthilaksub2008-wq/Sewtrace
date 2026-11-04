@@ -1,0 +1,328 @@
+# The one Sewtrace config file (REQ-API-05, REQ-SEG-02, SPEC 7.6.1).
+# Prices are USD per 1M tokens, or per image where noted. SPEC 4.2 note 2:
+# the Meta pricing page is the authority. Change a value here, not in code.
+
+[api]
+base_url = "https://api.meta.ai/v1"
+timeout_s = 300.0          # one request (REQ-API-07). Day 1 (Oct 30) measured 5.6 s for 1,036 output tokens
+                           # (about 185 tokens/s). max_tokens=32000 at that rate is about 175 s, so 300 s
+                           # leaves margin. Not part of any cache key.
+max_tries = 3              # tries per call on HTTP 429 or 5xx (REQ-API-06)
+backoff_s = 2.0            # wait before try n+1 is backoff_s * 2 ** (n - 1)
+budget_limit_usd = 140.0   # SPEC 8.3 "any day": stop all paid calls (REQ-API-04, C-01)
+ledger_path = "data/ledger.csv"  # relative to the repo root; outside cache/ so clearing the cache or
+                           # changing SEWTRACE_CACHE_DIR cannot reset the total (REQ-API-04, C-01)
+offline = false            # true, or SEWTRACE_OFFLINE=1: cache only, no mock, no network
+
+[models.sam]
+id = "sam-3.1"             # MEASURED Day 1 (Oct 30): "sam-3.1" works. Not "sam-3-1" (SPEC 4.2 note 1)
+price_per_image_usd = 0.0025
+
+[models.spark]
+id = "muse-spark-1.3"
+input_per_m_usd = 1.25
+cached_input_per_m_usd = 0.15
+output_per_m_usd = 4.25
+
+[models.spark_contributor]  # trains on your data: synthetic photos only (SPEC 4.3, item 5)
+id = "muse-spark-1.3-contributor"
+input_per_m_usd = 0.10
+cached_input_per_m_usd = 0.10  # SPEC 4.2 lists no cached price; use the input price
+output_per_m_usd = 0.20
+
+[models.wonder]
+id = "muse-wonder-1.0"
+input_per_m_usd = 4.00
+cached_input_per_m_usd = 0.20
+output_per_m_usd = 20.00
+
+[models.image]
+id = "muse-image-1.0"
+price_per_image_usd = 0.01
+
+[reasoning]
+model = "spark"            # key under [models]: spark, spark_contributor or wonder
+# SPEC 8.1 prices the worst case at "high". Allowed: minimal low medium high xhigh max.
+# "none" is rejected: the API answers HTTP 400 (SPEC 4.3, item 6).
+effort = "high"
+# SPEC 8.1 assumes about 15,000 output tokens (reasoning plus JSON) for a panel call.
+# 32,000 gives about 2x headroom so the JSON is not cut off (REQ-RSN-06). Worst case
+# for one Spark call at this limit is about $0.14 output cost, which the budget guard
+# uses as its estimate.
+max_tokens = 32000
+# NOT IN THE COOKBOOK: the name of the output limit parameter. Allowed: max_tokens,
+# max_completion_tokens. MEASURED Day 1 (Oct 30): the API accepts max_tokens.
+max_tokens_param = "max_tokens"
+# Sent as prompt_cache_key (cookbook 05_prompt_caching). One fixed value, so calls that share
+# the same developer message prefix hit the same cache.
+prompt_cache_key = "sewtrace-v1"
+upload_jpeg_quality = 95   # Muse is sent the decoded pixels re-encoded at this quality. Separate from [sam],
+                           # so tuning SAM does not invalidate the Muse cache keys.
+max_upload_px = 1568       # MEASURED Day 1 (Oct 30): about 2,809 image tokens at this size (REQ-API-02, SPEC 8.1, 13). Long side of a photo sent to Muse. The
+                           # decoded pixels are shrunk (INTER_AREA) to this before the JPEG re-encode, to keep
+                           # the image token count bounded for a 12 to 48 MP phone photo.
+                           # Part of the cache key.
+# MEASURED Day 1 (Oct 30): about 2,809 image tokens per photo sent at 1568 px (SPEC 8.1 assumed 1,500).
+# For the pre-call budget estimate only. Not part of any cache key.
+est_image_tokens = 2800
+
+[sam]
+min_score = 0.5            # DAY 1 (Oct 30): SAM sends NO confidence (mask or box), so this is currently unused. Still
+                           # to confirm (REQ-SEG-04, open conflict with REQ-SEG-03): stop when the best mask
+                           # confidence (0..1, the mask record's "c" field) is lower. Without one the check is skipped.
+upload_jpeg_quality = 95   # SAM is sent the decoded pixels (EXIF applied), re-encoded as JPEG (after the max_upload_px downscale).
+                           # PNG would be 3 to 5 times larger for a phone photo (payload and upload time), and
+                           # SAM is billed per image, so size does not change the price. Q95 adds no visible edge.
+max_upload_px = 2048       # MEASURED Day 1 (Oct 30): SAM answers in the frame it was sent, no server resize at 2048 px (REQ-API-02, SPEC 13). Long side of a photo sent to SAM; larger photos
+                           # are shrunk (INTER_AREA) first. The masks and boxes come back in that smaller frame and are
+                           # scaled back to the original photo, so the mm geometry is unchanged. Part of the cache key.
+box_overhang_tol_px = 1.0  # a SAM box that passes the image by more than this means a frame mismatch: error
+
+[sam.prompts]              # REQ-SEG-02
+garment = "t-shirt"        # front, back and the t-shirt in the proof photo
+sleeve = "sleeve"
+paper = "paper"
+
+[contour.mask]             # REQ-SEG-03: mask cleanup before the outline is traced
+# Holes and edge nicks up to this size are closed and whiskers up to this size are removed. The
+# largest connected piece is kept. A disc of this radius changes a 90 degree corner by at most
+# 0.41 times the radius, so keep it small. Rounded to whole pixels, at least 1 px.
+cleanup_mm = 0.5
+
+[contour.joints]           # REQ-GEO-01: shoulder and underarm points of a whole t-shirt outline
+# Corners are found where the outline turns over a chord of corner_window_mm either side. A sleeve
+# or neck corner rounded to a radius of 15 mm still turns 23 to 60 degrees over 8 mm (the neck is
+# the weakest, its scoop turns the other way next to it); a wave in the edge turns at most 22 and
+# 13 or less away from a corner. Measured on the hard synthetic set (sewtrace/mock/synth_hard.py),
+# 20 photos. NEEDS REAL PHOTOS to confirm.
+corner_window_mm = 8.0
+# Underarm points are found over their own, longer chord. A real underarm is rounded: on a kid's
+# tee photographed on Oct 31 the right one turned about 50 degrees over 25 mm, which the 8 mm
+# chord split into two peaks of 27 and 22 degrees, under the 30 degree minimum. Over 24 mm the same
+# underarm turns 40 degrees and the other 51; the next concave bend (neck, edge wave) turns 12 to
+# 23 on three real photos. The minimum is unchanged. NEEDS REAL PHOTOS.
+underarm_window_mm = 24.0
+underarm_min_deg = 30.0    # the two sharpest concave corners must turn at least this much
+corner_min_deg = 10.0      # convex corners (sleeve hem, neck) are picked among the peaks above this
+# The six convex corners are chosen as three on each side of the middle of the arc between the
+# underarm points, in the order sleeve hem bottom, sleeve hem top, neck corner. The two sides must
+# agree in what each can measure alone, by at most:
+#   pair_tol_hem_mm     sleeve length (underarm to the outer cuff corner). 0 to 23 mm on the 40 hard
+#                       photos (10 tees, front and back, with and without lens and curl). Unchanged.
+#   cuff_width_diff_mm  cuff width, from the outer to the inner cuff corner. Evidence is thin:
+#                       three real photos, all with the sleeves laid by hand. Two accepted ones
+#                       (5.jpg, 6.jpg) have cuffs 6 mm apart. 1.jpg has cuffs 138 and 225 mm wide
+#                       (87 mm apart; its right sleeve runs to the image edge) and must be refused.
+#                       Until Oct 31 the limit was 70 mm from 1.5 times 46 mm, a difference that
+#                       came from a wiggle taken for the cuff top on 1.jpg, not from its cuff
+#                       corners. 70 mm is kept: it refuses the 87 mm photo with a margin of 17 mm
+#                       and leaves room for sleeves laid unevenly. Any value from 6 to 87 mm fits
+#                       these photos: the choice is a guess. NEEDS REAL PHOTOS.
+#   pair_tol_neck_mm    length from the inner cuff corner to the neck corner (sleeve top and
+#                       shoulder seam). It was the offset of the neck pair from mirrored about the
+#                       middle of the arc, which also held the sleeve length and cuff width
+#                       differences (7 to 27 mm on the hard set, 1.5 times the largest = 40). The
+#                       value is unchanged: the new measure holds less. NEEDS REAL PHOTOS.
+pair_tol_hem_mm = 25.0
+cuff_width_diff_mm = 70.0
+pair_tol_neck_mm = 40.0
+# The shoulder point is the bend of the sleeve top into the shoulder seam. The two shoulders of a
+# tee are about as far from the neck, so their bends are fitted together, and the two seam lengths
+# may differ by shoulder_symmetry_mm (hard set: 1 to 3 mm of left/right offset). A faint bend
+# (a few degrees) cannot be placed: edge waves of 1 to 2 mm move it by tens of mm.
+# Plateau gate: take the pairs of bend positions whose joint cost (the one that is fitted, both
+# shoulders together) is within near_best times the best cost. When their shoulder seam lengths
+# spread over more than shoulder_plateau_mm, the photo is refused.
+# NEEDS REAL PHOTOS. Measured on the hard set (10 tees, front and back, no lens, no curl), joint
+# plateau in mm / worst shoulder point error in mm: 11 photos at 40 mm or less (18 to 37.5 mm) have
+# errors of 0.2 to 9.9 mm. 9 photos above 40 mm (43 to 166.5 mm) have errors of 2.0 to 99 mm: 6 of
+# them 2.0 to 10.2 mm (tee1 front, tee2 front, tee4, tee9) and 3 of them 16.2 mm or more (tee1 back,
+# tee6). The plateau does not separate good from bad photos cleanly, so 40 mm is a judgement. The old
+# per-side gate refused photos with one clear and one faint shoulder (side plateau up to 132 mm,
+# joint plateau 28 to 35 mm, error 3.3 to 8.6 mm).
+shoulder_symmetry_mm = 8.0
+shoulder_plateau_mm = 40.0
+# Sleeve seams from SAM's "sleeve" masks (Nov 1). A SAM seam is used only if:
+# - its two shoulder seams differ by at most sam_shoulder_symmetry_mm, and its two armhole seams
+#   (shoulder end to underarm end) by at most sam_armhole_symmetry_mm. A sleeve mask that stops short
+#   of its seam breaks one of these (synthetic: one mask 25% short gives shoulder seams 24 to 45 mm
+#   apart). Real kid tee laid by hand, correct seams: shoulder seams 8 mm apart (front) and 15 mm
+#   (back), armholes 1 mm apart. The synthetic tees (0 to 1 mm) are no guide to the limit.
+# - each shoulder seam is at most sam_shoulder_share_max of the top edge from the neck corner to the
+#   cuff top corner. This catches two masks that stop equally short. Correct seams: 0.33 to 0.37 on
+#   the synthetic tees, 0.44 to 0.46 on the real kid tee. Both masks 35% short: 0.57 (synthetic).
+#   A tee with very short sleeves or dropped shoulders has a larger share; the run logs the values.
+# - its shoulder end is at least sam_shoulder_min_from_cuff_mm from the cuff top corner.
+# - its underarm end is within sam_seam_max_off_mm of the outline's own underarm corner. A gross check
+#   only: on a soft, rounded underarm that corner was 37 mm from the real seam end (kid tee, back photo).
+# One real tee so far. NEEDS REAL PHOTOS.
+sam_seam_max_off_mm = 60.0
+sam_armhole_symmetry_mm = 15.0
+sam_shoulder_symmetry_mm = 22.0
+sam_shoulder_share_max = 0.55
+sam_shoulder_min_from_cuff_mm = 15.0
+near_best = 1.25           # a bend whose joint fit is within this factor of the best fit counts as possible
+# A corner's rounding ends where the outline turns less than rounding_deg over a 4 mm chord. The
+# straight-line fits for the shoulder point start rounding_margin_mm past that.
+rounding_deg = 12.0
+rounding_margin_mm = 2.0
+# The underarm tangents start past the rounding of the underarm (up to 25 mm radius on the hard
+# synthetic tees). The turning over a 4 mm chord peaks at the corner at about
+# underarm_rounding_deg_mm / (length of the rounding in mm). Measured peaks on the hard tees: 47 to 75
+# degrees for a sharp corner, 21 to 27 for 15 mm radius, 15 to 22 for 25 mm. 400 fits those ranges.
+# NEEDS REAL PHOTOS.
+underarm_rounding_deg_mm = 400.0
+# Both tangents are fitted over underarm_fit_mm past the start (less where a corner is nearer). A short
+# fit far from the corner tilts under 1 mm mask waves: 20 mm gave errors of 8 to 10 mm at 6 to 10 mm radius.
+# Measured on 5 hard tees x radius 0 to 25: underarm error at most 6 mm, armhole depth at most 5.6 mm.
+# 50 mm stays clear of the sleeve hem corner (kid sleeve undersides are 61 to 65 mm; the fit stops 2 mm
+# short of the next corner). The hard seam test is not monotonic in this value (it failed at 30, 40, 45).
+underarm_fit_mm = 50.0
+# A peak of at least this many degrees is a sharp corner (47 to 75 measured): the tangents start 1 mm
+# from it, without the trim the formula above would give.
+underarm_sharp_deg = 50.0
+
+[contour.labels]          # REQ-GEO-01: corners of the half outline that mark the edges
+# Own key: edge labelling used 4 mm before the hard set. The hard set needs 8 mm: with 4 mm the
+# seam check failed on hard tee3 (armhole 334 mm against a sleeve cap of 95 mm), so an edge was
+# labelled at the wrong corner. With 8 mm both hard tees pass (tests/test_hard.py). The clean set is
+# checked by the full test suite and the eval. NEEDS REAL PHOTOS.
+corner_window_mm = 8.0
+# Half sleeve corners: the outline's extreme points (cap end = most top-right, and so on) are only seeds,
+# refined to the sharpest turn within this distance along the outline. A steep cap end (more than 45
+# degrees) moves the extreme point up the cap by tens of mm; a crease mid-cap is further away than this.
+sleeve_corner_search_mm = 40.0
+sleeve_corner_min_deg = 15.0     # a turn below this is no corner: the seed is kept (a cap meeting the underarm nearly in line)
+# Half body corners (shoulder end, underarm, hem side) lie at least this far apart along the outline; of two
+# turns closer than this, the sharper is the corner. Real kid tee front (Nov 2): the shoulder end showed as
+# two turns 24 mm apart (a small step where the sleeve was cut off), and the second was taken for the
+# underarm: armhole 24 mm, side 470 mm. A kid's armhole is about 170 mm, its side about 300 mm.
+body_corner_min_gap_mm = 50.0
+
+[contour.armhole]          # default armhole between shoulder point and underarm point
+# A flat-lay photo hides the armhole under the sleeve, so only its two end points are
+# visible. The default is a cubic Bezier that leaves the shoulder seam and meets the
+# side seam at right angles. Handles are fractions of the end-point distance. The
+# model is meant to infer the real shape (REQ-RSN-04, fix item 4).
+shoulder_handle = 0.45
+underarm_handle = 0.12
+
+[inference]                # REQ-RSN-04, REQ-RSN-05
+measured_tol_mm = 0.5      # a measured edge may not move more than this after inference
+front_neck_depth_min_mm = 15.0   # accepted range for the inferred depths (neck point to fold)
+front_neck_depth_max_mm = 120.0
+back_neck_depth_min_mm = 5.0
+back_neck_depth_max_mm = 60.0
+# The front outline in a flat-lay photo follows the BACK neckline (the back panel shows through
+# the neck opening), so the front neck depth is not measured. NEEDS USER CONFIRMATION (both values):
+# an answer is rejected when front depth < back depth + front_minus_back_min_mm. The fallback (no
+# usable model answer, REQ-RSN-03) uses back depth + fallback_front_minus_back_mm. The five
+# synthetic tees differ by 38 to 50 mm. 10 mm only rejects a front that is plainly not deeper;
+# 40 mm is the middle of that spread and well inside the accepted front range.
+front_minus_back_min_mm = 10.0
+fallback_front_minus_back_mm = 40.0
+
+[seam]                     # SPEC 7.6.1, mm
+shoulder_tol_mm = 1.0
+side_tol_mm = 1.0
+underarm_tol_mm = 1.0
+cap_ease_min_mm = 0.0      # open decision D-03
+cap_ease_max_mm = 12.0
+max_adjust_calls = 3       # REQ-SEW-02
+# When the sleeve photo's top edge (the sleeve hole) is shorter than the arm hole on the body, the code fix
+# draws the sleeve's top edge straight, rising flat_cap_rise_mm from the fold to the underarm, and widens
+# the sleeve along it until the sleeve hole matches the arm hole; the underarm seam runs straight to the
+# cuff. A T-shirt has a flat cap. Real kid tee (tape, Nov 1): arm hole 165 mm straight / 170 mm along the
+# seam, sleeve length 140, underarm seam 128, cuff 140: a cap rising about 12 mm. The photo showed the
+# sleeve top as 156 mm (the seam bunches when the sleeve is laid flat).
+flat_cap_rise_mm = 12.0
+# "flat" (the user's decision, Nov 1): every sleeve top is drawn straight and as long as the arm hole needs,
+# never a bulged curve, and the cap needs no model call. "curve": keep the photo's cap curve when its
+# handles can reach the arm hole (the model or the handle fix), flat only when no curve can.
+cap_style = "flat"
+# More growth than this is not a bunched seam but a wrong armhole (a misplaced armpit on a body photo):
+# the seam then fails loudly (REQ-SEW-04). Real kid tee: 156 -> 177 mm, 13.5 %.
+flat_cap_max_growth_frac = 0.2
+# Shoulder and side pairs are the same seam measured in two photos. A code fix sets both edges to
+# their mean length when the pair differs by at most this much, and the run prints what it picked
+# so the user can correct it with a tape measure (sewtrace run --set side=305). Above it the run
+# fails loudly. D-02, decided by the user on Nov 1: pick one value, show it, let the user correct
+# it. 4 mm (the old value) refused every real photo set: a hand-laid kid tee gave the same side
+# seam as 296 mm on the front photo and 327 mm on the back, and shoulders 108 and 114 mm.
+measured_pair_max_fix_mm = 40.0
+# A user's own length (--set, or the page's review table) must lie within this of the shorter and
+# longer photo value; anything further is refused as a likely typing slip (30 typed for 30.5 cm).
+user_length_max_off_mm = 60.0
+# The pair fix moves only the free end of an edge (the hem corner for side, the shoulder point for
+# shoulder). Above this shift the review says to check the debug images: a misplaced armpit or hem
+# in one photo is the likely cause, and changing the length does not move it.
+pair_fix_warn_shift_mm = 5.0
+
+[pattern]
+seam_allowance_mm = 10.0   # REQ-OUT-03
+neckband_allowance_mm = 6.0
+chest_drop_mm = 25.0       # chest is measured this far below the underarm points (SPEC 10.2)
+
+[proof]
+gap_tolerance_mm = 3.0     # REQ-VER-03
+# Information check, not a gate: the measured neck gap should equal (front depth - back depth)
+# of the pattern. A difference above this is flagged. 5 mm is the gap tolerance plus the 2 mm
+# tape repeat limit of SPEC 10.3, since the neck gap is a mean over a curve the mask rounds.
+# NEEDS USER CONFIRMATION.
+neck_gap_tolerance_mm = 5.0
+# The paper is a half panel with its fold on the t-shirt centre (SPEC 9.4). The fold
+# edge is not a cut edge, so it is left out of the gap, and each paper point is
+# compared with the body edge on its own side of the fold only.
+fold_straight_tol_mm = 2.0 # a paper edge is "straight" when it stays this close to a line
+fold_band_mm = 6.0         # width: paper points this close to the fold line are fold, not cut edge. Covers a mask wobble or a bulge of 3 to 4 mm
+fold_end_margin_mm = 6.0   # length cut off each end of the fold, so the cut edges (neck, hem) that start there keep their gap
+fold_parallel_deg = 30.0   # in the end margin, a paper point within the band is fold when the outline there runs within this angle of the fold line (a bowed fold), not across it (neck, hem)
+fold_bow_window_mm = 10.0  # a paper fold that bows out of the band: outline this close to the fold line (but outside the band) is counted, except the first window length at each end of the fold, where the neck and hem edges leave it
+fold_bow_limit_frac = 0.02  # the paper fold is "not straight" when more than this fraction of the fold length is counted outline. Tested on 320, 480 and 700 mm folds: a 3 or 5 mm bow counts 0, an 8 mm bow counts 15 to 95 mm (0.05 to 0.14 of the fold). The window above is short so the short folds of kid tees still count the bow. NEEDS USER CONFIRMATION.
+side_offset_band_frac = 0.8 # info line "same gap along the side": the side points are those this far out or more, as a fraction of the farthest point
+side_offset_min_mm = 2.0   # info line "same gap along the side": the side gap must be at least this big
+side_offset_spread_mm = 1.0 # ... and most side points (next line) must be within this of the median side gap
+side_offset_min_share = 0.8 # ... at least this share of the side points
+side_offset_min_cover = 0.5 # ... over at least this fraction of the fold length
+fold_ransac_trials = 200   # random line candidates for the fold fit
+fold_min_inset_mm = 30.0   # the fold edge lies at least this far inside the t-shirt edge
+fold_exclude_mm = 1.5      # paper points this close to the fold line are always left out (the exact-gap oracle, mock/proof.py, uses it too)
+centre_margin_mm = 10.0    # body edge this far past the fold line still counts as the same side
+
+[marker]
+tolerance_mm = 1.0          # REQ-SCL-03: reject a photo whose marker error is more than this
+min_grid_found = 0.9       # REQ-SCL-03: reject a photo if fewer of the marker grid edge points are found
+error_percentile = 95      # marker error is this percentile of the grid residuals
+
+[measure]
+neck_fit_mm = 12.0         # arc length from the neck point over which the neck curve is fitted
+neck_search_mm = 15.0      # how far from the neck end of the shoulder line the neck point is searched
+
+[ground_truth]
+repeat_tol_mm = 2.0        # SPEC 10.3: two tape readings that differ more need a third
+
+[edits]                    # sewtrace edit and the page's Co-pilot box: one Spark call per request
+max_delta_mm = 80.0        # a body, chest or sleeve change larger than this is refused (about 1/5 of a kid's tee)
+scale_min_pct = 90.0       # overall size, 100 = unchanged
+scale_max_pct = 115.0
+max_text_chars = 300       # the request text is sent to the model; a longer text is refused
+mock_a_bit_mm = 10.0       # mock mode only: "a bit longer" with no number
+mock_size_step_pct = 5.0   # mock mode only: "size up" with no number
+
+[web]                      # sewtrace serve: the one-page test UI (SPEC 6)
+max_upload_mb = 20         # per photo; a larger file is refused before any run
+job_retention_min = 120    # an uploaded job folder is deleted this long after it was created
+port = 8000
+max_pixels = 50_000_000    # per photo, width x height read from the file header before any decode. Phone
+                           # photos are 12 to 48 MP; 50 MP leaves headroom and one decoded BGR copy is 150 MB.
+auth_fail_delay_s = 1.0    # a wrong password waits this long before the 401. The wait slows one guess at a time.
+                           # The long random password is the real defence.
+
+[manufacture]              # cut plan and illustrative cutter profile. A sample profile, not a real machine.
+roll_width_mm = 1500       # usable roll width, selvedge to selvedge
+margin_mm = 15             # kept free along the selvedges and at both ends of the used length
+gap_mm = 10                # kept free between two pieces
+cut_speed_mm_s = 150       # illustrative cutter profile
+travel_speed_mm_s = 400    # illustrative cutter profile
+pierce_s = 0.8             # illustrative cutter profile: tool down at the start of each piece
+thread_factor = 2.5        # thread length per seam length: lockstitch rule of thumb

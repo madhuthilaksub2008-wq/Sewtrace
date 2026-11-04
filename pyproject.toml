@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sewtrace"
+version = "0.1.0"
+description = "Three photos of a flat garment to a 1:1 sewing pattern, using SAM 3.1 and Muse models."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+  "numpy",
+  "scipy",
+  "opencv-contrib-python-headless==5.0.0.93",
+  "shapely>=2",
+  "pydantic>=2",
+  "reportlab",
+  "svgwrite",
+  "ezdxf",
+  "fastapi",
+  "uvicorn",
+  "python-multipart",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff"]
+# Meta's official decoder for SAM output. Needed only for real SAM calls (REQ-SEG-01).
+# Pinned to the version Day 1 ran against (0.1.0).
+real = ["meta_sam_parser==0.1.0"]
+
+[project.scripts]
+sewtrace = "sewtrace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sewtrace*"]
+
+[tool.setuptools.package-data]
+sewtrace = ["config.toml", "web/index.html", "web/demo.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["data", "out", "demo", ".claude", "cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501: 44 existing lines are 121 to 181 characters long (long messages, asserts, test names).
+# Wrapping them is a style change with no effect on behaviour, so it is left out of this step.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Keep short import lists on one line, as the code already does.
+split-on-trailing-comma = false
+
+[tool.ruff.lint.per-file-ignores]
+# test_measure imports pytest fixtures from test_contour and uses them as test arguments.
+"tests/test_measure.py" = ["F811"]

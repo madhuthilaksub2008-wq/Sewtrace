@@ -1,0 +1,723 @@
+"""Hard synthetic tees (sewtrace/mock/synth_hard.py): the faults of real photos.
+
+Targets below were chosen from measured results on the hard set (REQ-GEO-01, REQ-SCL-03,
+REQ-SEG-03, REQ-VER-02), with margin. They are NEW targets for the hard set only. No clean-set
+tolerance was changed.
+"""
+
+import json
+import shutil
+from dataclasses import replace
+
+import cv2
+import numpy as np
+import pytest
+import shapely
+
+from sewtrace.api.client import CacheMiss, MetaClient
+from sewtrace.config import Settings, get_config
+from sewtrace.mock import proof, synth, synth_hard
+from sewtrace.pipeline import ContourFailed, body_without_sleeves, run
+from sewtrace.types import MEASUREMENT_KEYS
+from sewtrace.vision import contour
+from sewtrace.vision.marker import Homography, photo_homography
+
+PX = synth.PX_PER_MM
+
+
+def _tee(index: int) -> synth.TeeParams:
+    base = synth.TEES[index % 5]
+    return synth.TeeParams(**{**base.__dict__, "name": f"tee{index + 1}"})
+
+
+def _joints(p: synth.TeeParams, hp: synth_hard.HardParams, noisy: bool = True, underarm_radius_mm: float = 0.0):
+    """Shoulder and underarm points found on the rasterised hard silhouette, and the true ones.
+    ``underarm_radius_mm`` rounds both underarms of the silhouette (a sharp one when 0)."""
+    v = synth_hard.hard_views(p, hp)["front"]
+    ring = v["garment"]
+    if underarm_radius_mm:
+        arm = synth.armhole_curve(p)
+        e = hp.asymmetry_mm / p.chest_half
+        ring = synth_hard._dense(ring)
+        for target in (arm[-1] + v["origin"], arm[-1] * [-(1 + e), 1] + v["origin"]):
+            ring = synth_hard.round_corner(ring, target, underarm_radius_mm)
+    x0, y0 = ring.min(axis=0) - 30
+    shape = (int((ring[:, 1].max() - y0 + 30) * PX), int((ring[:, 0].max() - x0 + 30) * PX))
+    mask = np.zeros(shape, np.uint8)
+    cv2.fillPoly(mask, [np.round((ring - [x0, y0]) * PX).astype(np.int32)], 255)
+    if noisy:
+        mask = synth_hard.noisy_mask(mask, hp, np.random.default_rng(3))
+    hom = Homography(np.array([[1 / PX, 0, x0], [0, 1 / PX, y0], [0, 0, 1.0]]))
+    outline = contour.smooth_outline(contour.mask_to_outline(mask > 0, hom))
+    e = hp.asymmetry_mm / p.chest_half
+    arm = synth.armhole_curve(p)
+    origin = v["origin"]
+    true_shoulder = np.array([arm[0], arm[0] * [-(1 + e), 1]]) + origin
+    true_underarm = np.array([arm[-1], arm[-1] * [-(1 + e), 1]]) + origin
+    return outline, true_shoulder, true_underarm
+
+
+def _nearest_errors(found: np.ndarray, truth: np.ndarray) -> list[float]:
+    return [float(np.linalg.norm(found - t, axis=1).min()) for t in truth]
+
+
+def _calm(index: int, **kw) -> synth_hard.HardParams:
+    """Hard params of tee ``index`` with the main outline faults set by ``kw``."""
+    return replace(synth_hard.hard_params(index), wave_mm=1.0, asymmetry_mm=2.0, **kw)
+
+
+def test_req_geo_01_clean_mask_drops_strays_fills_holes_and_nicks():
+    """REQ-GEO-01: a SAM mask with holes, stray blobs and an edge nick gives one clean piece."""
+    mask = np.zeros((300, 300), np.uint8)
+    mask[60:240, 60:240] = 1
+    mask[100:106, 100:106] = 0           # hole
+    mask[58:62, 140:143] = 0             # nick in the top edge
+    mask[10:14, 10:14] = 1               # stray blob
+    mask[280:282, 20:22] = 1             # stray pixels
+    mask[150:153, 238:246] = 1           # whisker on the right edge
+    out = contour.clean_mask(mask, px_per_mm=3.0)
+    assert out[100:106, 100:106].all()
+    assert not out[10:14, 10:14].any() and not out[280:282, 20:22].any()
+    assert not out[150:153, 242:246].any()
+    n, _ = cv2.connectedComponents(out)
+    assert n == 2  # background and one piece
+    assert abs(int(out.sum()) - 180 * 180) < 0.03 * 180 * 180
+
+
+def test_req_geo_01_clean_mask_bridges_a_one_pixel_crack_across_a_sleeve_seam():
+    """REQ-GEO-01: a crack of 1 px between the body and a sleeve must not cut the sleeve off.
+    The old order (largest piece, then close) kept the body only."""
+    mask = np.zeros((300, 400), np.uint8)
+    mask[60:240, 60:240] = 1             # body
+    mask[100:200, 241:330] = 1           # sleeve, one pixel column of gap (x = 240)
+    out = contour.clean_mask(mask, px_per_mm=3.0)
+    assert out[150, 300] == 1
+    n, _ = cv2.connectedComponents(out)
+    assert n == 2
+
+
+def test_req_geo_01_proof_masks_are_cleaned_like_the_photo_masks():
+    """REQ-GEO-01, REQ-VER-02: the proof's mask outline goes through clean_mask too: a nick in
+    the edge of the mask is not an inward corner of the outline."""
+    from sewtrace.vision.verify import mask_outline_mm
+
+    mask = np.zeros((300, 300), np.uint8)
+    mask[60:240, 60:240] = 1
+    mask[58:64, 140:144] = 0             # nick, 4 px wide and 4 px deep
+    hom = Homography(np.diag([1 / 4, 1 / 4, 1.0]))   # 4 px per mm: a 2 px cleanup radius
+    ring = mask_outline_mm(mask > 0, hom)
+    in_nick = ring[(np.abs(ring[:, 0] - 142 / 4) < 0.2) & (ring[:, 1] < 40)]   # top edge above the middle of the nick
+    assert len(in_nick) > 0 and in_nick[:, 1].max() < 15.6   # edge at y = 60 px = 15 mm; the raw nick floor is at 16
+
+
+def test_req_geo_01_hard_truth_matches_clean_truth_without_faults():
+    """REQ-GEO-01: with no wave and no offset the hard truth is the clean truth, so the
+    hard measurements are read the same way as the clean ones."""
+    p = _tee(2)
+    hp = replace(synth_hard.hard_params(2), wave_mm=0.0, asymmetry_mm=0.0)
+    views = synth_hard.hard_views(p, hp)
+    sleeve, se = synth.sleeve_half(p)
+    got = synth_hard.hard_measurements(
+        p, views["front"]["half"], views["front"]["edges"], views["back"]["half"], views["back"]["edges"], sleeve, se)
+    want = synth.measurements(p)
+    for k in MEASUREMENT_KEYS:
+        assert got[k] == pytest.approx(want[k], abs=1e-6), k
+
+
+@pytest.mark.parametrize("radius", [3.0, 15.0])
+def test_req_geo_01_joint_finder_tolerates_rounded_corners(radius):
+    """REQ-GEO-01: sleeve hem corners rounded to 3 and 15 mm, noisy mask: underarm points
+    within 3 mm and shoulder points within 15 mm (kink 10 degrees, measured 12)."""
+    p = _tee(2)
+    hp = _calm(2, kink_deg=(10.0, 10.0), corner_radius_mm=radius)
+    outline, shoulder, underarm = _joints(p, hp)
+    found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
+    assert max(_nearest_errors(found_underarm, underarm)) < 3.0
+    assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+
+
+@pytest.mark.parametrize("radius", [15.0, 25.0])
+def test_req_geo_01_rounded_underarms_are_found(radius):
+    """REQ-GEO-01: both underarms rounded to 15 and 25 mm. A real kid's tee had one that turned 50
+    degrees over 25 mm: the 8 mm chord saw two peaks of 27 and 22 degrees (minimum 30) and found no
+    underarm. The point is the tangent corner of the lines fitted past the rounding, so it is near the
+    true (sharp) corner, not inside it by the radius as with lines fitted on the arc (measured then:
+    underarm off by 8.8 mm at 15 and 16.6 mm at 25, armhole depth off by 7 and 13 mm). Measured now:
+    underarm off by 1.3 and 6.0 mm, armhole depth by 1.1 and 5.2 mm. The 6 mm is the 25 mm radius of
+    tee 1: the limit is 6.5 mm (see the sweep test below)."""
+    p = _tee(0)
+    hp = _calm(0, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
+    outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
+    found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
+    assert max(_nearest_errors(found_underarm, underarm)) < 6.5
+    assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+    for u, s in zip(underarm, shoulder):
+        fu = found_underarm[np.argmin(np.linalg.norm(found_underarm - u, axis=1))]
+        fs = found_shoulder[np.argmin(np.linalg.norm(found_shoulder - s, axis=1))]
+        assert abs((fu[1] - fs[1]) - (u[1] - s[1])) < 6.0   # armhole depth
+
+
+def test_req_geo_01_underarm_sweep_over_five_tees_and_radii():
+    """REQ-GEO-01: underarm point and armhole depth errors on the 5 hard tees with both underarms
+    rounded to 0, 3, 6, 10, 15 and 25 mm (1 mm waves, noisy mask). The sweep chose the estimator: a
+    20 mm tangent fit past the rounding tilted under the waves, with errors of 8 to 10 mm at 6 to 10 mm
+    radius; the 50 mm fit and no trim for a sharp corner gave (measured):
+    underarm max 6.0 mm, mean 2.89; depth max 5.6 mm, mean 2.12; sharp corners (0 and 3 mm): underarm
+    mean 2.0, depth mean 1.8. Depth means are over all points."""
+    errors: dict[float, list[tuple[float, list[float]]]] = {}
+    for tee in range(5):
+        p = _tee(tee)
+        hp = _calm(tee, kink_deg=(10.0, 10.0), corner_radius_mm=8.0)
+        for radius in (0.0, 3.0, 6.0, 10.0, 15.0, 25.0):
+            outline, shoulder, underarm = _joints(p, hp, underarm_radius_mm=radius)
+            found_shoulder, found_underarm = contour.find_sleeve_joints(outline)
+            depths = []
+            for u, s in zip(underarm, shoulder):
+                fu = found_underarm[np.argmin(np.linalg.norm(found_underarm - u, axis=1))]
+                fs = found_shoulder[np.argmin(np.linalg.norm(found_shoulder - s, axis=1))]
+                depths.append(abs((fu[1] - fs[1]) - (u[1] - s[1])))
+            errors.setdefault(radius, []).append((max(_nearest_errors(found_underarm, underarm)), depths))
+    every = [e for row in errors.values() for e in row]
+    sharp = errors[0.0] + errors[3.0]
+    assert max(e[0] for e in every) < 6.5
+    assert max(max(e[1]) for e in every) < 6.0
+    assert np.mean([e[0] for e in every]) < 3.2
+    assert np.mean([d for e in every for d in e[1]]) < 2.6
+    assert np.mean([e[0] for e in sharp]) < 2.2
+    assert np.mean([d for e in sharp for d in e[1]]) < 3.0
+
+
+def test_req_geo_01_faint_kink_is_refused_with_a_clear_error():
+    """REQ-GEO-01: a 3 degree kink with waves on both sides cannot place the shoulder point: the error
+    says so and what to do, instead of a guess that is tens of mm out."""
+    p = _tee(0)
+    hp = _calm(0, kink_deg=(3.0, 3.0), corner_radius_mm=10.0)
+    outline, _, _ = _joints(p, hp)
+    with pytest.raises(ValueError, match=r"shoulder point is not clear.*Put each sleeve at an angle down from the shoulder"):
+        contour.find_sleeve_joints(outline)
+
+
+@pytest.mark.parametrize("kinks", [(3.0, 10.0), (10.0, 3.0)])
+def test_req_geo_01_one_faint_shoulder_is_placed_by_the_clear_one(kinks):
+    """REQ-GEO-01: a tee with one faint (3 degree) and one clear (10 degree) shoulder is accepted
+    and both shoulder points are near the truth. Measured: the faint side alone has a plateau of 54
+    and 132 mm (the old per-side gate refused), the joint fit one of 28 and 35 mm; shoulder error
+    3.3 and 8.6 mm."""
+    p = _tee(1)
+    hp = _calm(1, kink_deg=kinks, corner_radius_mm=8.0)
+    outline, shoulder, _ = _joints(p, hp)
+    found_shoulder, _ = contour.find_sleeve_joints(outline)
+    assert max(_nearest_errors(found_shoulder, shoulder)) < 15.0
+
+
+def test_req_geo_01_two_faint_shoulders_are_refused():
+    """REQ-GEO-01: both shoulders at 3 degrees: the joint fit is a plateau of 117 mm, refused
+    (a truly ambiguous tee), with the action to take."""
+    outline, _, _ = _joints(_tee(1), _calm(1, kink_deg=(3.0, 3.0), corner_radius_mm=8.0))
+    with pytest.raises(contour.ShoulderPointNotClear, match=r"Put each sleeve at an angle down from the shoulder.*\(spread \d+ mm, limit 40 mm\)") as exc:
+        contour.find_sleeve_joints(outline)
+    # The measured plateau is kept, so refusals on real photos can recalibrate the limit.
+    assert exc.value.spread_mm > exc.value.limit_mm == get_config().contour.joints.shoulder_plateau_mm
+
+
+def _peak_scores(positions: list[int], n: int = 600, weak: tuple[int, ...] = ()) -> np.ndarray:
+    score = np.zeros(n)
+    score[positions] = 40.0
+    score[list(weak)] = 12.0
+    return score
+
+
+# The production suppression radius: three windows of contour.joints.corner_window_mm, in samples.
+RADIUS = 3 * 8
+OTHER, ARC = 100, 500
+
+
+def _six(arc_positions: list[int], weak: tuple[int, ...] = ()):
+    """_six_corners() on corners given as positions along an arc of 500 mm that starts at sample 100."""
+    score = _peak_scores([OTHER + a for a in arc_positions], weak=tuple(OTHER + w for w in weak))
+    return contour._six_corners(score, OTHER, OTHER + ARC, radius=RADIUS)
+
+
+def _six_scored(corners: dict[int, float]):
+    """_six_corners() on corners given as {position along the arc: score in degrees}."""
+    score = np.zeros(OTHER + ARC + 100)
+    for position, deg in corners.items():
+        score[OTHER + position] = deg
+    return [c - OTHER for c in contour._six_corners(score, OTHER, OTHER + ARC, radius=RADIUS)]
+
+
+@pytest.mark.parametrize("shift, ok", [(30, True), (55, False)])
+def test_req_geo_01_neck_corner_may_be_further_off_than_the_sleeve_lengths(shift, ok):
+    """REQ-GEO-01: six corners on an arc of 500 mm with sleeves of the same length and the same cuff
+    width. The left neck corner is ``shift`` mm nearer its cuff, so the two runs from cuff top to neck
+    corner differ by ``shift``: 40 mm is allowed (sleeve length 25 mm), 55 mm is not."""
+    tol = get_config().contour.joints
+    assert tol.pair_tol_hem_mm < 30 < tol.pair_tol_neck_mm < 55   # the two cases sit between the tolerances
+    positions = [30, 120, 210 - shift, 290, 380, 470]
+    if ok:
+        assert _six(positions) == [OTHER + a for a in positions]
+        return
+    with pytest.raises(contour.CornersNotMirrored, match="shoulders are not about equally long") as exc:
+        _six(positions)
+    assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
+    assert exc.value.offset_mm == pytest.approx(shift, abs=1.0)
+
+
+def test_req_geo_01_sleeves_laid_with_cuffs_of_different_widths_are_accepted():
+    """REQ-GEO-01: a real photo had cuffs 46 mm apart in width (138 and 92 mm) with the sleeve lengths
+    16 mm apart. Here the left cuff is 100 mm wide and the right one 55 mm, with a weak wiggle in the
+    left cuff that must not be taken. The old rule (cuff top pair mirrored within 25 mm) refused it."""
+    tol = get_config().contour.joints
+    positions = [30, 130, 200, 345, 415, 470]    # cuff widths 100 and 55, tops of 70 and 70 mm
+    assert tol.pair_tol_hem_mm < 45 < tol.cuff_width_diff_mm
+    assert _six(positions, weak=(80,)) == [OTHER + a for a in positions]
+
+
+def test_req_geo_01_a_cuff_top_is_never_taken_from_the_other_side_of_the_arc():
+    """REQ-GEO-01: four strong corners on one side of the middle of the arc and two on the other. The
+    six are three and three in order, so the cuff top of the right side is never one of the left, and
+    the error names the measure that fails (the neck pair is 105 mm out), not a count."""
+    tol = get_config().contour.joints
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six([30, 130, 200, 240, 415, 470])
+    assert exc.value.stage == "neck" and exc.value.limit_mm == tol.pair_tol_neck_mm
+    assert exc.value.offset_mm == pytest.approx(105, abs=1.0)
+
+
+def test_req_geo_01_uneven_sleeves_that_move_the_middle_of_the_arc_are_accepted():
+    """REQ-GEO-01: corners [50, 170, 255, 365, 415, 470] on an arc of 500 mm: sleeve lengths 20 mm apart
+    (limit 25), cuff widths 65 mm (limit 70), cuff top to neck 35 mm (limit 40). The middle of the arc
+    (250) has only two corners on its left, so a split there found 2 and 4 and refused a valid layout."""
+    tol = get_config().contour.joints
+    assert 20 < tol.pair_tol_hem_mm and 65 < tol.cuff_width_diff_mm and 35 < tol.pair_tol_neck_mm
+    positions = [50, 170, 255, 365, 415, 470]
+    assert _six(positions) == [OTHER + a for a in positions]
+
+
+def test_req_geo_01_a_wiggle_is_not_taken_for_a_cuff_top_when_the_true_corners_fail_a_limit():
+    """REQ-GEO-01: the true cuff tops (40 degrees) are 140 and 60 mm wide on the two sleeves, 80 mm apart
+    (limit 70). A wiggle of 20 degrees at 110 mm on the left sleeve would give widths 80 and 60, within
+    every limit. It is not taken: a real photo (1.jpg) had its outer sleeve corners (47 and 46 degrees)
+    skipped for wiggles of 24 and 25 degrees, and its cuffs, 138 and 225 mm wide, were accepted."""
+    tol = get_config().contour.joints
+    corners = {30: 40.0, 110: 20.0, 170: 40.0, 250: 40.0, 300: 40.0, 410: 40.0, 470: 40.0}
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six_scored(corners)
+    assert exc.value.stage == "cuff_top" and exc.value.limit_mm == tol.cuff_width_diff_mm
+    assert exc.value.offset_mm == pytest.approx(80, abs=1.0)
+    corners[110] = 0.0   # without the wiggle the same corners fail alike: the wiggle only offered a way out
+    with pytest.raises(contour.CornersNotMirrored):
+        _six_scored(corners)
+
+
+def test_req_geo_01_the_stronger_of_two_candidates_is_the_cuff_top_when_both_fit():
+    """REQ-GEO-01: a rounded true cuff top (14 degrees) and a wiggle of 30 degrees 35 mm further up the
+    sleeve top. Both choices are within every limit, and the evidence for the wiggle is stronger, so
+    the wiggle is taken: the cuff top is then 35 mm out along the sleeve top, which the shoulder fit
+    (it starts past the rounding of the cuff top) absorbs. Pinned so that a change is a decision."""
+    corners = {30: 40.0, 120: 14.0, 155: 30.0, 210: 40.0, 290: 40.0, 380: 40.0, 470: 40.0}
+    assert _six_scored(corners) == [30, 155, 210, 290, 380, 470]
+
+
+def test_req_geo_01_uneven_cuff_widths_say_what_did_not_match_and_by_how_much():
+    """REQ-GEO-01: the cuffs are 120 and 40 mm wide, 80 mm apart (limit 70 mm), sleeves of the same
+    length. The error names the measure, the difference and the action, and keeps the numbers."""
+    tol = get_config().contour.joints
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six([30, 150, 210, 370, 430, 470])
+    err = exc.value
+    assert err.stage == "cuff_top" and err.limit_mm == tol.cuff_width_diff_mm
+    assert err.offset_mm == pytest.approx(80, abs=1.0)
+    assert err.log_details() == "stage cuff_top, offset 80.0 mm, limit 70.0 mm"
+    text = str(err)
+    assert "cuffs are not about equally wide" in text and "80 mm (limit 70 mm)" in text
+    assert "same angle down from the shoulder" in text and "marker away" in text and "marker paper" not in text
+    assert "whole t-shirt" not in text
+
+
+def test_req_geo_01_the_report_names_the_measure_that_is_furthest_over_its_limit():
+    """REQ-GEO-01: the right sleeve is 52 mm shorter (limit 25 mm); the cuffs (52 mm apart, limit 70 mm) and
+    the shoulders (0 mm) are fine. The report names the sleeve length, with the measured difference."""
+    with pytest.raises(contour.CornersNotMirrored) as exc:
+        _six([30, 120, 210, 290, 380, 418])
+    assert exc.value.stage == "cuff_bottom" and exc.value.offset_mm == pytest.approx(52, abs=1.0)
+    assert "sleeves are not about equally long" in str(exc.value)
+
+
+def test_req_geo_01_fewer_than_six_corners_keep_the_mask_hint():
+    """REQ-GEO-01: with too few corners the cause may be the mask, so the hint stays and the error is
+    a plain ValueError."""
+    other, arc = 100, 300
+    score = _peak_scores([other + a for a in (20, 100, 200, 284)])
+    with pytest.raises(ValueError, match="4 convex corners.*whole t-shirt") as exc:
+        contour._six_corners(score, other, other + arc, radius=RADIUS)
+    assert not isinstance(exc.value, contour.CornersNotMirrored)
+
+
+def test_req_geo_01_whole_garment_with_no_underarm_is_an_error():
+    """REQ-GEO-01: a plain rectangle has no sleeves: a clear error, not a wrong answer."""
+    pts = np.array([[0, 0], [200, 0], [200, 300], [0, 300]], float)
+    with pytest.raises(ValueError, match="underarm"):
+        contour.find_sleeve_joints(contour.Outline.from_array(contour._resample_closed(pts, 1.0)))
+
+
+# ---- generated hard tees ------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def hard_dir(tmp_path_factory):
+    """tee3 and tee8 (kink 10 degrees on a side, wavy, rounded, noisy) and tee1 (kink 3).
+    Lens distortion and marker curl are off here: they scale the whole photo as seen from the
+    marker, which no outline code can undo (see test_req_scl_03_*)."""
+    out = tmp_path_factory.mktemp("hard")
+    for i in (0, 2, 7):
+        hp = replace(synth_hard.hard_params(i), barrel_k1=0.0, curl_mm=0.0)
+        synth.make_tee_hard(_tee(i), out / f"tee{i + 1}", i, hp)
+    return out
+
+
+@pytest.fixture
+def client(tmp_path):
+    return MetaClient(Settings(api_key="", mock=True, cache_dir=tmp_path))
+
+
+def test_req_geo_01_hard_truth_records_its_faults(hard_dir):
+    """REQ-GEO-01: truth.json says synthetic and records every fault; masks carry strays and holes."""
+    truth = json.loads((hard_dir / "tee3" / "truth.json").read_text())
+    assert truth["synthetic"] is True
+    hard = truth["hard"]
+    assert 3 <= hard["kink_deg"][0] <= 10 and 3 <= hard["corner_radius_mm"] <= 15
+    assert 0.5 <= hard["wave_mm"] <= 2 and 1 <= hard["asymmetry_mm"] <= 3
+    mask = cv2.imread(str(hard_dir / "tee3" / "front.masks" / "t-shirt.png"), cv2.IMREAD_GRAYSCALE) > 127
+    n, _ = cv2.connectedComponents(mask.astype(np.uint8))
+    assert n > 3  # background, the tee and at least two stray blobs
+
+
+@pytest.mark.parametrize("name", ["tee3", "tee8"])
+def test_req_geo_04_hard_tee_measurements_and_seams(hard_dir, client, tmp_path, name):
+    """REQ-GEO-01, REQ-GEO-04, REQ-SEW-04: hard tees with a clear shoulder kink run end to end.
+    New hard-set targets, from measured errors: every measurement within 2.5 mm, the shoulder
+    width within 10 mm (the shoulder point is read to about +/-5 mm at a 10 degree kink, doubled
+    across the width), mean error under 2.5 mm, all seams pass."""
+    result = run(hard_dir / name, tmp_path / "out", client)
+    truth = json.loads((hard_dir / name / "truth.json").read_text())["measurements"]
+    errors = {k: abs(result.measurements[k] - truth[k]) for k in MEASUREMENT_KEYS}
+    print(name, {k: round(v, 2) for k, v in errors.items()})
+    for k, err in errors.items():
+        assert err < (10.0 if k == "shoulder_width" else 2.5), k
+    assert sum(errors.values()) / len(errors) < 2.5
+    assert all(s.ok for s in result.spec.seams)
+
+
+def test_req_geo_01_hard_tee_with_faint_kink_names_the_photo(hard_dir, client, tmp_path):
+    """REQ-GEO-01: tee1 (3 degree kink) is refused with ContourFailed that names the photo, says
+    what to do and names the photo to take again."""
+    with pytest.raises(ContourFailed, match=r"front photo .*not clear.*Put each sleeve at an angle down from the shoulder.*spread \d+ mm, limit \d+ mm.*Take the front photo again"):
+        run(hard_dir / "tee1", tmp_path / "out", client)
+
+
+def test_req_scl_03_marker_passes_on_hard_photos_with_lens_and_curl(tmp_path):
+    """REQ-SCL-03 (documents a gap): with barrel distortion and a curled marker card the marker
+    check passes (error well under 1 mm), yet the scale at the garment is off by 0.3 to 2 percent,
+    because the marker error is a residual inside the marker. The check cannot see this."""
+    hp = replace(synth_hard.hard_params(2), curl_mm=1.5)
+    truth = synth.make_tee_hard(_tee(2), tmp_path / "tee3", 2, hp)
+    photo = truth["photos"]["front"]
+    hom = photo_homography(cv2.imread(str(tmp_path / "tee3" / "front.jpg")))
+    assert hom.marker_error_mm < 0.2
+    ring = np.asarray(photo["regions_mm"]["garment"])
+    px = cv2.perspectiveTransform(ring[None], np.asarray(photo["world_mm_to_photo_px"]))[0]
+    px = synth_hard.distort_points(px, *photo["size_px"], hp.barrel_k1)
+    mm = hom.px_to_mm(px)
+    want = ring - np.asarray(photo["marker_corners_mm"][0])
+    span_error = np.ptp(mm[:, 0]) / np.ptp(want[:, 0]) - 1
+    assert 0.003 < abs(span_error) < 0.03
+
+
+@pytest.mark.parametrize("angle_deg", [11.0, 17.0, 29.0])
+def test_req_ver_02_expected_gap_leaves_out_every_point_nearest_the_armhole(angle_deg):
+    """REQ-VER-02: a paper point whose nearest body edge is the armhole ties with it (the same
+    distance, up to float noise). The tie must go to 'armhole' every time. Before, it went either
+    way, and the expected gap of a hard tee read 1.3 mm too high (and neck points of 40 mm counted)."""
+    a = np.radians(angle_deg)
+    rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+    body = (shapely.segmentize(shapely.box(0, 0, 100, 100), 1.0).exterior.coords)
+    body = np.asarray(body)[:-1] @ rot.T
+    armhole = np.array([[100.0, 0.0], [100.0, 50.0], [100.0, 100.0]]) @ rot.T   # the right edge
+    paper = np.array([[10.0, 20.0], [70.0, 20.0], [70.0, 80.0], [10.0, 80.0]]) @ rot.T
+    gaps, neck_gaps = proof.expected_gaps(paper, body, (np.array([-9e3, 0.0]), np.array([-9e3, 1.0])),
+                                          armhole, centre_x_mm=-9e3)
+    assert len(neck_gaps) == 0
+    assert not np.isclose(gaps, 30.0, atol=1e-6).any()   # the paper's right edge is 30 mm from the armhole
+
+
+@pytest.mark.parametrize("tee, scale, seed", [
+    ("tee3", 1.02, 5),   # the first case: measured -0.23 mm
+    ("tee3", 0.98, 6),   # a 3 to 4 mm bulge cut the found fold to 244 mm of 400: +15.4 mm before
+    ("tee8", 1.0, 5),    # the same bulge: +14.6 mm before
+    ("tee8", 1.02, 5),   # mask wobble put 13 fold points outside the 1.5 mm band: +1.8 mm before
+])
+def test_req_ver_02_hard_proof_fold_found_and_gap_matches_exact(hard_dir, tmp_path, client, tee, scale, seed):
+    """REQ-VER-02: wavy hand-cut paper with a lift shadow on a hard tee. The whole fold is found
+    and the measured mean gap is within 0.5 mm of the exact one (the clean proof uses 0.5 mm too).
+    The tolerance is the same as before the fold fix: only the way the fold is found changed.
+
+    History: the fold used to be followed along the outline in chunks, and left out within a fixed
+    1.5 mm. A bulge of 3 to 4 mm cut the fold short and a wobble of 2 to 3 mm left fold points
+    in, both counted as cut edge with gaps of 30 to 140 mm. The fold is now a RANSAC line fit
+    and a band around the fitted line (proof.fold_band_mm).
+
+    Known open gap (SPEC 10.1): other seeds scatter by -0.5 to +0.3 mm."""
+    from sewtrace.vision.verify import verify_proof
+
+    shutil.copytree(hard_dir / tee, tmp_path / tee)   # no lens, no curl; proof files stay out of the fixture
+    truth = proof.make_proof_hard(tmp_path / tee, seed=seed, scale=scale, name="proof")
+    photo = tmp_path / tee / "proof.jpg"
+    result = verify_proof(photo, client, photo_homography(cv2.imread(str(photo))))
+    print(f"{tee} scale {scale} seed {seed}: measured {result.mean_mm:.2f} expected {truth['expected_gap_mean_mm']:.2f}")
+    assert result.fold_mm is not None
+    true_fold = np.asarray(truth["fold_mm"])
+    found_len = np.linalg.norm(np.diff(np.asarray(result.fold_mm), axis=0))
+    assert found_len == pytest.approx(np.linalg.norm(np.diff(true_fold, axis=0)), abs=8.0)
+    assert result.mean_mm == pytest.approx(truth["expected_gap_mean_mm"], abs=0.5)
+
+
+def test_req_geo_01_corner_choice_does_not_skip_a_stronger_candidate_of_its_role():
+    """REQ-GEO-01: six corners that pass over a candidate stronger than the chosen corner of its own
+    role are refused: outside the hem corner, between the cuff top and the neck corner (stronger than
+    the neck corner), and the same on the other side. The old check looked only between the hem corner
+    and the middle of the neck, and only against the cuff top."""
+    score = np.zeros(100)
+    for i, v in {10: 50, 20: 60, 40: 40, 60: 40, 80: 60, 90: 50}.items():
+        score[i] = v
+    c = (10, 20, 40, 60, 80, 90)
+    cands = sorted(c)
+    assert not contour._skips_stronger(c, cands, score)
+    for extra, v in ((30, 45), (70, 45), (5, 55), (95, 55), (45, 45), (55, 45)):
+        s = score.copy()
+        s[extra] = v
+        assert contour._skips_stronger(c, sorted([*c, extra]), s), extra
+    # A weaker wiggle, or a candidate between cuff top and neck weaker than the neck corner, is fine.
+    for extra, v in ((30, 35), (5, 45), (95, 45), (45, 35)):
+        s = score.copy()
+        s[extra] = v
+        assert not contour._skips_stronger(c, sorted([*c, extra]), s), extra
+
+
+# ---- Sleeve seams from SAM's sleeve masks (REQ-GEO-01) -------------------------------------------
+
+def _sleeve_scene(p: synth.TeeParams, hp: synth_hard.HardParams, underarm_radius_mm: float = 0.0):
+    """Garment mask, two sleeve masks cut along the true armholes (as SAM's "sleeve" masks), the
+    homography, and the true shoulder and underarm points (mm)."""
+    v = synth_hard.hard_views(p, hp)["front"]
+    ring = v["garment"]
+    e = hp.asymmetry_mm / p.chest_half
+    arm = synth.armhole_curve(p)
+    origin = v["origin"]
+    if underarm_radius_mm:
+        ring = synth_hard._dense(ring)
+        for target in (arm[-1] + origin, arm[-1] * [-(1 + e), 1] + origin):
+            ring = synth_hard.round_corner(ring, target, underarm_radius_mm)
+    x0, y0 = ring.min(axis=0) - 30
+    shape = (int((ring[:, 1].max() - y0 + 30) * PX), int((ring[:, 0].max() - x0 + 30) * PX))
+
+    def raster(poly: np.ndarray) -> np.ndarray:
+        m = np.zeros(shape, np.uint8)
+        cv2.fillPoly(m, [np.round((poly - [x0, y0]) * PX).astype(np.int32)], 255)
+        return m > 0
+
+    garment = raster(ring)
+    sleeves = []
+    for side in (1, -1):
+        curve = arm * ([1, 1] if side == 1 else [-(1 + e), 1]) + origin
+        # Everything outward of the armhole curve. The sleeve hangs 30 degrees down, so the region runs
+        # out from the underarm at 40 degrees down (the body side seam goes straight down from there).
+        far = [curve[-1] + [side * 600, 500], curve[0] + [side * 600, -300]]
+        sleeves.append(raster(np.vstack([curve, far])) & garment)
+    hom = Homography(np.array([[1 / PX, 0, x0], [0, 1 / PX, y0], [0, 0, 1.0]]))
+    true_shoulder = np.array([arm[0], arm[0] * [-(1 + e), 1]]) + origin
+    true_underarm = np.array([arm[-1], arm[-1] * [-(1 + e), 1]]) + origin
+    return garment, sleeves, hom, true_shoulder, true_underarm
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_req_geo_01_seam_points_are_the_ends_of_the_sleeve_seam(index):
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index))
+    seams = contour.seam_points(garment, sleeves, hom)
+    found_s, found_u = np.array([s for s, _ in seams]), np.array([u for _, u in seams])
+    assert max(_nearest_errors(found_s, shoulder)) < 3.0
+    assert max(_nearest_errors(found_u, underarm)) < 3.0
+
+
+@pytest.mark.parametrize("index, radius", [(0, 0.0), (2, 15.0), (3, 25.0)])
+def test_req_geo_01_joints_follow_the_sam_seams_even_on_rounded_underarms(index, radius):
+    """With SAM seams the shoulder and underarm points come from the seam, not from the outline
+    shape. On a rounded underarm the seam ends where the armhole meets the rounded edge (as on a
+    real tee, where the tape measure starts), so the underarm lies on the armhole seam within the
+    rounding of the sharp corner."""
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index), radius)
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    j = contour._find_joints(outline, contour.seam_points(garment, sleeves, hom))
+    assert max(_nearest_errors(np.array([j.shoulder_a, j.shoulder_b]), shoulder)) < 3.0
+    found_u = np.array([j.underarm_a, j.underarm_b])
+    assert max(_nearest_errors(found_u, underarm)) < 3.0 + radius
+    body = contour.remove_sleeves(outline, contour.seam_points(garment, sleeves, hom))
+    assert len(body.array()) > 100
+
+
+def test_req_geo_01_seam_points_refuse_when_sam_finds_one_sleeve():
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(0), _calm(0))
+    with pytest.raises(ValueError, match="2 are needed"):
+        contour.seam_points(garment, sleeves[:1], hom)
+
+
+def test_req_geo_01_seam_points_drop_a_duplicate_sleeve_mask():
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(0), _calm(0))
+    with pytest.raises(ValueError, match="2 are needed"):
+        contour.seam_points(garment, [sleeves[0], sleeves[0].copy()], hom)
+
+
+def test_req_geo_01_a_short_sam_sleeve_mask_is_not_trusted():
+    """A sleeve mask that stops half way along the sleeve gives seam ends mid-sleeve, still on the
+    outline; they are refused instead of leaving part of the sleeve in the body."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(1), _calm(1))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    cols = np.nonzero(sleeves[0].any(axis=0))[0]
+    short = sleeves[0].copy()
+    near_body = cols[0] if cols.mean() > garment.shape[1] / 2 else cols[-1]
+    keep = slice(near_body + (cols[-1] - cols[0]) // 2, None) if near_body == cols[0] else slice(None, near_body - (cols[-1] - cols[0]) // 2)
+    cut = np.zeros_like(short)
+    cut[:, keep] = short[:, keep]
+    with pytest.raises(ValueError, match="SAM sleeve seam"):
+        contour._find_joints(outline, contour.seam_points(garment, [cut, sleeves[1]], hom))
+
+
+class _SleeveClient:
+    """Just what body_without_sleeves needs: config, settings and segment_all."""
+
+    def __init__(self, answer):
+        self.config, self.settings, self._answer = get_config(), type("S", (), {"mock": False})(), answer
+
+    def segment_all(self, photo, prompt):
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+@pytest.mark.parametrize("index", range(1, 5))
+def test_req_geo_01_body_from_sam_seams_matches_the_outline_method_where_both_work(index, caplog):
+    caplog.set_level("INFO")
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    seam_half = contour.body_half(body_without_sleeves(_SleeveClient(sleeves), "front.jpg", garment, hom, outline)[0])
+    line_half = contour.body_half(contour.remove_sleeves(outline))
+    a, b = seam_half.array(), line_half.array()
+    assert abs(np.ptp(a[:, 0]) - np.ptp(b[:, 0])) < 1.0 and abs(np.ptp(a[:, 1]) - np.ptp(b[:, 1])) < 1.0
+    assert "sleeve seams from SAM used" in caplog.text
+
+
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_req_geo_01_a_quarter_short_sam_sleeve_mask_falls_back(index, caplog):
+    """Cut 25% off one sleeve mask at the body end: the underarm moves only 11 to 17 mm, but the
+    shoulder seams then differ by 30+ mm, which the symmetry check refuses."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    cols = np.nonzero(sleeves[0].any(axis=0))[0]
+    width = cols[-1] - cols[0]
+    cut = np.zeros_like(sleeves[0])
+    side = slice(cols[0] + width // 4, None) if cols.mean() > garment.shape[1] / 2 else slice(None, cols[-1] - width // 4)
+    cut[:, side] = sleeves[0][:, side]
+    try:
+        body = body_without_sleeves(_SleeveClient([cut, sleeves[1]]), "front.jpg", garment, hom, outline)[0]
+    except contour.ContourRefused:
+        body = None  # the outline method refuses this tee (tee 0): a refusal, never a wrong body
+    if body is not None:
+        assert np.allclose(body.array(), contour.remove_sleeves(outline).array())
+    assert "a sleeve mask stops short of its seam" in caplog.text
+
+
+@pytest.mark.parametrize("answer", ["duplicate", "short", CacheMiss("offline")])
+def test_req_geo_01_a_bad_or_missing_sam_sleeve_answer_falls_back_to_the_outline(answer, caplog):
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(1), _calm(1))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    if answer == "duplicate":
+        answer = [sleeves[0], sleeves[0].copy()]
+    elif answer == "short":
+        cols = np.nonzero(sleeves[0].any(axis=0))[0]
+        cut = np.zeros_like(sleeves[0])
+        mid = (cols[0] + cols[-1]) // 2
+        side = slice(mid, None) if cols.mean() > garment.shape[1] / 2 else slice(None, mid)
+        cut[:, side] = sleeves[0][:, side]
+        answer = [cut, sleeves[1]]
+    body = body_without_sleeves(_SleeveClient(answer), "front.jpg", garment, hom, outline)[0]
+    assert np.allclose(body.array(), contour.remove_sleeves(outline).array())
+    assert "finding them from the outline" in caplog.text
+
+
+def _cut_from_body(mask: np.ndarray, frac: float, width_px: int) -> np.ndarray:
+    cols = np.nonzero(mask.any(axis=0))[0]
+    w = cols[-1] - cols[0]
+    keep = slice(cols[0] + int(w * frac), None) if cols.mean() > width_px / 2 else slice(None, cols[-1] - int(w * frac))
+    out = np.zeros_like(mask)
+    out[:, keep] = mask[:, keep]
+    return out
+
+
+@pytest.mark.parametrize("index, radius, frac", [(1, 0.0, 0.4), (2, 15.0, 0.4), (3, 25.0, 0.5)])
+def test_req_geo_01_two_equally_short_sam_sleeve_masks_are_refused(index, radius, frac):
+    """Both sleeve masks cut short by the same amount pass both left/right checks; the shoulder share
+    refuses them instead of leaving part of both sleeves on the body."""
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index), radius)
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    short = [_cut_from_body(m, frac, garment.shape[1]) for m in sleeves]
+    with pytest.raises(ValueError, match="neck to cuff edge"):
+        contour._find_joints(outline, contour.seam_points(garment, short, hom))
+
+
+def test_req_geo_01_an_underarm_bitten_out_of_one_sam_sleeve_mask_is_refused_by_the_armhole_check():
+    """Sleeve pixels near one true underarm removed: the shoulder end stays right, so only the
+    armhole length check sees it."""
+    garment, sleeves, hom, _, underarm = _sleeve_scene(_tee(0), _calm(0))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    ys, xs = np.mgrid[: garment.shape[0], : garment.shape[1]]
+    mm = hom.px_to_mm(np.c_[xs.ravel(), ys.ravel()]).reshape(*garment.shape, 2)
+    bitten = []
+    for m in sleeves:
+        d = np.minimum(np.linalg.norm(mm - underarm[0], axis=2), np.linalg.norm(mm - underarm[1], axis=2))
+        bitten.append(m & (d > 45.0) if not bitten else m)
+    with pytest.raises(ValueError, match="seams are .* mm long"):
+        contour._find_joints(outline, contour.seam_points(garment, bitten, hom))
+
+
+@pytest.mark.parametrize("index", [0, 2, 4])
+def test_req_geo_01_a_strip_left_out_of_the_sleeve_mask_does_not_move_the_underarm(index):
+    """SAM can miss a thin strip along the sleeve's lower edge. That strip is garment but not sleeve; it
+    must not count as body, or the underarm moves out along the sleeve underside (real back photo)."""
+    garment, sleeves, hom, shoulder, underarm = _sleeve_scene(_tee(index), _calm(index))
+    edge_dist = cv2.distanceTransform(garment.astype(np.uint8), cv2.DIST_L2, 5)
+    rows = np.arange(garment.shape[0])[:, None]
+    stripped = []
+    for m in sleeves:
+        ys = np.nonzero(m.any(axis=1))[0]
+        lower = rows > (ys.min() + ys.max()) / 2
+        stripped.append(m & ~((edge_dist < 4.0 * PX) & lower))  # a 4 mm strip along the lower half
+    seams = contour.seam_points(garment, stripped, hom)
+    assert max(_nearest_errors(np.array([u for _, u in seams]), underarm)) < 4.0
+    assert max(_nearest_errors(np.array([s for s, _ in seams]), shoulder)) < 3.0
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_req_geo_01_a_straight_synthetic_tee_reports_an_even_lay(index):
+    garment, sleeves, hom, *_ = _sleeve_scene(_tee(index), _calm(index))
+    outline = contour.smooth_outline(contour.mask_to_outline(garment, hom))
+    report: dict = {}
+    contour.cut_sleeves_flagged(outline, contour.seam_points(garment, sleeves, hom), report)
+    assert abs(report["underarm_mm"]) < 3.0 and abs(report["shoulder_mm"]) < 3.0
+
+
+def test_req_geo_01_a_crooked_lay_is_reported_and_said_to_be_evened_out():
+    from sewtrace.pipeline import lay_note
+
+    assert lay_note("front", {"underarm_mm": 3.0, "shoulder_mm": -2.0}) is None
+    note = lay_note("back", {"underarm_mm": -24.4, "shoulder_mm": 1.0})
+    assert note.startswith("back photo:") and "one armpit lies 24 mm lower than the other" in note
+    assert "Corrected" in note and "shoulder" not in note.split("Corrected")[0]

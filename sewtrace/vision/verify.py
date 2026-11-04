@@ -1,0 +1,384 @@
+"""T25: overlay proof. Paper FRONT laid on the tee; how far is its edge from the tee's?
+
+Owner: Madhu. SPEC 9.4: the paper is a HALF front panel cut on the stitch line, with its
+fold on the centre of the t-shirt. SAM masks "paper" and "t-shirt" (REQ-SEG-02) go to the
+marker mm frame. The t-shirt outline includes the sleeves, so they are cut off first, as
+for the front and back photos. Then each paper edge point gets its distance to the nearest
+body edge point, with four rules:
+
+  * The fold edge of the paper is not a cut edge. It lies on the centre line, far inside
+    the t-shirt edge, so it is found and left out (drawn grey in the overlay).
+  * A paper point is compared with the body edge on its own side of the fold line only.
+  * The armhole of the body outline is a default shape, because the sleeve hides the real
+    one. Paper points nearest to it are left out, not compared.
+  * On a front flat-lay the "t-shirt" mask includes the back panel seen through the neck
+    opening, so the outer outline follows the BACK neckline, which sits higher than the
+    front one. The paper's front neck edge is lower by (front depth - back depth), so its
+    gap is that difference, not a cutting error. Paper points nearest to the body neck
+    are left out of the mean and reported on their own as information (REQ-VER-02).
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import cv2
+import numpy as np
+import shapely
+from pydantic import BaseModel
+from scipy.spatial import cKDTree
+
+from sewtrace.api.client import MetaClient
+from sewtrace.config import get_config
+from sewtrace.types import Outline, PanelSpec, Point
+from sewtrace.vision import contour
+from sewtrace.vision.marker import Homography
+
+log = logging.getLogger(__name__)
+
+
+class PaperFoldNotStraight(ValueError):
+    """The paper fold bows out of the band around the fitted line, so part of it would count as cut edge."""
+
+
+class ProofResult(BaseModel):
+    """Paper-to-body edge gaps, mm. points_mm[i] has gap distances_mm[i]."""
+
+    mean_mm: float
+    max_mm: float
+    p95_mm: float
+    frac_within_tol: float
+    tol_mm: float
+    points_mm: list[Point]
+    distances_mm: list[float]
+    fold_mm: tuple[Point, Point] | None = None  # excluded fold edge, end points
+    step_mm: float = 2.0  # spacing of points_mm along the paper edge
+    # Paper neck points: left out of the numbers above, kept as information. Their gap is
+    # front neck depth minus back neck depth, not a cutting error.
+    neck_points_mm: list[Point] = []
+    neck_distances_mm: list[float] = []
+    # What the neck gap should be for the pattern that was cut (from its spec), if known.
+    expected_neck_gap_mm: float | None = None
+    neck_gap_tol_mm: float | None = None
+
+    @property
+    def neck_mean_mm(self) -> float | None:
+        return float(np.mean(self.neck_distances_mm)) if self.neck_distances_mm else None
+
+    @property
+    def neck_gap_difference_mm(self) -> float | None:
+        """Measured minus expected neck gap, or None when either is missing."""
+        if self.neck_mean_mm is None or self.expected_neck_gap_mm is None:
+            return None
+        return self.neck_mean_mm - self.expected_neck_gap_mm
+
+    @property
+    def side_offset_mm(self) -> float | None:
+        """The gap along the side edge, when it is the same along the whole side (information only).
+
+        A fold that is not on the centre of the t-shirt moves the whole side by a constant, so the
+        side gap is big and flat. A cut error that grows along the side is not flat. The side
+        points are those in the outer fifth of the paper width. The side gap is flat when at least
+        ``proof.side_offset_min_share`` of them are within ``side_offset_spread_mm`` of their median
+        (the corners and the shoulder end do not break it), those points cover
+        ``proof.side_offset_min_cover`` of the fold length, and the median is at least
+        ``side_offset_min_mm``. Returns that median, or None. Does not change any gap number."""
+        if self.fold_mm is None or not self.points_mm:
+            return None
+        cfg = get_config().proof
+        p0, p1 = (np.asarray(f, float) for f in self.fold_mm)
+        length = float(np.linalg.norm(p1 - p0))
+        direction = (p1 - p0) / length
+        xy = np.asarray(self.points_mm, float)
+        out = np.abs((xy - p0) @ np.array([-direction[1], direction[0]]))
+        side = out >= cfg.side_offset_band_frac * out.max()
+        gaps = np.asarray(self.distances_mm)[side]
+        median = float(np.median(gaps))
+        flat = np.abs(gaps - median) <= cfg.side_offset_spread_mm
+        if median < cfg.side_offset_min_mm or flat.mean() < cfg.side_offset_min_share:
+            return None
+        along = (xy[side][flat] - p0) @ direction
+        return median if np.ptp(along) >= cfg.side_offset_min_cover * length else None
+
+    @property
+    def neck_gap_flagged(self) -> bool:
+        """True when the measured neck gap differs from the expected one by more than
+        ``proof.neck_gap_tolerance_mm``: the neck depths on the paper are not those of the spec."""
+        diff = self.neck_gap_difference_mm
+        return diff is not None and self.neck_gap_tol_mm is not None and abs(diff) > self.neck_gap_tol_mm
+
+
+def expected_neck_gap_mm(spec: PanelSpec, step_mm: float = 2.0) -> float:
+    """Mean gap between the spec's front neck curve and its back neck curve, in mm.
+
+    On a front flat-lay the tee mask follows the back neckline while the paper is cut on the
+    front neckline, so this is the neck gap a correct proof shows. Both curves share the neck
+    point and the neck width, so no alignment is needed. Depends on both neck depths."""
+    front, back = (spec.panel(n).edge_points("neck") for n in ("front", "back"))
+    line = shapely.LineString(front)
+    samples = shapely.line_interpolate_point(line, np.arange(0, line.length, step_mm))
+    return float(np.mean(shapely.distance(samples, shapely.LineString(back))))
+
+
+def mask_outline_mm(mask: np.ndarray, homography: Homography) -> np.ndarray:
+    """(N, 2) outline of a boolean mask, in mm. The mask is cleaned like the front and back
+    photo masks (contour.clean_mask, REQ-GEO-01), so holes, nicks and stray blobs of a SAM mask
+    do not reach the outline."""
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        raise ValueError("empty mask")
+    mask = contour.clean_mask(mask, contour.px_per_mm(homography, np.array([xs.mean(), ys.mean()])))
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    biggest = max(contours, key=cv2.contourArea)
+    return homography.px_to_mm(biggest.reshape(-1, 2).astype(float))
+
+
+def _fit_line(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Least squares line through points: (centre, unit direction)."""
+    centre = points.mean(axis=0)
+    return centre, np.linalg.svd(points - centre)[2][0]
+
+
+def _line_residual(points: np.ndarray, centre: np.ndarray, direction: np.ndarray) -> np.ndarray:
+    """Distance of each point to the infinite line, mm."""
+    return np.abs((points - centre) @ np.array([-direction[1], direction[0]]))
+
+
+def find_fold_edge(paper_mm: np.ndarray, body_mm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """End points of the paper's fold edge.
+
+    The fold lies on the t-shirt centre line, about half a chest from any t-shirt edge, so the
+    paper points at least ``fold_min_inset_mm`` inside the t-shirt outline are the fold (plus
+    a little of the neck). A RANSAC line fit over those points finds the fold and ignores the
+    neck. The line is refined on its inliers, then ended at the outermost paper points within
+    ``fold_band_mm`` of it. A mask wobble or a bulge of a few mm cannot cut the fold short,
+    because no chunk of the outline is followed.
+
+    A fold that bows more than the band keeps only its straight part, and the rest would count
+    as cut edge. So the outline that lies near the line but outside the band is measured; more
+    than ``fold_bow_limit_frac`` of the fold length raises PaperFoldNotStraight."""
+    cfg = get_config().proof
+    dense = np.asarray(shapely.segmentize(shapely.LinearRing(paper_mm), 1.0).coords)[:-1]
+    inset = shapely.distance(shapely.points(dense), shapely.LinearRing(body_mm))
+    deep = dense[inset >= cfg.fold_min_inset_mm]
+    min_length = 0.5 * float(np.ptp(paper_mm, axis=0).max())  # dense points are 1 mm apart
+    no_fold = ValueError(
+        "No fold edge found on the paper: put the fold of the half panel on the centre of the t-shirt (SPEC 9.4)"
+    )
+    if len(deep) < min_length:
+        raise no_fold
+    rng = np.random.default_rng(0)  # fixed: the same photo always gives the same fold
+    best = np.zeros(len(deep), bool)
+    for _ in range(cfg.fold_ransac_trials):
+        i, j = rng.choice(len(deep), size=2, replace=False)
+        span = np.linalg.norm(deep[j] - deep[i])
+        if span < cfg.fold_straight_tol_mm:
+            continue
+        inliers = _line_residual(deep, deep[i], (deep[j] - deep[i]) / span) <= cfg.fold_straight_tol_mm
+        if inliers.sum() > best.sum():
+            best = inliers
+    if best.sum() < min_length:
+        raise no_fold
+    # Least trimmed squares: fit the closer half of the points near the line, repeat. RANSAC
+    # alone can settle on a line tilted towards a bulge, because that line has more inliers.
+    centre, direction = _fit_line(deep[best])
+    for _ in range(5):
+        resid = _line_residual(deep, centre, direction)
+        near = resid <= cfg.fold_straight_tol_mm
+        centre, direction = _fit_line(deep[near & (resid <= np.median(resid[near]))])
+    # The ends come from all paper points, not only the deep ones: near the hem the fold is
+    # less than fold_min_inset_mm from the t-shirt edge.
+    resid = _line_residual(dense, centre, direction)
+    along_all = (dense - centre) @ direction
+    # The neck and hem edges leave the fold at its two ends and also pass through the window, so
+    # the first fold_bow_window_mm at each end is not counted. A bowed fold reaches past that.
+    near = resid <= cfg.fold_bow_window_mm
+    ends = along_all[near].min() + cfg.fold_bow_window_mm, along_all[near].max() - cfg.fold_bow_window_mm
+    bowed_mm = float((near & (resid > cfg.fold_band_mm) & (along_all > ends[0]) & (along_all < ends[1])).sum())  # 1 mm per point
+    fold_length_mm = float(along_all[near].max() - along_all[near].min())
+    if bowed_mm > cfg.fold_bow_limit_frac * fold_length_mm:
+        raise PaperFoldNotStraight(
+            "The paper fold is not straight. Make the paper flat on the t-shirt and take the proof photo again."
+        )
+    along = along_all[resid <= cfg.fold_band_mm]
+    return centre + along.min() * direction, centre + along.max() * direction
+
+
+def _body_side_runs(body_mm: np.ndarray, keep: np.ndarray) -> shapely.Geometry:
+    """Body edge restricted to the points flagged ``keep``, as open lines."""
+    if keep.all():
+        return shapely.LinearRing(body_mm)
+    order = np.roll(np.arange(len(body_mm)), -int(np.argmin(keep)))  # start on a dropped point
+    lines: list[list[np.ndarray]] = []
+    run: list[np.ndarray] = []
+    for point, flag in zip(body_mm[order], keep[order]):
+        if flag:
+            run.append(point)
+        elif run:
+            lines.append(run)
+            run = []
+    if run:
+        lines.append(run)
+    return shapely.MultiLineString([r for r in lines if len(r) >= 2])
+
+
+def edge_gaps(
+    paper_mm: np.ndarray,
+    body_mm: np.ndarray,
+    step_mm: float = 2.0,
+    hidden: np.ndarray | None = None,
+    fold: tuple[np.ndarray, np.ndarray] | None = None,
+    neck: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Paper edge resampled every ``step_mm``, and each point's distance to the body edge.
+
+    ``hidden`` flags body points that are not a visible edge (the armhole, which the
+    sleeve covers). ``neck`` flags body points on the neck edge, which on a front photo is
+    the back neckline. Paper points whose nearest body point is flagged are left out.
+    ``fold`` is the paper's fold edge: its points are left out, and the body edge is cut
+    to the paper's side of the fold line (``proof.centre_margin_mm`` past it).
+    """
+    points, distances, _, _ = edge_gaps_split(paper_mm, body_mm, step_mm, hidden, fold, neck)
+    return points, distances
+
+
+def edge_gaps_split(
+    paper_mm: np.ndarray,
+    body_mm: np.ndarray,
+    step_mm: float = 2.0,
+    hidden: np.ndarray | None = None,
+    fold: tuple[np.ndarray, np.ndarray] | None = None,
+    neck: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """edge_gaps(), plus the left-out neck points: (points, gaps, neck points, neck gaps)."""
+    cfg = get_config().proof
+    ring = shapely.LinearRing(paper_mm)
+    pts = shapely.line_interpolate_point(ring, np.arange(0, ring.length, step_mm))
+    xy = shapely.get_coordinates(pts)
+    body_pts = np.asarray(body_mm, float)
+    keep_body = np.ones(len(body_pts), bool)
+    keep_paper = np.ones(len(xy), bool)
+    if fold is not None:
+        p0, p1 = (np.asarray(f, float) for f in fold)
+        direction = (p1 - p0) / np.linalg.norm(p1 - p0)
+
+        def side(q: np.ndarray) -> np.ndarray:  # signed mm from the fold line
+            return direction[0] * (q[:, 1] - p0[1]) - direction[1] * (q[:, 0] - p0[0])
+
+        paper_side = np.sign(side(np.asarray(ring.centroid.coords)))[0]
+        keep_body = paper_side * side(body_pts) >= -cfg.centre_margin_mm
+        d_fold = np.asarray(shapely.distance(pts, shapely.LineString([p0, p1])), float)
+        # Fold points: within fold_band_mm of the fold line (wider than the mask wobble), but only
+        # along the fold itself. The cut edges that start at the fold ends (neck, hem) come that
+        # close too, and keep their gap, except within fold_exclude_mm of the line.
+        along = (xy - p0) @ direction
+        margin = cfg.fold_end_margin_mm
+        inside_fold = (along >= margin) & (along <= np.linalg.norm(p1 - p0) - margin)
+        # A bowed fold leaves the band's ends: its last points lie in the end margin and, with the
+        # line fitted to the middle, more than fold_exclude_mm off the line. They run along the
+        # fold, where the neck and hem edges that start at the fold ends run across it.
+        tangent = np.roll(xy, -1, axis=0) - np.roll(xy, 1, axis=0)
+        along_fold = np.abs(tangent @ direction) >= np.cos(np.radians(cfg.fold_parallel_deg)) * np.linalg.norm(tangent, axis=1)
+        inside_fold |= along_fold & (along >= 0) & (along <= np.linalg.norm(p1 - p0))
+        keep_paper = (d_fold >= cfg.fold_exclude_mm) & ~((d_fold < cfg.fold_band_mm) & inside_fold)
+    body_edge = _body_side_runs(body_pts, keep_body)
+    dist = np.asarray(shapely.distance(pts, body_edge), float)
+    near = cKDTree(body_pts[keep_body]).query(xy)[1]
+    if hidden is not None:
+        keep_paper &= ~np.asarray(hidden)[keep_body][near]
+    on_neck = np.zeros(len(xy), bool)
+    if neck is not None:
+        on_neck = keep_paper & np.asarray(neck)[keep_body][near]
+        keep_paper &= ~on_neck
+    return xy[keep_paper], dist[keep_paper], xy[on_neck], dist[on_neck]
+
+
+def gap_result(
+    points: np.ndarray,
+    distances: np.ndarray,
+    tol_mm: float | None = None,
+    fold: tuple[np.ndarray, np.ndarray] | None = None,
+    step_mm: float = 2.0,
+    neck_points: np.ndarray | None = None,
+    neck_distances: np.ndarray | None = None,
+    expected_neck: float | None = None,
+) -> ProofResult:
+    tol_mm = get_config().proof.gap_tolerance_mm if tol_mm is None else tol_mm
+    return ProofResult(
+        mean_mm=float(distances.mean()),
+        max_mm=float(distances.max()),
+        p95_mm=float(np.percentile(distances, 95)),
+        frac_within_tol=float((distances < tol_mm).mean()),
+        tol_mm=tol_mm,
+        points_mm=[(float(x), float(y)) for x, y in points],
+        distances_mm=[float(d) for d in distances],
+        fold_mm=None if fold is None else ((float(fold[0][0]), float(fold[0][1])), (float(fold[1][0]), float(fold[1][1]))),
+        step_mm=step_mm,
+        neck_points_mm=[] if neck_points is None else [(float(x), float(y)) for x, y in neck_points],
+        neck_distances_mm=[] if neck_distances is None else [float(d) for d in neck_distances],
+        expected_neck_gap_mm=expected_neck,
+        neck_gap_tol_mm=get_config().proof.neck_gap_tolerance_mm,
+    )
+
+
+def verify_proof(
+    photo: str | Path,
+    client: MetaClient,
+    homography: Homography,
+    tol_mm: float | None = None,
+    step_mm: float = 2.0,
+    spec: PanelSpec | None = None,
+) -> ProofResult:
+    """Gap between the paper edge (fold edge excluded) and the tee body edge on a proof photo.
+
+    Pass the ``spec`` of the pattern that was cut to get the expected neck gap (from its front
+    and back neck depths) next to the measured one."""
+    prompts = client.config.sam.prompts
+    paper = mask_outline_mm(client.segment(photo, prompts.paper), homography)
+    garment_mask = client.segment(photo, prompts.garment)
+    garment = mask_outline_mm(garment_mask, homography)
+    from sewtrace.pipeline import body_without_sleeves  # here: pipeline imports the vision modules
+    try:
+        body, armhole, neck = body_without_sleeves(
+            client, photo, garment_mask, homography, contour.smooth_outline(Outline.from_array(garment)))
+    except contour.ContourRefused as err:
+        log.warning("%s: %s, %s", err.label, photo, err.log_details())
+        raise err.with_message(f"{err}. Take the proof photo again.") from err
+    fold = find_fold_edge(paper, body.array())
+    points, distances, neck_pts, neck_dist = edge_gaps_split(
+        paper, body.array(), step_mm, hidden=armhole, fold=fold, neck=neck)
+    expected_neck = None if spec is None else expected_neck_gap_mm(spec, step_mm)
+    return gap_result(points, distances, tol_mm, fold, step_mm, neck_pts, neck_dist, expected_neck)
+
+
+def overlay_image(photo: str | Path, result: ProofResult, homography: Homography, out_path: str | Path) -> Path:
+    """Paper edge drawn on the photo, green where the gap is within tolerance, red elsewhere.
+    The fold edge and the neck are drawn grey: they are not compared.
+    Points left out (hidden armhole) are not drawn."""
+    image = cv2.imread(str(photo))
+    if image is None:
+        raise FileNotFoundError(photo)
+    px = homography.mm_to_px(np.asarray(result.points_mm))
+    ok = np.asarray(result.distances_mm) < result.tol_mm
+    thick = max(2, round(image.shape[1] / 600))
+    for i in range(len(px)):
+        a, b = px[i], px[(i + 1) % len(px)]
+        if np.linalg.norm(np.asarray(result.points_mm[i]) - result.points_mm[(i + 1) % len(px)]) > 2.5 * result.step_mm:
+            continue  # a stretch that was left out lies between these points
+        colour = (40, 200, 40) if ok[i] else (30, 30, 230)
+        cv2.line(image, tuple(np.round(a).astype(int)), tuple(np.round(b).astype(int)), colour, thick, cv2.LINE_AA)
+    for x, y in np.round(homography.mm_to_px(np.asarray(result.neck_points_mm).reshape(-1, 2))).astype(int):
+        cv2.circle(image, (int(x), int(y)), thick, (150, 150, 150), -1, cv2.LINE_AA)  # information only
+    if result.fold_mm is not None:
+        f0, f1 = np.round(homography.mm_to_px(np.asarray(result.fold_mm))).astype(int)
+        cv2.line(image, tuple(f0), tuple(f1), (150, 150, 150), thick, cv2.LINE_AA)
+    label = (f"mean gap {result.mean_mm:.1f} mm  max {result.max_mm:.1f} mm  "
+             f"{100 * result.frac_within_tol:.0f}% within {result.tol_mm:g} mm")
+    font_scale = image.shape[1] / 1600
+    org = (int(0.03 * image.shape[1]), int(0.05 * image.shape[0]))
+    cv2.putText(image, label, org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 3 * thick, cv2.LINE_AA)
+    cv2.putText(image, label, org, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thick, cv2.LINE_AA)
+    out_path = Path(out_path)
+    cv2.imwrite(str(out_path), image)
+    return out_path

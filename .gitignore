@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.env
+/cache/
+data/cache/
+data/raw/
+data/synth/
+data/runs/
+out/
+.claude/worktrees/
+# Paid-call ledger: keeps the spend total. Back it up; do not delete it (REQ-API-04).
+data/ledger.csv
+data/synth_hard*/

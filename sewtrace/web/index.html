@@ -1,0 +1,1158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sewtrace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Drafting-table workbench: dark step rail on the left, a status bar, one card per step. The page works
+   without the web fonts (system fallbacks), so it also works with no network. */
+:root {
+  --bg: #F7F6F2; --surface: #FFFFFF; --surface-2: #EFEDE6; --line: #DAD6CC; --line-2: #C5C0B4;
+  --fg: #182026; --fg-2: #4A545B; --fg-3: #737C82;
+  --teal: #0E8F83; --teal-soft: #D5EFEC; --amber: #B7741F; --amber-soft: #F7E7CF;
+  --sim: #4C6F96; --sim-soft: #DCE5EF; --red: #B53A2E; --red-soft: #F6DCD8; --green: #2F7A4B; --green-soft: #DCEEE2;
+  --fabric: #E9E2D2; --rail: #182026; --rail-fg: #C9CED1; --rail-active: #F7F6F2; --rail-dim: #6B757B;
+  --shadow: 0 1px 2px rgba(24,32,38,.06), 0 6px 18px rgba(24,32,38,.06);
+  --f-ui: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-cond: "IBM Plex Sans Condensed", "IBM Plex Sans", "Arial Narrow", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #12171B; --surface: #1A2126; --surface-2: #222A30; --line: #2E373D; --line-2: #3B454C;
+  --fg: #ECEAE4; --fg-2: #B4B9BC; --fg-3: #858D92;
+  --teal: #2BC2B3; --teal-soft: #13332F; --amber: #E4A54C; --amber-soft: #3A2C17; --sim: #8FB0D6; --sim-soft: #1E2B3A;
+  --red: #E9776A; --red-soft: #3D1E1A; --green: #6FC08D; --green-soft: #17301F; --fabric: #3A362E;
+  --rail: #0C1013; --rail-fg: #9DA4A8; --rail-active: #ECEAE4;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 18px rgba(0,0,0,.25); color-scheme: dark } }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--f-ui); -webkit-font-smoothing: antialiased; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+a { color: var(--teal); }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h3 { font-family: var(--f-cond); font-weight: 600; font-size: 15px; margin: 18px 0 8px; }
+ol, ul { padding-left: 20px; margin: 6px 0; }
+li { margin: 3px 0; }
+.mono, .num { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+
+/* Rail */
+.app { display: grid; grid-template-columns: 228px minmax(0, 1fr); min-height: 100vh; }
+.rail { background: var(--rail); color: var(--rail-fg); padding: 18px 12px; display: flex; flex-direction: column; gap: 16px;
+        position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 0 6px; color: var(--rail-active); }
+.brand .logo { width: 30px; height: 30px; border-radius: 7px; background: #0E8F83; display: grid; place-items: center; }
+.brand b { font-family: var(--f-cond); font-weight: 600; font-size: 17px; letter-spacing: .02em; display: block; }
+.brand small { display: block; font-family: var(--f-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--rail-fg); }
+.grp { font-family: var(--f-mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--rail-dim); padding: 10px 8px 4px; }
+.rail nav { display: flex; flex-direction: column; gap: 2px; }
+.rail nav a { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px; color: var(--rail-fg); text-decoration: none; font-size: 13px; }
+.rail nav a:hover { background: rgba(255,255,255,.06); color: var(--rail-active); }
+.rail nav a.on { background: rgba(255,255,255,.1); color: var(--rail-active); }
+.rail nav a .step { font-family: var(--f-mono); font-size: 10px; width: 18px; color: var(--rail-dim); }
+.rail nav a.on .step { color: #2BC2B3; }
+.rail nav a .dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; }
+.rail nav a .dot.done { background: #2BC2B3; } .rail nav a .dot.fail { background: #E9776A; }
+.rail-foot { margin-top: auto; font: 11px/1.7 var(--f-mono); color: var(--rail-dim); padding: 10px 8px 0; border-top: 1px solid rgba(255,255,255,.08); }
+.rail-foot b { color: var(--rail-fg); font-weight: 500; }
+
+/* Bar and page */
+.main { min-width: 0; display: flex; flex-direction: column; }
+.bar { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px);
+       border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px 14px; padding: 10px 24px; flex-wrap: wrap; }
+.bar .spacer { flex: 1; }
+.bar .stat { font-size: 12px; color: var(--fg-3); } .bar .stat b { color: var(--fg); font-family: var(--f-mono); font-weight: 500; }
+.page { padding: 22px 24px 80px; display: flex; flex-direction: column; gap: 34px; max-width: 1240px; width: 100%; }
+.ph .eyebrow { font: 11px var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--fg-3); }
+.ph h1 { font-family: var(--f-cond); font-weight: 600; font-size: 26px; margin-top: 4px; }
+.ph p { margin: 4px 0 0; color: var(--fg-2); max-width: 75ch; }
+section { scroll-margin-top: 70px; display: flex; flex-direction: column; gap: 14px; }
+
+/* Cards, grids */
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.s12 { grid-column: span 12; } .s8 { grid-column: span 8; } .s7 { grid-column: span 7; } .s6 { grid-column: span 6; }
+.s5 { grid-column: span 5; } .s4 { grid-column: span 4; } .s3 { grid-column: span 3; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); min-width: 0; }
+.card > .hd { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.card > .hd h2 { font-family: var(--f-cond); font-weight: 600; font-size: 16px; }
+.card > .bd { padding: 14px 16px; }
+.card > .bd.flush { padding: 0; }
+.tiles { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; }
+.tile .k { display: flex; justify-content: space-between; align-items: center; color: var(--fg-2); font-size: 13px; }
+.tile .v { font: 500 24px/1.2 var(--f-mono); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.tile .sub { font-size: 12px; color: var(--fg-3); }
+
+/* Badges, buttons, messages */
+.badge { display: inline-block; font: 500 11px/18px var(--f-mono); padding: 0 8px; border-radius: 10px; white-space: nowrap;
+         background: var(--surface-2); color: var(--fg-2); letter-spacing: .02em; }
+.badge.ok { background: var(--green-soft); color: var(--green); } .badge.bad { background: var(--red-soft); color: var(--red); }
+.badge.warn { background: var(--amber-soft); color: var(--amber); } .badge.sim { background: var(--sim-soft); color: var(--sim); }
+.badge.teal { background: var(--teal-soft); color: var(--teal); }
+.src { display: inline-block; font: 10px/16px var(--f-mono); text-transform: uppercase; letter-spacing: .05em; padding: 0 6px;
+       border: 1px solid currentColor; border-radius: 3px; color: var(--fg-3); white-space: nowrap; }
+.src.photo { color: var(--teal); } .src.muse { color: var(--sim); } .src.edit { color: var(--amber); } .src.user { color: var(--green); }
+.MOCK { background: var(--amber-soft); color: var(--amber); } .REAL { background: var(--red-soft); color: var(--red); }
+.OFFLINE { background: var(--surface-2); color: var(--fg-2); }
+button, .btn { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line-2); background: var(--surface);
+  padding: 7px 13px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; text-decoration: none; color: var(--fg); }
+button:hover, .btn:hover { border-color: var(--fg-3); }
+button.primary { background: var(--teal); border-color: var(--teal); color: #fff; }
+button:disabled { opacity: .45; cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.msg { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface-2); }
+.msg.err { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+.msg.warn { background: var(--amber-soft); border-color: color-mix(in srgb, var(--amber) 40%, transparent); }
+.msg.ok { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.msg.info { background: var(--sim-soft); border-color: color-mix(in srgb, var(--sim) 30%, transparent); }
+.msg + .msg { margin-top: 8px; }
+.small { font-size: 12.5px; color: var(--fg-3); }
+.empty { color: var(--fg-3); font-size: 13px; padding: 18px 16px; text-align: center; }
+
+/* Forms */
+.drop { display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.drop label { border: 1.5px dashed var(--line-2); border-radius: 8px; padding: 12px; background: var(--surface-2); cursor: pointer;
+              display: flex; flex-direction: column; gap: 6px; font-weight: 500; min-width: 0; }
+.drop label:hover { border-color: var(--teal); }
+.drop label.has { border-style: solid; border-color: var(--teal); background: var(--teal-soft); }
+.drop input[type=file] { font-size: 12px; max-width: 100%; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--fg-2); }
+input[type=text], input[type=number], select { background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 8px; }
+
+/* Tables */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { font: 500 10.5px var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-3); text-align: right;
+     padding: 9px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { white-space: nowrap; padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: right; font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+th:first-child, td:first-child { text-align: left; font-family: var(--f-ui); }
+td:first-child { font-family: var(--f-ui); white-space: normal; }
+tr:last-child td { border-bottom: 0; }
+td.ok { color: var(--green); } td.bad { color: var(--red); font-weight: 600; }
+.msg table { background: var(--surface); border-radius: 6px; margin: 8px 0; }
+
+/* Images */
+img { max-width: 100%; height: auto; display: block; border-radius: 6px; }
+.photos { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.photos figure { margin: 0; } figcaption { font: 11px var(--f-mono); text-transform: uppercase; letter-spacing: .08em; color: var(--fg-3); margin-top: 6px; }
+.sheet { background: #fff; border-radius: 6px; border: 1px solid var(--line); padding: 6px; }
+details { border-top: 1px solid var(--line); }
+details > summary { cursor: pointer; padding: 12px 16px; font-family: var(--f-cond); font-weight: 600; font-size: 15px; list-style: none; display: flex; gap: 8px; align-items: center; }
+details > summary::before { content: "+"; font-family: var(--f-mono); color: var(--fg-3); width: 12px; }
+details[open] > summary::before { content: "\2212"; }
+details > .bd { padding: 0 16px 16px; }
+
+/* Capture and proof how-to */
+.steps { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); counter-reset: s; }
+.steps > div { background: var(--surface-2); border-radius: 8px; padding: 12px; counter-increment: s; }
+.steps > div::before { content: "0" counter(s); font: 500 11px var(--f-mono); color: var(--teal); display: block; margin-bottom: 4px; }
+.steps b { display: block; font-family: var(--f-cond); font-size: 14px; }
+.steps span { font-size: 13px; color: var(--fg-2); }
+.diagram svg { width: 100%; height: auto; max-height: 300px; display: block; margin: 0 auto; }
+.diagram text { font-family: var(--f-ui); }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--fg-2); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.locked { opacity: .55; pointer-events: none; }
+.verdict { display: flex; gap: 14px; align-items: center; }
+.verdict .big { font: 600 22px var(--f-cond); }
+.downloads { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.downloads .grp2 { font: 500 10.5px var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--fg-3); margin-bottom: 6px; }
+.downloads .row a { font-size: 12.5px; padding: 5px 10px; }
+.proofimg { max-height: 640px; width: auto; margin: 0 auto; }
+
+/* Pattern studio and guided tour */
+.studio { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; touch-action: none;
+  background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 40px 40px; }
+.studio svg { display: block; width: 100%; height: 440px; cursor: grab; }
+.studio svg text { font-family: var(--f-mono); }
+.layers { display: flex; flex-wrap: wrap; gap: 6px; }
+.layers button { border-radius: 99px; padding: 3px 11px; font-size: 12px; }
+.layers button.on { background: var(--teal-soft); color: var(--teal); border-color: var(--teal); }
+.seamchips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.seamchips button { font-size: 12px; padding: 4px 10px; }
+.seamchips i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.stepcap { margin-top: 10px; min-height: 22px; font-size: 13px; color: var(--fg-2); }
+.tour { position: fixed; right: 20px; bottom: 20px; width: min(360px, calc(100vw - 40px)); background: var(--rail); color: var(--rail-active);
+  border-radius: 12px; padding: 14px 16px; z-index: 60; box-shadow: 0 12px 40px rgba(0,0,0,.3); display: flex; flex-direction: column; gap: 8px; }
+.tour .t { font: 10px var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: #2BC2B3; display: flex; justify-content: space-between; }
+.tour h4 { margin: 0; font: 600 16px var(--f-cond); }
+.tour p { margin: 0; font-size: 13px; color: var(--rail-fg); }
+.tour .bar2 { height: 3px; background: #2D353B; border-radius: 2px; overflow: hidden; }
+.tour .bar2 i { display: block; height: 100%; background: #12B3A3; transition: width .3s; }
+.tour button { background: #26323A; border-color: #3A4851; color: #F7F6F2; font-size: 12px; padding: 4px 10px; }
+.tour button.go { background: #12B3A3; border-color: #12B3A3; color: #0B1E1C; }
+
+@media (max-width: 980px) {
+  .s8, .s7, .s6, .s5, .s4, .s3 { grid-column: span 12; }
+}
+@media (max-width: 860px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { position: static; height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 16px; gap: 8px; }
+  .rail .grp, .rail-foot, .brand small, .rail nav.tools { display: none; }
+  .rail nav { flex-direction: row; flex-wrap: wrap; }
+  .rail nav a { padding: 5px 8px; } .rail nav a .dot { margin-left: 4px; }
+  .bar { position: static; padding: 10px 16px; }
+  .page { padding: 18px 16px 60px; }
+  .drop { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="rail">
+  <div class="brand">
+    <div class="logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3 4 6l2 4 2-1v12h8V9l2 1 2-4-4-3c-.5 1.5-2 2.5-4 2.5S8.5 4.5 8 3z"/></svg></div>
+    <div><b>Sewtrace</b><small>Photo to pattern</small></div>
+  </div>
+  <div>
+    <div class="grp">Pipeline</div>
+    <nav id="steps">
+      <a href="#capture" data-step="capture"><span class="step">01</span>Take the photos<span class="dot"></span></a>
+      <a href="#runBox" data-step="runBox"><span class="step">02</span>Make the pattern<span class="dot" id="dotRun"></span></a>
+      <a href="#cutBox" data-step="cutBox"><span class="step">03</span>Cut plan<span class="dot" id="dotCut"></span></a>
+      <a href="#copilotBox" data-step="copilotBox"><span class="step">04</span>Co-pilot<span class="dot" id="dotEdit"></span></a>
+      <a href="#proofBox" data-step="proofBox"><span class="step">05</span>Check the fit<span class="dot" id="dotProof"></span></a>
+    </nav>
+    <div class="grp">Tools</div>
+    <nav class="tools">
+      <a href="/marker.pdf" target="_blank"><span class="step">&#9633;</span>Marker PDF</a>
+      <a href="/demo"><span class="step">&#9655;</span>Recorded demo</a>
+    </nav>
+  </div>
+  <div class="rail-foot">
+    <div>Mode <b id="footMode">...</b></div>
+    <div>Model <b id="model">...</b></div>
+    <div>Spent <b id="ledger">...</b> of <b id="limit">...</b></div>
+  </div>
+</aside>
+
+<div class="main">
+<div class="bar">
+  <span id="mode" class="badge">...</span>
+  <span class="stat" id="lastRun">No pattern yet</span>
+  <span class="stat">Spent <b id="barSpent">...</b></span>
+  <span class="spacer"></span>
+  <span id="busy" class="badge warn" hidden>A run is active</span>
+  <button type="button" class="primary" id="tourBtn">Guided tour</button>
+  <a class="btn" href="/demo">Demo</a>
+</div>
+<div class="page">
+<div id="modeNote"></div>
+
+<section id="capture">
+  <div class="ph">
+    <div class="eyebrow">Step 01 &middot; Capture</div>
+    <h1>Take the photos</h1>
+    <p>Three photos from above: front, back and one folded sleeve. The printed marker gives the scale, so every length on the pattern comes out in real millimetres.</p>
+  </div>
+  <div class="grid">
+    <div class="card s7">
+      <div class="hd"><h2>How to take them</h2><span class="badge teal">3 photos</span></div>
+      <div class="bd">
+        <ol>
+          <li>Put the t-shirt on a flat surface with a colour that contrasts with the t-shirt.</li>
+          <li>Make the t-shirt flat with your hands. Remove all folds that are not part of the garment.</li>
+          <li>Put the marker on the surface, near the t-shirt. Do not put the marker on the t-shirt.</li>
+          <li>Hold the camera directly above the t-shirt.</li>
+          <li>Make sure that the full t-shirt and the full marker are in the frame.</li>
+          <li>Take the front photo.</li>
+          <li>Turn the t-shirt over. Do steps 2 to 5 again. Take the back photo.</li>
+          <li><b>Sleeve photo:</b> fold one sleeve flat along its underarm line. Put the fold on the left and the cap at the top. Do steps 3 to 5 again. Take the sleeve photo.</li>
+        </ol>
+      </div>
+      <details>
+        <summary>Tips for good photos</summary>
+        <div class="bd">
+          <ul id="captureTips">
+            <li>Tape the marker card flat to the surface.</li>
+            <li>Put the marker close to the t-shirt, near the middle of one side. Do not put the marker on the t-shirt.</li>
+            <li>Hold the camera directly above the t-shirt.</li>
+            <li>Put the t-shirt in the middle of the frame.</li>
+            <li>Use the main lens. Do not use the wide-angle lens.</li>
+            <li>Put each sleeve at an angle down from the shoulder. Keep a gap between the sleeve and the side of the t-shirt.</li>
+            <li>For the sleeve photo, keep the sleeve sewn on. Fold one sleeve flat along its underarm line, with the fold on the left and the cap at the top. Turn the t-shirt so the folded sleeve lies below the body. Keep the whole t-shirt and the marker in the photo.</li>
+          </ul>
+        </div>
+      </details>
+      <details>
+        <summary>The marker</summary>
+        <div class="bd">
+          <h3>The marker</h3>
+          <ol>
+            <li><a href="/marker.pdf" target="_blank">Open the marker PDF.</a></li>
+            <li>Set the print scale to 100% ("Actual size").</li>
+            <li>Print the marker on matte paper.</li>
+            <li>Measure the black square with a steel ruler. The side must be 100 mm, plus or minus 0.5 mm.</li>
+            <li>Attach the marker to stiff card. Make sure that the card is flat.</li>
+          </ol>
+        </div>
+      </details>
+    </div>
+    <div class="card s5">
+      <div class="hd"><h2>The sleeve photo</h2><span class="badge sim">diagram</span></div>
+      <div class="bd diagram">
+        <svg viewBox="0 0 270 235" role="img" aria-label="Sleeve photo: fold on the left, cap at the top, whole marker in frame">
+          <rect x="2" y="2" width="266" height="231" rx="6" fill="#E9E2D2" stroke="#C5C0B4" stroke-width="2"/>
+          <path d="M70 175 L70 48 Q105 18 150 52 Q165 62 190 175 Z" fill="#c8453d" stroke="#182026" stroke-width="2"/>
+          <line x1="70" y1="40" x2="70" y2="185" stroke="#0E8F83" stroke-width="3" stroke-dasharray="7 4"/>
+          <text x="10" y="112" font-size="13" fill="#0E8F83" font-weight="700">FOLD</text>
+          <text x="10" y="127" font-size="12" fill="#0E8F83" font-weight="700">on left</text>
+          <text x="84" y="22" font-size="13" font-weight="700" fill="#182026">CAP at the top</text>
+          <text x="95" y="198" font-size="12" fill="#fff" font-weight="700">hem</text>
+          <rect x="205" y="150" width="50" height="50" fill="#111"/>
+          <rect x="215" y="160" width="10" height="10" fill="#fff"/><rect x="235" y="170" width="10" height="10" fill="#fff"/>
+          <rect x="215" y="180" width="20" height="10" fill="#fff"/>
+          <text x="262" y="222" font-size="11" fill="#182026" text-anchor="end">marker in frame</text>
+        </svg>
+        <p class="small">The same rule holds for the front and back photos: the whole t-shirt and the whole marker are in the frame.</p>
+        <svg viewBox="0 0 270 120" role="img" aria-label="Marker rule: print at 100 percent, black square 100 mm">
+          <rect x="20" y="10" width="70" height="70" fill="#111"/>
+          <rect x="34" y="24" width="14" height="14" fill="#fff"/><rect x="62" y="38" width="14" height="14" fill="#fff"/>
+          <rect x="34" y="52" width="28" height="14" fill="#fff"/>
+          <line x1="20" y1="94" x2="90" y2="94" stroke="currentColor" stroke-width="2"/>
+          <line x1="20" y1="88" x2="20" y2="100" stroke="currentColor" stroke-width="2"/><line x1="90" y1="88" x2="90" y2="100" stroke="currentColor" stroke-width="2"/>
+          <text x="30" y="112" font-size="12" font-weight="700" fill="currentColor">100 mm</text>
+          <text x="110" y="34" font-size="13" font-weight="700" fill="currentColor">Print at 100%</text>
+          <text x="110" y="52" font-size="12" fill="currentColor">Do not use "Fit to page".</text>
+          <text x="110" y="70" font-size="12" fill="currentColor">Measure the black square.</text>
+          <text x="110" y="88" font-size="12" fill="currentColor">Keep it flat and in frame.</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="runBox">
+  <div class="ph">
+    <div class="eyebrow">Step 02 &middot; Pattern</div>
+    <h1>Make the pattern</h1>
+    <p>SAM finds the t-shirt in each photo, the marker turns pixels into millimetres, and Muse Spark fills in what no photo shows. Every seam pair is checked before any file is written.</p>
+  </div>
+  <div class="grid">
+    <form id="runForm" class="card s8">
+      <div class="hd"><h2>Your photos</h2><span class="small" id="uploadNote"></span></div>
+      <div class="bd">
+        <div class="drop">
+          <label>Front photo <input type="file" name="front" accept="image/jpeg,image/png"></label>
+          <label>Back photo <input type="file" name="back" accept="image/jpeg,image/png"></label>
+          <label>Sleeve photo <input type="file" name="sleeve" accept="image/jpeg,image/png"></label>
+        </div>
+        <div class="row" style="justify-content:space-between;margin-top:12px">
+          <label class="check"><input type="checkbox" name="full" id="fullBox"> Whole pieces (cut flat, not on the fold)</label>
+          <button class="primary" id="runBtn" type="submit">Run with my photos</button>
+        </div>
+      </div>
+    </form>
+    <div class="card s4">
+      <div class="hd"><h2>No photos yet?</h2><span class="badge sim">synthetic</span></div>
+      <div class="bd">
+        <p style="margin-top:0">Use a synthetic tee. Its measurements are known, so the page shows the error of every number.</p>
+        <button id="sampleBtn" type="button">Try a sample tee</button>
+        <p class="small">REAL mode spends money on every run. Each run is checked against the budget limit.</p>
+      </div>
+    </div>
+  </div>
+  <div id="runMsg"></div>
+  <div id="runOut"></div>
+</section>
+
+<section id="cutBox">
+  <div class="ph">
+    <div class="eyebrow">Step 03 &middot; Cut plan</div>
+    <h1>Lay the pieces on the fabric</h1>
+    <p>Every piece placed on the roll with no overlap, and the path a cutter would follow. The cutter speeds are an illustrative profile, not a real machine.</p>
+  </div>
+  <div id="cutOut"><div class="card"><div class="empty">The cut plan appears here after a pattern is made.</div></div></div>
+</section>
+
+<section id="copilotBox">
+  <div class="ph">
+    <div class="eyebrow">Step 04 &middot; Co-pilot</div>
+    <h1>Change the pattern in plain words</h1>
+    <p>Muse Spark reads the request and proposes a change. Nothing changes until you press Apply; then code makes the change and the seam check runs again.</p>
+  </div>
+  <div id="copilotOut"><div class="card"><div class="empty">Make a pattern first. Then ask, for example: make it 2 cm longer.</div></div></div>
+</section>
+
+<section id="proofBox">
+  <div class="ph">
+    <div class="eyebrow">Step 05 &middot; Check the fit</div>
+    <h1>Does the paper match the t-shirt?</h1>
+    <p>An optional last check. Lay the printed pattern on the t-shirt and take one photo; the page measures the gap between the paper edge and the t-shirt edge all the way round.</p>
+  </div>
+  <div class="grid" id="proofForms">
+    <div class="card s12">
+      <div class="hd"><h2>How to check</h2><span class="badge" id="proofReady">needs a pattern</span></div>
+      <div class="bd">
+        <div class="steps">
+          <div><b>Print the halves</b><span>Print pattern.pdf at 100%. Use the half pieces (leave "Whole pieces" unticked).</span></div>
+          <div><b>Cut the front</b><span>Cut the front piece out along its stitch line (the inner line), not the outer cut line.</span></div>
+          <div><b>Lay it on the tee</b><span>Put the fold edge of the paper on the centre line of the t-shirt front, neck to neck.</span></div>
+          <div><b>Take one photo</b><span>From above, with the marker in frame, as for the front photo.</span></div>
+        </div>
+      </div>
+    </div>
+    <form id="proofForm" class="card s8">
+      <div class="hd"><h2>Your proof photo</h2></div>
+      <div class="bd">
+        <div class="row" style="justify-content:space-between">
+          <div class="drop" style="grid-template-columns:1fr;flex:1;min-width:220px"><label>Proof photo <input type="file" name="photo" accept="image/jpeg,image/png"></label></div>
+          <button class="primary" id="proofBtn" type="submit">Check my proof photo</button>
+        </div>
+      </div>
+    </form>
+    <div class="card s4">
+      <div class="hd"><h2>Sample proof</h2><span class="badge sim">synthetic</span></div>
+      <div class="bd">
+        <button id="proofSampleBtn" type="button">Try the sample proof</button>
+        <p class="small">A paper panel cut 1% too big, for the sample tee. Run the sample tee first.</p>
+      </div>
+    </div>
+  </div>
+  <div id="proofMsg"></div>
+  <div id="proofOut"></div>
+</section>
+</div>
+</div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) { if (k === "class") el.className = v; else el.setAttribute(k, v); }
+  for (const kid of kids) if (kid !== "" && kid !== null && kid !== undefined) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+const mm = (v, d = 1) => (v === null || v === undefined ? "n/a" : v.toFixed(d) + " mm");
+const SRC_CLASS = {"from photo": "photo", "inferred by Muse": "muse", "co-pilot edit": "edit", "your tape": "user", "averaged front/back": "user"};
+const tag = (label) => (label ? h("span", {class: "src " + (SRC_CLASS[label] || "")}, label) : "");
+const signed = (v) => { v = Math.abs(v) < 0.05 ? 0 : v; return (v >= 0 ? "+" : "") + v.toFixed(1) + " mm"; };
+const label = (key) => key.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+function note(box, kind, text, title) {
+  box.replaceChildren(h("div", {class: "msg " + kind}, title ? h("b", {}, title + ". ") : "", text));
+}
+const card = (title, badge, body, cls) => h("div", {class: "card " + (cls || "")},
+  h("div", {class: "hd"}, h("h2", {}, title), badge || ""), body);
+const bd = (...kids) => h("div", {class: "bd"}, ...kids);
+const flush = (...kids) => h("div", {class: "bd flush scroll"}, ...kids);
+const tile = (k, v, sub, badge) => h("div", {class: "tile"}, h("div", {class: "k"}, k, badge || ""), h("div", {class: "v"}, v), sub ? h("div", {class: "sub"}, sub) : "");
+const fold = (title, ...kids) => h("details", {}, h("summary", {}, title), h("div", {class: "bd"}, ...kids));
+const dot = (id, kind) => { $(id).className = "dot " + (kind || ""); };
+
+async function api(url, opts) {
+  const res = await fetch(url, opts);
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok) {
+    const e = (body && body.error) || {title: "Request failed", message: "The server answered HTTP " + res.status + "."};
+    throw e;
+  }
+  return body;
+}
+
+let state = {};
+let lastRunSample = false;  // a failed sample run re-runs the sample, not uploaded photos
+let havePattern = false, patternIsSample = false, patternIsFull = false;
+async function refreshStatus() {
+  try {
+    state = await api("/api/status");
+  } catch (e) { $("busy").hidden = false; $("busy").textContent = "Server not reachable"; return; }
+  $("mode").textContent = state.mode + " mode"; $("mode").className = "badge " + state.mode;
+  $("footMode").textContent = state.mode;
+  $("model").textContent = state.reasoning_model;
+  $("ledger").textContent = "$" + state.ledger_usd.toFixed(4);
+  $("limit").textContent = "$" + state.budget_limit_usd.toFixed(2);
+  $("barSpent").textContent = "$" + state.ledger_usd.toFixed(2) + " of $" + state.budget_limit_usd.toFixed(2);
+  $("busy").hidden = !state.busy; $("busy").textContent = "A run is active";
+  $("uploadNote").textContent = state.uploads_enabled ? "Up to " + state.max_upload_mb + " MB each, JPEG or PNG"
+    : "Mock mode: your own photos need REAL mode";
+  const n = $("modeNote");
+  if (state.mode === "REAL") n.replaceChildren(h("div", {class: "msg warn"}, h("b", {}, "REAL mode. "), "Every run with your photos makes paid Meta calls. The sample tee is free."));
+  else if (state.mode === "MOCK") n.replaceChildren(h("div", {class: "msg info"}, h("b", {}, "MOCK mode. "), "No paid calls. Only the sample tee works. Real photos need REAL mode: set META_API_KEY and SEWTRACE_MOCK=0 on the server, and install the .[real] extra."));
+  else n.replaceChildren(h("div", {class: "msg info"}, h("b", {}, "OFFLINE mode. "), "Answers come from the cache only."));
+  if (!state.uploads_enabled) for (const el of $("runForm").querySelectorAll("input[type=file]")) el.disabled = true;
+}
+
+let busyNow = false;
+function setBusy(on) {
+  busyNow = on;
+  for (const id of ["runBtn", "sampleBtn"]) $(id).disabled = on;
+  proofState();
+}
+// The proof needs a pattern; the sample proof fits only the sample tee.
+function proofState() {
+  $("proofBtn").disabled = busyNow || !havePattern;
+  $("proofSampleBtn").disabled = busyNow || !(havePattern && patternIsSample);
+  const r = $("proofReady");
+  if (!havePattern) { r.textContent = "needs a pattern"; r.className = "badge"; }
+  else if (patternIsFull) { r.textContent = "print the halves"; r.className = "badge warn"; }
+  else { r.textContent = "ready"; r.className = "badge ok"; }
+}
+
+async function start(url, form, msgBox, outBox, render) {
+  outBox.replaceChildren();
+  setBusy(true);
+  note(msgBox, "info", "Starting...");
+  try {
+    const {id} = await api(url, {method: "POST", body: form, headers: {"X-Sewtrace": "1"}});
+    await follow(id, msgBox, outBox, render);
+  } catch (e) {
+    note(msgBox, "err", e.message, e.title);
+  } finally { setBusy(false); refreshStatus(); }
+}
+
+async function follow(id, msgBox, outBox, render) {
+  for (;;) {
+    const job = await api("/api/jobs/" + id);
+    if (job.state === "running") { note(msgBox, "info", job.step + "..."); await new Promise((r) => setTimeout(r, 700)); continue; }
+    if (job.state === "error") {
+      note(msgBox, "err", job.error.message, job.error.title);
+      const parts = [];
+      if (job.error.review && job.error.review.length) parts.push(reviewBox(id, job.error.review, lastRunSample));
+      if (job.kind === "run") { havePattern = patternIsSample = false; proofState(); parts.push(debugBox(id, ["front", "back", "sleeve"].map((v) => ({view: v, file: "debug_" + v})), true)); dot("dotRun", "fail"); }
+      if (job.kind === "proof") dot("dotProof", "fail");
+      if (job.error.seam_log) parts.push(card("Seam check log", "", flush(seamLog(job.error.seam_log, []))));
+      outBox.replaceChildren(...parts.map((p) => h("div", {style: "margin-top:14px"}, p)));
+      return;
+    }
+    msgBox.replaceChildren();
+    render(id, job.result, outBox);
+    return;
+  }
+}
+
+const file = (id, name) => "/api/jobs/" + id + "/files/" + name;
+
+function renderRun(id, r, box) {
+  // An edited sample is no longer the sample tee: the sample proof fits only the unedited one.
+  havePattern = true; patternIsSample = !!r.sample && !(r.edits && r.edits.length); patternIsFull = !!r.full; proofState();
+  dot("dotRun", r.seams.every((s) => s.ok) ? "done" : "fail");
+  $("lastRun").textContent = "Pattern " + id.slice(0, 8) + (r.edits && r.edits.length ? " (edited)" : "") + (r.synthetic ? " · sample tee" : "");
+  const m = Object.fromEntries(r.measurements.map((x) => [x.key, x]));
+  const ok = r.seams.filter((s) => s.ok).length;
+  const out = [];
+  if (r.edits && r.edits.length) out.push(editedBox(r));
+
+  const tiles = h("div", {class: "tiles"},
+    tile("Seam pairs", ok + " / " + r.seams.length, "lengths match front to back", h("span", {class: "badge " + (ok === r.seams.length ? "ok" : "bad")}, ok === r.seams.length ? "pass" : "fail")),
+    ...["body_length", "chest_width", "sleeve_length"].filter((k) => m[k]).map((k) =>
+      tile(label(k), m[k].value_mm.toFixed(1), r.synthetic && m[k].error_mm !== null ? "error " + signed(m[k].error_mm) : "mm", tag(m[k].provenance))),
+    tile("Model calls", String(r.model_calls), r.model_calls === 0 ? "served from the cache" : "this run"));
+  out.push(tiles);
+
+  for (const n of r.lay_notes || []) out.push(h("div", {class: "msg info"}, n));
+  if (r.cap_note) out.push(h("div", {class: "msg warn"}, r.cap_note));
+  if (r.review && r.review.length) out.push(reviewBox(id, r.review, r.sample));
+
+  // Pattern preview beside the measurements.
+  const mt = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Value"), ...(r.synthetic ? [h("th", {}, "Truth"), h("th", {}, "Error")] : []), h("th", {}, "Source")));
+  for (const x of r.measurements) {
+    mt.append(h("tr", {}, h("td", {}, label(x.key)), h("td", {}, mm(x.value_mm)),
+      ...(r.synthetic ? [h("td", {}, mm(x.truth_mm)), h("td", {}, x.error_mm === null ? "n/a" : signed(x.error_mm))] : []), h("td", {}, tag(x.provenance))));
+  }
+  for (const v of r.inferred || []) mt.append(h("tr", {}, h("td", {}, v.label), h("td", {}, mm(v.value_mm)), ...(r.synthetic ? [h("td", {}, ""), h("td", {}, "")] : []), h("td", {}, tag(v.provenance))));
+  // Downloads in groups; anything not named in a group still shows, under "Other".
+  const GROUPS = [["Pattern to print", ["pdf", "svg", "dxf"]], ["Records", ["spec"]],
+    ["Cutting and sewing", ["cutplan", "cut_path", "toolpath", "bom", "instructions"]], ["Everything", ["bundle"]]];
+  const left = new Set(r.downloads);
+  const downloads = h("div", {class: "downloads"});
+  const group = (title, names) => {
+    const row = h("div", {class: "row"});
+    for (const name of names) if (left.has(name)) {
+      left.delete(name);
+      row.append(h("a", {class: "btn", href: file(id, name), download: ""}, r.download_files[name]));
+    }
+    if (row.childNodes.length) downloads.append(h("div", {}, h("div", {class: "grp2"}, title), row));
+  };
+  for (const [title, names] of GROUPS) group(title, names);
+  group("Other", [...left]);
+  out.push(h("div", {class: "grid"},
+    card("Pattern", h("span", {class: "badge " + (r.full ? "sim" : "teal")}, r.full ? "whole pieces" : "half pieces, cut on the fold"),
+      bd(h("div", {class: "sheet"}, h("img", {src: file(id, r.preview), alt: "pattern panels preview"})),
+        r.full ? h("p", {class: "small"}, "Whole pieces were printed. For the fit check, print the halves: untick the box and run again.") : ""), "s7"),
+    card("Measurements", h("span", {class: "small"}, "values from the photos, the model or you"), flush(mt), "s5")));
+
+  // Seams.
+  const st = h("table", {}, h("tr", {}, h("th", {}, "Pair (a ~ b)"), h("th", {}, "a"), h("th", {}, "b"), h("th", {}, "b - a"), h("th", {}, "Allowed"), h("th", {}, "Result")));
+  for (const s of r.seams) {
+    st.append(h("tr", {}, h("td", {}, s.name), h("td", {}, mm(s.len_a_mm)), h("td", {}, mm(s.len_b_mm)), h("td", {}, signed(s.diff_mm)),
+      h("td", {}, signed(s.min_diff_mm) + " to " + signed(s.max_diff_mm)),
+      h("td", {}, h("span", {class: "badge " + (s.ok ? "ok" : "bad")}, s.ok ? "pass" : "fail"))));
+  }
+  const seamCard = card("Seam length matching", h("span", {class: "badge sim"}, "checked before export"), flush(st));
+  seamCard.append(fold("Seam check log", h("div", {class: "scroll"}, seamLog(r.seam_log, r.seams.map((s) => s.name)))));
+  const photos = h("div", {class: "photos"});
+  for (const p of r.photos) photos.append(h("figure", {}, h("img", {src: file(id, p.file), alt: p.view + " photo with mask outline"}), h("figcaption", {}, p.view)));
+  seamCard.append(fold("Photos with the SAM mask outline", photos));
+  if (r.debug && r.debug.length) seamCard.append(fold("What the program found on each photo", debugInner(id, r.debug, false)));
+  out.push(seamCard);
+
+  if (r.downloads.includes("spec")) out.push(studioCard(id));
+  out.push(card("Downloads", h("span", {class: "small"}, "pattern, records, cut plan and the whole bundle"), bd(downloads)));
+  box.replaceChildren(...out.map((p) => h("div", {style: "margin-top:14px"}, p)));
+
+  if (r.cutplan) { $("cutOut").replaceChildren(cutPlanBox(id, r.cutplan)); dot("dotCut", "done"); }
+  $("copilotOut").replaceChildren(copilotBox(id, r));
+}
+
+// Cut plan: the roll with the nested pieces, and a marker that follows the cut paths. The cutter speeds
+// are an illustrative profile, not a real machine. All text goes in with createTextNode (h()).
+let cutAnim = null;  // the animation of the last cut plan; stopped when a new one is drawn
+function cutPlanBox(id, c) {
+  if (cutAnim) cutAnim.stop();
+  const s = c.summary;
+  const tiles = h("div", {class: "tiles"},
+    tile("Fabric use", (100 * s.utilisation).toFixed(1) + " %", "waste " + (100 * s.waste_frac).toFixed(1) + " %"),
+    tile("Roll used", (s.used_length_mm / 10).toFixed(1) + " cm", "of a " + (s.roll_width_mm / 10).toFixed(0) + " cm wide roll"),
+    tile("Cut length", (s.cut_length_mm / 1000).toFixed(2) + " m", "all pieces"),
+    tile("Est. cut time", s.est_duration_s.toFixed(1) + " s", "illustrative profile"));
+
+  const view = h("div", {style: "position:relative"});
+  const img = h("img", {src: file(id, c.image), alt: "cut plan: pieces nested on the fabric roll", style: "display:block;width:100%;border-radius:0"});
+  const svgNS = "http://www.w3.org/2000/svg";
+  const overlay = document.createElementNS(svgNS, "svg");
+  overlay.setAttribute("style", "position:absolute;left:0;top:0;width:100%;height:100%");
+  overlay.setAttribute("viewBox", "0 0 " + s.roll_width_mm + " " + s.used_length_mm);
+  const trail = document.createElementNS(svgNS, "path");
+  trail.setAttribute("fill", "none"); trail.setAttribute("stroke", "#B53A2E"); trail.setAttribute("stroke-width", "3");
+  const head = document.createElementNS(svgNS, "circle");
+  head.setAttribute("r", "9"); head.setAttribute("fill", "#B53A2E"); head.setAttribute("stroke", "#fff"); head.setAttribute("stroke-width", "2");
+  overlay.append(trail, head);
+  view.append(img, overlay);
+
+  const play = h("button", {type: "button", class: "primary"}, "Play");
+  const reset = h("button", {type: "button"}, "Reset");
+  const speed = h("select", {"aria-label": "speed"});
+  for (const k of [1, 5, 20, 50]) speed.append(h("option", {value: String(k), ...(k === 5 ? {selected: ""} : {})}, k + "x"));
+  const status = h("span", {class: "small mono"}, "");
+  const controls = h("div", {class: "row"}, play, reset, h("span", {class: "small"}, "Speed"), speed, status);
+
+  cutAnim = cutterAnimation(id, c.paths, {trail, head, play, reset, speed, status});
+  return h("div", {style: "display:flex;flex-direction:column;gap:14px"}, tiles,
+    card("Cut plan", h("span", {class: "badge warn"}, "illustrative cutter profile"),
+      bd(controls, h("div", {class: "sheet", style: "margin-top:12px"}, view),
+        h("div", {class: "legend", style: "margin-top:10px"}, h("span", {}, h("i", {style: "background:#B53A2E"}), "cutting"),
+          h("span", {}, h("i", {style: "background:#4C6F96"}), "moving to the next piece"),
+          h("span", {}, "Illustrative cutter profile. A sample profile, not a real machine.")))));
+}
+
+// Moves the marker along the cut paths with requestAnimationFrame. Sim time = real time x speed. The
+// head travels to the start of a piece at the travel speed, waits for the pierce time, then cuts.
+function cutterAnimation(id, jsonName, ui) {
+  let plan = null, frame = 0, last = 0, simT = 0, playing = false, stopped = false;
+  let legs = [], total = 0;
+  const startPlan = async () => {
+    plan = await api(file(id, jsonName));
+    let at = plan.home, t = 0;
+    for (const p of plan.paths) {
+      const pts = p.points;
+      legs.push({kind: "travel", from: at, to: pts[0], t0: t, dur: dist(at, pts[0]) / plan.travel_speed_mm_s, piece: p.piece});
+      t += legs[legs.length - 1].dur;
+      legs.push({kind: "pierce", from: pts[0], to: pts[0], t0: t, dur: plan.pierce_s, piece: p.piece});
+      t += plan.pierce_s;
+      for (let i = 1; i < pts.length; i++) {
+        legs.push({kind: "cut", from: pts[i - 1], to: pts[i], t0: t, dur: dist(pts[i - 1], pts[i]) / plan.cut_speed_mm_s, piece: p.piece});
+        t += legs[legs.length - 1].dur;
+      }
+      at = pts[0];
+    }
+    legs.push({kind: "travel", from: at, to: plan.home, t0: t, dur: dist(at, plan.home) / plan.travel_speed_mm_s, piece: ""});
+    total = t + legs[legs.length - 1].dur;
+    draw();
+  };
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const draw = () => {
+    let i = legs.findIndex((l) => simT < l.t0 + l.dur);
+    if (i < 0) i = legs.length - 1;
+    const l = legs[i], f = l.dur > 0 ? Math.min(1, Math.max(0, (simT - l.t0) / l.dur)) : 1;
+    const x = l.from[0] + (l.to[0] - l.from[0]) * f, y = l.from[1] + (l.to[1] - l.from[1]) * f;
+    ui.head.setAttribute("cx", x); ui.head.setAttribute("cy", y);
+    ui.head.setAttribute("fill", l.kind === "cut" ? "#B53A2E" : "#4C6F96");
+    // The red line shows the cut so far: every finished cut leg, plus the part of this one.
+    let d = "";
+    for (let k = 0; k <= i; k++) {
+      const q = legs[k];
+      if (q.kind !== "cut") continue;
+      const begin = k === 0 || legs[k - 1].kind !== "cut";
+      d += (begin ? "M" + q.from[0] + "," + q.from[1] : "") + "L" + (k === i ? x + "," + y : q.to[0] + "," + q.to[1]);
+    }
+    ui.trail.setAttribute("d", d);
+    ui.status.textContent = (simT >= total ? "Done. " : l.kind === "cut" ? "Cutting " : l.kind === "pierce" ? "Piercing " : "Moving to ") +
+      (simT >= total ? "" : (l.piece || "home") + ". ") + simT.toFixed(1) + " of " + total.toFixed(1) + " s";
+  };
+  const tick = (now) => {
+    if (stopped || !playing) return;
+    simT = Math.min(total, simT + ((now - last) / 1000) * Number(ui.speed.value));
+    last = now;
+    draw();
+    if (simT >= total) { playing = false; ui.play.textContent = "Play"; return; }
+    frame = requestAnimationFrame(tick);
+  };
+  ui.play.addEventListener("click", () => {
+    if (!legs.length) return;
+    if (playing) { playing = false; cancelAnimationFrame(frame); ui.play.textContent = "Play"; return; }
+    if (simT >= total) simT = 0;
+    playing = true; ui.play.textContent = "Pause"; last = performance.now();
+    frame = requestAnimationFrame(tick);
+  });
+  ui.reset.addEventListener("click", () => {
+    playing = false; cancelAnimationFrame(frame); simT = 0; ui.play.textContent = "Play"; if (legs.length) draw();
+  });
+  startPlan().catch((e) => { ui.status.textContent = "The cut paths could not be loaded."; });
+  return {stop() { stopped = true; cancelAnimationFrame(frame); }};
+}
+
+// Seams the front and back photos measured differently: the length used, and a box to correct it
+// with a tape measurement. "Re-run" uses the same photos (no new upload, SAM answers are cached).
+function reviewBox(id, review, sample) {
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Seam"), h("th", {}, "Front photo"), h("th", {}, "Back photo"),
+    h("th", {}, "Used"), h("th", {}, "Your tape measure (mm)")));
+  const inputs = {};
+  for (const r of review) {
+    const box = h("input", {type: "number", step: "0.5", min: "20", max: "1000", name: r.edge,
+      value: r.used_mm === null ? "" : r.used_mm.toFixed(1), style: "width: 7em"});
+    inputs[r.edge] = box;
+    const used = r.used_mm === null ? "too far apart" : mm(r.used_mm) + (r.source === "user" ? " (yours)" : " (average)");
+    t.append(h("tr", {}, h("td", {}, r.edge), h("td", {}, mm(r.front_mm)), h("td", {}, mm(r.back_mm)),
+      h("td", {class: r.used_mm === null ? "bad" : ""}, used, " ", tag(r.provenance)), h("td", {}, box)));
+  }
+  const check = review.filter((r) => r.check_photos || r.used_mm === null).map((r) => r.edge);
+  const warn = check.length ? h("div", {class: "msg warn", style: "margin-top:10px"}, h("b", {}, "Check the photos for " + check.join(" and ") + ". "),
+    "The two photos differ a lot. The likely cause is an armpit or hem corner in the wrong place on one photo; a length typed here does not move it. If the purple cut or the corners look wrong, take that photo again.") : "";
+  const btn = h("button", {type: "button", class: "primary"}, "Re-run with my numbers");
+  btn.addEventListener("click", () => {
+    const f = new FormData();
+    if (sample) f.append("sample", "1"); else f.append("rerun", id);
+    if ($("fullBox").checked) f.append("full", "1");
+    for (const [edge, box] of Object.entries(inputs)) if (box.value) f.append(edge, box.value);
+    start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
+  });
+  return card("Front and back disagree", h("span", {class: "badge warn"}, "needs review"),
+    bd(h("p", {style: "margin-top:0"}, "The front and back photos measure these seams differently. The same seam can't have two lengths, so one was picked for both. Measure the seam on the t-shirt with a tape (in mm) and correct it if it is off."),
+      h("div", {class: "scroll"}, t), warn, h("div", {style: "margin-top:10px"}, btn)));
+}
+
+// What the outline step found on each photo: the outline, where the sleeves were cut off, and the
+// half panel with each edge length. Shown on a failed run too, to see which photo is off.
+function debugInner(id, items, hideMissing) {
+  const box = h("div", {class: "photos"});
+  for (const d of items) {
+    const img = h("img", {src: file(id, d.file), alt: d.view + ": outline, sleeve cut and edge lengths"});
+    const fig = h("figure", {}, img, h("figcaption", {}, d.view));
+    if (hideMissing) img.addEventListener("error", () => fig.remove());
+    box.append(fig);
+  }
+  return h("div", {}, h("p", {class: "small", style: "margin-top:0"}, "Left: yellow outline, green body, purple where the sleeves were cut off. Right: the half panel with each edge length."), box);
+}
+function debugBox(id, items, hideMissing) {
+  return card("What the program found on each photo", h("span", {class: "badge sim"}, "debug"), bd(debugInner(id, items, hideMissing)));
+}
+
+const EDIT_LABELS = {body_length: "Body length", chest_width: "Chest width", sleeve_length: "Sleeve length", overall_scale_pct: "Overall size"};
+const JSON_HEADERS = {"X-Sewtrace": "1", "Content-Type": "application/json"};
+const withUnit = (v, unit) => (unit === "%" ? v.toFixed(1) + " %" : mm(v));
+
+// What the last Co-pilot edit changed: each field from its old value to its new one, and every measurement that moved.
+function editedBox(r) {
+  const list = h("ul", {});
+  for (const e of r.edits) list.append(h("li", {}, (EDIT_LABELS[e.edit] || e.edit) + ": " + withUnit(e.from, e.unit) + " to " + withUnit(e.to, e.unit)));
+  const moved = h("table", {}, h("tr", {}, h("th", {}, "Measurement"), h("th", {}, "Before"), h("th", {}, "After")));
+  for (const c of r.edit_changes || []) moved.append(h("tr", {}, h("td", {}, label(c.key)), h("td", {}, mm(c.from_mm)), h("td", {}, mm(c.to_mm))));
+  return h("div", {class: "msg ok"}, h("b", {}, "Co-pilot edit applied. "), "The seam check passed and the files below are the new pattern.", list, moved);
+}
+
+async function waitJob(id, msgBox) {
+  for (;;) {
+    const job = await api("/api/jobs/" + id);
+    if (job.state !== "running") return job;
+    note(msgBox, "info", job.step + "...");
+    await new Promise((r) => setTimeout(r, 700));
+  }
+}
+
+// Co-pilot: a plain request, one Spark call for the proposal, then the user approves it. Code makes the change.
+function copilotBox(id, r) {
+  if (r.edits && r.edits.length) dot("dotEdit", "done");
+  const input = h("input", {type: "text", maxlength: "300", placeholder: "for example: make it 2 cm longer", style: "flex:1;min-width:220px"});
+  const ask = h("button", {type: "button", class: "primary"}, "Ask the Co-pilot");
+  const msg = h("div", {style: "margin-top:10px"}), out = h("div", {style: "margin-top:10px"});
+  const cost = state.mode === "REAL" ? "one Spark call" : state.mode === "MOCK" ? "mock, no paid call" : "offline, from the cache";
+  const go = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    out.replaceChildren(); ask.disabled = true; note(msg, "info", "Asking...");
+    try {
+      const {id: editId} = await api("/api/edit", {method: "POST", headers: JSON_HEADERS, body: JSON.stringify({run: id, text})});
+      const job = await waitJob(editId, msg);
+      if (job.state === "error") { note(msg, "err", job.error.message, job.error.title); return; }
+      msg.replaceChildren();
+      out.replaceChildren(proposalView(id, editId, job.result, msg, out));
+    } catch (e) { note(msg, "err", e.message, e.title); } finally { ask.disabled = false; refreshStatus(); }
+  };
+  ask.addEventListener("click", go);
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); go(); } });
+  const chips = h("div", {class: "row", style: "margin-top:10px"});
+  for (const ex of ["make it 2 cm longer", "sleeves 1 cm shorter", "a bit wider at the chest", "size up 5%"]) {
+    const b = h("button", {type: "button"}, ex);
+    b.addEventListener("click", () => { input.value = ex; input.focus(); });
+    chips.append(b);
+  }
+  return card("Co-pilot", h("span", {class: "badge " + (state.mode === "REAL" ? "warn" : "sim")}, cost),
+    bd(h("div", {class: "row"}, input, ask), chips,
+      h("p", {class: "small"}, "Nothing changes until you press Apply. Changes are limited to body length, chest width, sleeve length and overall size."),
+      msg, out));
+}
+
+function proposalView(id, editId, res, msg, box) {
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Field"), h("th", {}, "Now"), h("th", {}, "Proposed")));
+  for (const row of res.rows) t.append(h("tr", {}, h("td", {}, row.label), h("td", {}, withUnit(row.now, row.unit)), h("td", {}, withUnit(row.proposed, row.unit))));
+  const apply = h("button", {type: "button", class: "primary"}, "Apply");
+  const cancel = h("button", {type: "button"}, "Cancel");
+  cancel.addEventListener("click", () => { box.replaceChildren(); msg.replaceChildren(); });
+  apply.addEventListener("click", async () => {
+    apply.disabled = cancel.disabled = true; setBusy(true); note(msg, "info", "Applying...");
+    try {
+      const {id: newId} = await api("/api/edit/apply", {method: "POST", headers: JSON_HEADERS, body: JSON.stringify({run: id, edit: editId})});
+      const job = await waitJob(newId, msg);
+      if (job.state === "error") { note(msg, "err", job.error.message, job.error.title); apply.disabled = cancel.disabled = false; return; }
+      msg.replaceChildren();
+      renderRun(newId, job.result, $("runOut"));
+      $("runBox").scrollIntoView({behavior: "smooth"});
+    } catch (e) { note(msg, "err", e.message, e.title); apply.disabled = cancel.disabled = false; } finally { setBusy(false); refreshStatus(); }
+  });
+  return h("div", {class: "msg info"}, h("b", {}, "Proposal. "), res.explanation, h("div", {class: "scroll"}, t), h("div", {class: "row"}, apply, cancel));
+}
+
+function seamLog(log, names) {
+  if (!log.length) return h("p", {class: "small"}, "No log.");
+  const all = names.length ? names : [...new Set(log.flatMap((row) => Object.keys(row.diffs || {})))];
+  const t = h("table", {}, h("tr", {}, h("th", {}, "Step"), ...all.map((n) => h("th", {}, n)), h("th", {}, "Change")));
+  for (const row of log) {
+    const failing = new Set(row.failing || []);
+    const applied = (row.applied || []).map((c) => c.panel ? `${c.panel}.${c.edge} ${c.from_mm.toFixed(2)} to ${c.to_mm.toFixed(2)} mm`
+      : (c.sleeve_cap || c.flat_cap) ? `sleeve.cap ${c.from_mm.toFixed(1)} to ${c.to_mm.toFixed(1)} mm` + (c.flat_cap ? `, sleeve top straight, ${c.sleeve_width_mm.toFixed(0)} mm wide, sleeve.underarm ${c.underarm_from_mm.toFixed(1)} to ${c.underarm_to_mm.toFixed(1)} mm` : "")
+      : c.edit ? `${EDIT_LABELS[c.edit] || c.edit} ${c.from.toFixed(1)} to ${c.to.toFixed(1)} ${c.unit} (co-pilot edit)`
+      : JSON.stringify(c)).join("; ");
+    t.append(h("tr", {}, h("td", {}, row.iteration + " " + row.source),
+      ...all.map((n) => (n in (row.diffs || {})) ? h("td", {class: failing.has(n) ? "bad" : "ok"}, signed(row.diffs[n])) : h("td", {}, "")),
+      h("td", {style: "text-align:left;font-family:var(--f-ui)"}, applied)));
+  }
+  return t;
+}
+
+// The fit check: one verdict, three numbers, the overlay, and what to do next.
+function renderProof(id, r, box) {
+  const good = r.pct_within >= 95;
+  dot("dotProof", good ? "done" : "fail");
+  const source = r.spec_source === "sample" ? "the sample tee" : "pattern " + r.spec_source.slice(0, 8);
+  const verdict = h("div", {class: "msg " + (good ? "ok" : "warn")}, h("div", {class: "verdict"},
+    h("span", {class: "big"}, good ? "The paper matches the t-shirt" : "The paper is off"),
+    h("span", {class: "badge " + (good ? "ok" : "bad")}, good ? "pass" : "check")),
+    h("div", {}, r.pct_within.toFixed(1) + "% of the edge is within " + r.tol_mm + " mm of the t-shirt. Checked against " + source + "."));
+  const tiles = h("div", {class: "tiles"},
+    tile("Within " + r.tol_mm + " mm", r.pct_within.toFixed(1) + " %", "of the edge points", h("span", {class: "badge " + (good ? "ok" : "bad")}, good ? "pass" : "under 95%")),
+    tile("Average gap", mm(r.mean_mm, 1), "paper edge to t-shirt edge"),
+    tile("Worst 5%", mm(r.p95_mm, 1), "95% of the gaps are smaller"),
+    tile("Largest gap", mm(r.max_mm, 1), "one point"));
+  const hints = [];
+  if (r.side_offset_mm !== null && r.side_offset_mm !== undefined) {
+    hints.push(h("div", {class: "msg info"}, h("b", {}, "Same gap along the whole side (" + r.side_offset_mm.toFixed(1) + " mm). "),
+      "Check that the fold of the paper is on the centre of the t-shirt. If it is, the paper is cut too wide or too narrow."));
+  }
+  if (r.neck) {
+    let t = `${r.neck.points} points, average gap ${r.neck.mean_mm.toFixed(1)} mm (not counted above).`;
+    if (r.neck.expected_mm !== null) t += ` Expected from the pattern ${r.neck.expected_mm.toFixed(1)} mm, difference ${signed(r.neck.difference_mm)}.`;
+    hints.push(h("div", {class: "msg " + (r.neck.flagged ? "warn" : "info")}, h("b", {}, "Neck. "), t,
+      r.neck.flagged ? ` The difference is more than ${r.neck.tol_mm} mm: check the neck depths of the cut paper against spec.json.` : ""));
+  }
+  const legend = h("div", {class: "legend", style: "margin-top:10px"},
+    h("span", {}, h("i", {style: "background:#2F7A4B"}), "gap under " + r.tol_mm + " mm"),
+    h("span", {}, h("i", {style: "background:#B53A2E"}), "larger gap"),
+    h("span", {}, h("i", {style: "background:#8a8a8a"}), "fold edge and neck, not compared"),
+    h("span", {}, "Model calls: " + r.model_calls));
+  box.replaceChildren(...[verdict, tiles, ...hints,
+    card("Proof photo", h("span", {class: "small"}, "the paper edge, coloured by its gap"),
+      bd(h("img", {class: "proofimg", src: file(id, r.overlay), alt: "proof overlay: green within tolerance, red elsewhere"}), legend))]
+    .map((p) => h("div", {style: "margin-top:14px"}, p)));
+}
+
+// Pattern studio: the pieces from spec.json drawn at true size. Layers, zoom and pan, draggable pieces,
+// a highlight for each seam pair, and a playback that follows the sewing order. All drawn from spec.json.
+const SEAM_COLORS = ["#0E8F83", "#B7741F", "#8B6BB5", "#4C6F96", "#2F7A4B", "#B53A2E"];
+const STEP_RULES = [["neckband", ["neckband.*", "front.neck", "back.neck"]], ["shoulder", ["front.shoulder", "back.shoulder"]],
+  ["armhole", ["front.armhole", "back.armhole", "sleeve.cap"]], ["underarm", ["sleeve.underarm"]],
+  ["side", ["front.side", "back.side"]], ["hem", ["front.hem", "back.hem", "sleeve.hem"]]];
+let studioApi = null;
+
+function studioCard(id) {
+  const body = h("div", {class: "small"}, "Loading the pieces...");
+  const c = card("Pattern studio", h("span", {class: "badge teal"}, "true size, from spec.json"), bd(body), "");
+  c.id = "studioCard";
+  api(file(id, "spec")).then((spec) => { body.replaceChildren(...patternStudio(spec)); }).catch(() => c.remove());
+  return c;
+}
+
+function patternStudio(spec) {
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, parent) => { const n = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) n.setAttribute(k, v); if (parent) parent.append(n); return n; };
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const edgeSeam = {};
+  spec.seams.forEach((s, i) => { for (const side of [s.a, s.b]) for (const part of side.split("+")) edgeSeam[part.replace(/:mirror$/, "")] = i; });
+
+  const svg = el("svg", {role: "img", "aria-label": "Pattern pieces"});
+  const pieces = [];
+  let cx = 0, maxH = 0;
+  for (const p of spec.panels) {
+    const pts = p.outline_mm, n = pts.length, pad = p.seam_allowance_mm;
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    const mirror = !!p.on_fold, xmax = Math.max(...xs);
+    const x0 = mirror ? -xmax : Math.min(...xs), y0 = Math.min(...ys), w = xmax - x0 + 2 * pad, hh = Math.max(...ys) - y0 + 2 * pad;
+    const area = pts.reduce((s, q, i) => s + q[0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * q[1], 0);
+    const sign = area > 0 ? 1 : -1;
+    const rng = (e) => { const r = []; for (let i = e.start; ; i = (i + 1) % n) { r.push(i); if (i === e.end % n && r.length > 1) break; if (r.length > n) break; } return r; };
+    const foldIdx = new Set();
+    for (const e of p.edges) if (e.name === "fold") for (const i of rng(e)) foldIdx.add(i);
+    const cut = pts.map((q, i) => {
+      if (foldIdx.has(i)) return q;
+      const a = pts[(i + n - 1) % n], b = pts[(i + 1) % n], tx = b[0] - a[0], ty = b[1] - a[1], L = Math.hypot(tx, ty) || 1;
+      return [q[0] + sign * ty / L * pad, q[1] - sign * tx / L * pad];
+    });
+    const g = el("g", {transform: `translate(${cx - x0 + pad} ${-y0 + pad})`, style: "cursor:move"});
+    // An on-fold piece is drawn whole: the half is built once and mirrored with <use>, so layer and seam highlights apply to both sides.
+    const hid = "half" + pieces.length, hg = el("g", {id: hid}, g);
+    if (mirror) el("use", {href: "#" + hid, transform: "scale(-1 1)"}, g);
+    const path = (arr, close) => "M" + arr.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join("L") + (close ? "Z" : "");
+    const layers = {};
+    layers.cut = el("path", {d: path(cut, true), fill: "#E9E2D2", "fill-opacity": ".85", stroke: "#182026", "stroke-width": "1.4", "vector-effect": "non-scaling-stroke"}, hg);
+    layers.stitch = el("path", {d: path(pts, true), fill: "none", stroke: "#737C82", "stroke-width": "1", "stroke-dasharray": "6 4", "vector-effect": "non-scaling-stroke"}, hg);
+    const edges = [];
+    for (const e of p.edges) {
+      if (e.name === "fold") continue;
+      const idx = rng(e), key = p.name + "." + e.name, line = idx.map((i) => pts[i]);
+      let len = 0; for (let i = 1; i < line.length; i++) len += dist(line[i - 1], line[i]);
+      const node = el("path", {d: path(line, false), fill: "none", "stroke-width": "3.2", "stroke-linecap": "round", "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke"}, hg);
+      const mid = line[Math.floor(line.length / 2)];
+      const txt = el("text", {x: mid[0], y: mid[1], "font-size": "16", "text-anchor": "middle", fill: "#182026", stroke: "#fff", "stroke-width": "4", "paint-order": "stroke"}, g);
+      txt.textContent = len.toFixed(1);
+      edges.push({key, node, txt, seam: edgeSeam[key]});
+    }
+    const notches = (p.notches || []).map((q) => el("circle", {cx: q[0], cy: q[1], r: "3.2", fill: "#B53A2E"}, hg));
+    const bx = mirror ? 0 : (Math.min(...xs) + Math.max(...xs)) / 2, by = (Math.min(...ys) + Math.max(...ys)) / 2, vert = p.grain === "vertical";
+    const gr = el("g", {stroke: "#182026", "stroke-width": "1.3", "vector-effect": "non-scaling-stroke"}, hg);
+    const gl = (vert ? hh : w) * 0.2;
+    el("path", {d: vert ? `M${bx} ${by - gl}V${by + gl}M${bx - 5} ${by - gl + 9}L${bx} ${by - gl}L${bx + 5} ${by - gl + 9}M${bx - 5} ${by + gl - 9}L${bx} ${by + gl}L${bx + 5} ${by + gl - 9}`
+      : `M${bx - gl} ${by}H${bx + gl}M${bx - gl + 9} ${by - 5}L${bx - gl} ${by}L${bx - gl + 9} ${by + 5}M${bx + gl - 9} ${by - 5}L${bx + gl} ${by}L${bx + gl - 9} ${by + 5}`, fill: "none", "vector-effect": "non-scaling-stroke"}, gr);
+    layers.grain = gr;
+    const name = el("text", {x: bx, y: by + (vert ? gl + 22 : 24), "font-size": "20", "text-anchor": "middle", fill: "#182026", "font-weight": "600"}, g);
+    name.textContent = p.name + " : cut " + p.cut;
+    pieces.push({p, g, layers, edges, notches, ox: cx - x0 + pad, oy: -y0 + pad, w, h: hh});
+    cx += w + 60; maxH = Math.max(maxH, hh);
+  }
+  svg.append(...pieces.map((q) => q.g));
+  const full = {x: -40, y: -40, w: cx + 20, h: maxH + 80};
+  let vb = {...full};
+  const setVb = () => svg.setAttribute("viewBox", `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  setVb();
+
+  // Layers.
+  const on = {cut: true, stitch: true, seams: true, notches: true, grain: true, lengths: false};
+  const applyLayers = () => {
+    for (const q of pieces) {
+      q.layers.cut.style.display = on.cut ? "" : "none"; q.layers.stitch.style.display = on.stitch ? "" : "none";
+      q.layers.grain.style.display = on.grain ? "" : "none";
+      for (const nt of q.notches) nt.style.display = on.notches ? "" : "none";
+    }
+    paint();
+  };
+
+  // Highlight: a seam index (hover/pin) or a sewing step (done, active key lists).
+  let hover = null, pinned = null, step = null;
+  const matches = (list, key) => list.some((k) => k === key || (k.endsWith(".*") && key.startsWith(k.slice(0, -1))));
+  function paint() {
+    const seam = hover !== null ? hover : pinned;
+    for (const q of pieces) for (const e of q.edges) {
+      let stroke = SEAM_COLORS[(e.seam ?? 0) % SEAM_COLORS.length], op = 1, wd = 3.2, showLen = on.lengths;
+      if (!on.seams) op = 0;
+      else if (step) {
+        if (matches(step.active, e.key)) { stroke = "#B53A2E"; wd = 6; showLen = true; }
+        else if (matches(step.done, e.key)) { stroke = "#2F7A4B"; }
+        else op = .18;
+      } else if (seam !== null) {
+        if (e.seam === seam) { wd = 6; showLen = true; } else op = .18;
+      }
+      e.node.setAttribute("stroke", stroke); e.node.setAttribute("opacity", op); e.node.setAttribute("stroke-width", wd);
+      e.txt.style.display = showLen && op > .5 ? "" : "none";
+    }
+    chips.forEach((b, i) => b.style.borderColor = (seam === i && !step) ? SEAM_COLORS[i % SEAM_COLORS.length] : "");
+  }
+
+  // Zoom, pan and piece dragging.
+  const toW = (ev) => { const pt = svg.createSVGPoint(); pt.x = ev.clientX; pt.y = ev.clientY; return pt.matrixTransform(svg.getScreenCTM().inverse()); };
+  let drag = null;
+  svg.addEventListener("pointerdown", (ev) => {
+    const gEl = ev.target.closest("g[transform]"), q = pieces.find((x) => x.g === gEl);
+    svg.setPointerCapture(ev.pointerId);
+    drag = q ? {kind: "piece", q, start: toW(ev), ox: q.ox, oy: q.oy} : {kind: "pan", sx: ev.clientX, sy: ev.clientY, vb: {...vb}, k: vb.w / svg.getBoundingClientRect().width};
+    if (q) svg.append(q.g);
+  });
+  svg.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    if (drag.kind === "pan") { vb.x = drag.vb.x - (ev.clientX - drag.sx) * drag.k; vb.y = drag.vb.y - (ev.clientY - drag.sy) * drag.k; setVb(); return; }
+    const w = toW(ev); drag.q.ox = drag.ox + (w.x - drag.start.x); drag.q.oy = drag.oy + (w.y - drag.start.y);
+    drag.q.g.setAttribute("transform", `translate(${drag.q.ox.toFixed(1)} ${drag.q.oy.toFixed(1)})`);
+  });
+  const end = () => { drag = null; };
+  svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", end);
+  svg.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const p0 = toW(ev), f = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
+    vb = {x: p0.x - (p0.x - vb.x) * f, y: p0.y - (p0.y - vb.y) * f, w: vb.w * f, h: vb.h * f}; setVb();
+  }, {passive: false});
+
+  // Controls.
+  const layerRow = h("div", {class: "layers"});
+  for (const [k, lab] of [["cut", "Cut line"], ["stitch", "Stitch line"], ["seams", "Seam edges"], ["lengths", "Edge lengths"], ["notches", "Notches"], ["grain", "Grain"]]) {
+    const b = h("button", {type: "button", class: on[k] ? "on" : ""}, lab);
+    b.addEventListener("click", () => { on[k] = !on[k]; b.classList.toggle("on", on[k]); applyLayers(); });
+    layerRow.append(b);
+  }
+  const reset = h("button", {type: "button"}, "Fit to view");
+  reset.addEventListener("click", () => { vb = {...full}; setVb(); });
+  const cap = h("div", {class: "stepcap"}, "Hover a seam pair below to light up both edges. Drag a piece, scroll to zoom.");
+  const play = h("button", {type: "button", class: "primary"}, "Play sewing order");
+
+  // Seam chips.
+  const chips = spec.seams.map((s, i) => {
+    const diff = s.len_b_mm - s.len_a_mm;
+    const b = h("button", {type: "button"}, h("i", {style: "background:" + SEAM_COLORS[i % SEAM_COLORS.length]}), s.a + " ~ " + s.b, h("span", {class: "mono small"}, s.len_a_mm.toFixed(1) + " / " + s.len_b_mm.toFixed(1) + " mm"));
+    b.addEventListener("mouseenter", () => { hover = i; paint(); });
+    b.addEventListener("mouseleave", () => { hover = null; paint(); });
+    b.addEventListener("click", () => { pinned = pinned === i ? null : i; step = null; paint(); });
+    b.title = "difference " + (diff >= 0 ? "+" : "") + diff.toFixed(2) + " mm";
+    return b;
+  });
+
+  // Sewing order playback.
+  const steps = (spec.sewing_order || []).map((text) => {
+    const t = text.toLowerCase(), rule = STEP_RULES.find(([kw]) => t.includes(kw));
+    return {text, keys: rule ? rule[1] : []};
+  });
+  let timer = null;
+  const showStep = (i) => {
+    const done = steps.slice(0, i).flatMap((s) => s.keys);
+    step = i < 0 ? null : {active: steps[i].keys, done};
+    cap.textContent = i < 0 ? "Done. Green edges are sewn." : "Step " + (i + 1) + " of " + steps.length + ": " + steps[i].text;
+    if (i < 0) step = {active: [], done: steps.flatMap((s) => s.keys)};
+    paint();
+  };
+  const stop = () => { clearInterval(timer); timer = null; play.textContent = "Play sewing order"; };
+  const run = () => {
+    if (timer) { stop(); return; }
+    pinned = null; hover = null; let i = 0; showStep(0); play.textContent = "Stop";
+    timer = setInterval(() => { i++; if (i >= steps.length) { stop(); showStep(-1); return; } showStep(i); }, 2200);
+  };
+  play.addEventListener("click", run);
+  studioApi = {play: run};
+
+  applyLayers();
+  return [h("div", {class: "row", style: "justify-content:space-between;margin-bottom:10px"}, layerRow, h("div", {class: "row"}, play, reset)),
+    h("div", {class: "studio"}, svg), cap,
+    h("div", {class: "seamchips"}, ...chips),
+    h("p", {class: "small"}, "Drawn from spec.json. On-fold pieces are shown whole (the half is mirrored); the cut line is the stitch line plus the seam allowance. Edge lengths are the lengths checked in the seam table.")];
+}
+
+// Guided tour: scrolls through the page, plays the sewing order and the cutter, and types a Co-pilot request.
+let tour = null;
+function endTour() { if (tour) { clearTimeout(tour.timer); tour.box.remove(); tour = null; } }
+async function startTour() {
+  endTour();
+  if (!havePattern) {
+    if (busyNow) return;
+    $("sampleBtn").click();
+    for (let i = 0; i < 120 && !havePattern; i++) await new Promise((r) => setTimeout(r, 500));
+    if (!havePattern) return;
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  const goTo = (id) => $(id).scrollIntoView({behavior: "smooth", block: "start"});
+  const STEPS = [
+    {t: "Photos in, pattern out", p: "Measurements come from the photos and the 100 mm marker. Every number carries a label for where it came from.", ms: 7000, run: () => goTo("runBox")},
+    {t: "The pieces at true size", p: "Each seam pair has its own colour. Watch the sewing order light up, one seam at a time.", ms: 14000, run: () => { const c = $("studioCard"); if (c) c.scrollIntoView({behavior: "smooth", block: "start"}); if (studioApi) studioApi.play(); }},
+    {t: "Cut plan", p: "The pieces are nested on the fabric roll with no overlap. The marker follows the real cut paths of an illustrative cutter.", ms: 11000, run: () => { goTo("cutBox"); const s = document.querySelector("#cutOut select"); if (s) s.value = "20"; const b = document.querySelector("#cutOut button.primary"); if (b && b.textContent === "Play") b.click(); }},
+    {t: "Co-pilot", p: "Ask for a change in plain words. Muse Spark proposes it, you approve it, code makes the change, and the seam check runs again.", ms: 7000, run: () => { goTo("copilotBox"); const i = document.querySelector("#copilotOut input[type=text]"); if (i) i.value = "make it 2 cm longer"; }},
+    {t: "Check the fit", p: "Last, lay the printed paper on the t-shirt and photograph it. The page measures the gap all the way round.", ms: 6000, run: () => goTo("proofBox")}
+  ];
+  const box = h("div", {class: "tour", role: "dialog", "aria-label": "Guided tour"});
+  document.body.append(box);
+  tour = {box, i: 0, timer: null};
+  const show = (i) => {
+    if (!tour) return;
+    clearTimeout(tour.timer); tour.i = i; const s = STEPS[i];
+    const next = h("button", {type: "button", class: "go"}, i < STEPS.length - 1 ? "Next" : "Finish");
+    const exit = h("button", {type: "button"}, "Exit");
+    next.addEventListener("click", () => (i < STEPS.length - 1 ? show(i + 1) : endTour()));
+    exit.addEventListener("click", endTour);
+    box.replaceChildren(h("div", {class: "t"}, h("span", {}, "Guided tour " + (i + 1) + " / " + STEPS.length), h("span", {}, "auto")),
+      h("div", {class: "bar2"}, h("i", {style: "width:" + ((i + 1) / STEPS.length * 100) + "%"})), h("h4", {}, s.t), h("p", {}, s.p), h("div", {class: "row"}, next, exit));
+    s.run();
+    tour.timer = setTimeout(() => (i < STEPS.length - 1 ? show(i + 1) : endTour()), s.ms);
+  };
+  show(0);
+}
+$("tourBtn").addEventListener("click", startTour);
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") endTour(); });
+
+// The file boxes go teal once a photo is chosen.
+for (const el of document.querySelectorAll(".drop input[type=file]")) {
+  el.addEventListener("change", () => el.closest("label").classList.toggle("has", el.files.length > 0));
+}
+// The rail marks the step in view.
+const railLinks = [...document.querySelectorAll("#steps a")];
+const spy = new IntersectionObserver((entries) => {
+  for (const e of entries) if (e.isIntersecting) for (const a of railLinks) a.classList.toggle("on", a.dataset.step === e.target.id);
+}, {rootMargin: "-30% 0px -60% 0px"});
+for (const a of railLinks) spy.observe($(a.dataset.step));
+
+$("runForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  lastRunSample = false;
+  start("/api/run", new FormData($("runForm")), $("runMsg"), $("runOut"), renderRun);
+});
+$("sampleBtn").addEventListener("click", () => {
+  lastRunSample = true;
+  const f = new FormData(); f.append("sample", "1");
+  if ($("fullBox").checked) f.append("full", "1");
+  start("/api/run", f, $("runMsg"), $("runOut"), renderRun);
+});
+$("proofForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  start("/api/proof", new FormData($("proofForm")), $("proofMsg"), $("proofOut"), renderProof);
+});
+$("proofSampleBtn").addEventListener("click", () => {
+  const f = new FormData(); f.append("sample", "1");
+  start("/api/proof", f, $("proofMsg"), $("proofOut"), renderProof);
+});
+
+// A refresh keeps the last results and any run in progress.
+(async function init() {
+  proofState();
+  await refreshStatus();
+  const latest = state.latest || {};
+  setInterval(refreshStatus, 5000);
+  // Two separate tries: a deleted run must not stop the proof from coming back.
+  try {
+    if (latest.run) { setBusy(true); await follow(latest.run, $("runMsg"), $("runOut"), renderRun); }
+  } catch (e) { /* job was deleted: start clean */ }
+  try {
+    if (latest.proof) { await follow(latest.proof, $("proofMsg"), $("proofOut"), renderProof); }
+  } catch (e) { /* job was deleted: start clean */ } finally { setBusy(false); }
+})();
+</script>
+</body>
+</html>

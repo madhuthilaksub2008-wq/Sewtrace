@@ -1,0 +1,379 @@
+"""T19: one garment, photos to pattern files."""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from sewtrace.api.client import CacheMiss, MetaClient
+from sewtrace.config import get_config
+from sewtrace.output import manufacture
+from sewtrace.output.layout import unfold_spec
+from sewtrace.output.pdf import render_pdf
+from sewtrace.output.vector import render_dxf, render_svg
+from sewtrace.reason.edits import PatternState
+from sewtrace.reason.panels import draft_spec, infer_panels, refresh_derived
+from sewtrace.reason.provenance import build_provenance, edge_label
+from sewtrace.reason.reshape import neck_depth_mm
+from sewtrace.reason.seams import SeamCheckFailed, adjust_loop, edge_length, require_seams_ok, set_measured_pairs
+from sewtrace.types import MEASUREMENT_KEYS, Edge, Outline, PanelSpec, PhotoSet
+from sewtrace.vision import contour
+from sewtrace.vision.marker import Homography, photo_homography
+from sewtrace.vision.measure import measure_tee
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class RunResult:
+    spec: PanelSpec
+    measurements: dict[str, float]
+    seam_log: list[dict]
+    files: dict[str, Path] = field(default_factory=dict)
+    model_calls: int = 0
+    lay_notes: list[str] = field(default_factory=list)  # what was evened out in each photo, for the user
+    provenance: dict[str, str] = field(default_factory=dict)  # where each value came from (reason/provenance.py)
+    inference: str = "model"  # "model" when the Muse panel answer was used, "fallback" for the draft default
+
+
+LAY_NOTE_MM = 8.0  # a left/right difference above this is reported to the user
+
+
+def lay_note(view: str, report: dict) -> str | None:
+    """A plain sentence on how crooked the t-shirt lies in a photo and that it was evened out, or None."""
+    parts = []
+    for key, what in (("underarm_mm", "armpit"), ("shoulder_mm", "shoulder point")):
+        mm = report.get(key)
+        if mm is not None and abs(mm) > LAY_NOTE_MM:
+            parts.append(f"one {what} lies {abs(mm):.0f} mm lower than the other")
+    if not parts:
+        return None
+    return (f"{view} photo: the t-shirt is not laid straight ({'; '.join(parts)}). Corrected: both sides were "
+            "averaged into one even half. If the pattern looks off, smooth the t-shirt flat and take the photo again.")
+
+
+def photo_set(garment_dir: Path) -> PhotoSet:
+    return PhotoSet(**{v: str(garment_dir / f"{v}.jpg") for v in ("front", "back", "sleeve")})
+
+
+class PhotoMissing(FileNotFoundError):
+    """A capture photo is missing or is not an image (REQ-CAP-01)."""
+
+
+class PanelInferenceFailed(ValueError):
+    """The panels cannot be inferred from the measured outlines (REQ-RSN-03)."""
+
+
+class ContourFailed(ValueError):
+    """The outline of a photo could not be split into panels (REQ-GEO-01). Names the photo."""
+
+
+def load_photo(view: str, path: str | Path) -> np.ndarray:
+    """Read one capture photo; the error names the view and the path."""
+    image = cv2.imread(str(path)) if Path(path).is_file() else None
+    if image is None:
+        raise PhotoMissing(f"{view} photo {path} is missing or is not an image. Put the file there and run again.")
+    return image
+
+
+def photo_scale(view: str, path: str | Path) -> Homography:
+    """Photo px -> mm for one capture photo. Raises, naming the photo, when the file is
+    missing (REQ-CAP-01), the marker is not found (REQ-CAP-02) or it is off by more than
+    marker.tolerance_mm (REQ-SCL-03)."""
+    return photo_homography(load_photo(view, path), f"{view} photo {path}")
+
+
+def sleeve_seams(client: MetaClient, photo: str | Path, garment: np.ndarray, h: Homography) -> list | None:
+    """Shoulder and underarm points from where SAM's two sleeve masks meet the body (REQ-GEO-01).
+    One extra SAM call per photo (cached). None, so the outline method is used, in mock mode,
+    offline without a stored answer, or when SAM does not give two sleeves that touch the body."""
+    if client.settings.mock:
+        return None  # mock SAM has no per-record sleeve masks
+    try:
+        return contour.seam_points(garment, client.segment_all(photo, client.config.sam.prompts.sleeve), h)
+    except (CacheMiss, ValueError) as err:
+        log.warning("sleeve seams from SAM not used for %s (%s); finding them from the outline", photo, err)
+        return None
+
+
+def body_without_sleeves(
+    client: MetaClient, photo: str | Path, garment: np.ndarray, h: Homography, outline: Outline,
+    report: dict | None = None,
+) -> tuple[Outline, np.ndarray, np.ndarray]:
+    """``contour.cut_sleeves_flagged`` with the sleeve seams from SAM when they can be trusted, else
+    from the outline shape. A SAM seam that disagrees with the outline is logged and not used; a
+    refusal of the corner search (ContourRefused) is raised, since the outline method needs it too."""
+    seams = sleeve_seams(client, photo, garment, h)
+    if seams is not None:
+        try:
+            cut = contour.cut_sleeves_flagged(outline, seams, report)
+            log.info("sleeve seams from SAM used for %s", photo)
+            return cut
+        except contour.ContourRefused:
+            raise
+        except ValueError as err:
+            log.warning("sleeve seams from SAM rejected for %s (%s); finding them from the outline", photo, err)
+    return contour.cut_sleeves_flagged(outline, report=report)
+
+
+def upright(h: Homography, shape: tuple[int, ...]) -> Homography:
+    """The photo's px -> mm map, turned so the photo's own up is -y in mm. The mm frame comes from the
+    marker and turns with the marker paper; the tracers look for the fold within 30 degrees of up, and the
+    capture rules (neck up; sleeve: fold on the left, cap at the top) are about the photo. A rotation keeps
+    every length. Real kid tee: the marker paper lay sideways on the sleeve photo, and the sleeve came out
+    skewed (the cuff was taken as the fold)."""
+    height, width = shape[:2]
+    a, b = h.px_to_mm(np.array([[width / 2, height / 2], [width / 2, height / 2 - 100.0]]))
+    up = (b - a) / np.linalg.norm(b - a)              # the photo's up, in mm
+    angle = -np.arctan2(up[0], -up[1])                # turn that brings it to (0, -1)
+    c, s_ = np.cos(angle), np.sin(angle)
+    turn = np.array([[c, -s_, 0.0], [s_, c, 0.0], [0.0, 0.0, 1.0]])
+    return Homography(turn @ h.H, marker_error_mm=h.marker_error_mm)
+
+
+def _debug(debug_dir: Path | None, view: str, photo: str, h: Homography, *args) -> None:
+    """Write debug_<view>.png; a failure to draw never fails the run."""
+    if debug_dir is None:
+        return
+    try:
+        from sewtrace.output.debug import write_debug
+        write_debug(debug_dir / f"debug_{view}.png", photo, h, *args)
+    except Exception as err:  # noqa: BLE001 - a debug picture is never worth a failed run
+        log.warning("debug image for %s not written: %s", photo, err)
+
+
+def trace(
+    client: MetaClient, photo: str, h: Homography, prompt: str, sleeve: bool = False, debug_dir: Path | None = None,
+    notes: list[str] | None = None,
+) -> tuple[Outline, list[Edge]]:
+    """Photo -> labelled half outline in mm. Front and back masks hold the whole t-shirt.
+    With ``debug_dir``, also writes debug_<view>.png there (see sewtrace/output/debug.py)."""
+    mask = client.segment(photo, prompt)
+    view = Path(photo).stem
+    h = upright(h, mask.shape)
+    try:
+        outline = contour.smooth_outline(contour.mask_to_outline(mask, h))
+        if sleeve:
+            half = contour.sleeve_half(outline)
+            edges = contour.label_sleeve_edges(half)
+            _debug(debug_dir, view, photo, h, outline, half, edges)
+            return half, edges
+        report: dict = {}
+        body, invented, _ = body_without_sleeves(client, photo, mask, h, outline, report)
+        half = contour.body_half(body)
+        edges = contour.label_body_edges(half)
+        note = lay_note(view, report)
+        if note:
+            log.warning(note)
+            if notes is not None:
+                notes.append(note)
+        _debug(debug_dir, view, photo, h, outline, half, edges, body, invented, note)
+        return half, edges
+    except contour.ContourRefused as err:
+        # The numbers let refusals on real photos recalibrate the limits in contour.joints.
+        log.warning("%s: %s, %s", err.label, photo, err.log_details())
+        raise ContourFailed(f"{view} photo {photo}: {err}. Take the {view} photo again.") from err
+    except ValueError as err:
+        raise ContourFailed(
+            f"{view} photo {photo}: {err}. Take the photo again with the whole t-shirt flat and in view."
+        ) from err
+
+
+class LengthRejected(ValueError):
+    """A user's own seam length is too far from what the photos measured (a typing slip, cm for mm)."""
+
+
+def check_overrides(spec: PanelSpec, overrides: dict[str, float], max_off_mm: float) -> None:
+    """Refuse a user length more than ``max_off_mm`` outside the two photo values of that seam."""
+    for edge, target in overrides.items():
+        lo, hi = sorted(edge_length(spec.panel(name), edge) for name in ("front", "back"))
+        if not lo - max_off_mm <= target <= hi + max_off_mm:
+            raise LengthRejected(
+                f"{edge}: {target:.0f} mm is far from what the photos measured ({lo:.0f} and {hi:.0f} mm). "
+                "Give the length in mm, not cm, measured along the seam.")
+
+
+def pair_review(seam_log: list[dict], warn_shift_mm: float | None = None) -> list[dict]:
+    """For each shoulder or side seam the front and back photos measured differently: what each photo
+    gave, the length used for both, and where it came from ("average" or "user")."""
+    rows: dict[str, dict] = {}
+    for row in seam_log:
+        if row.get("source") not in ("pair_fix", "user"):
+            continue
+        for change in row["applied"]:
+            source = "user" if row["source"] == "user" else "average"
+            seen = rows.setdefault(change["edge"], {"edge": change["edge"], "used_mm": change["to_mm"],
+                                                    "source": source, "provenance": edge_label(source)})
+            seen.setdefault(f"{change['panel']}_mm", change["from_mm"])
+            seen["max_shift_mm"] = max(seen.get("max_shift_mm", 0.0), abs(change.get("end_point_shift_mm", 0.0)))
+    limit = get_config().seam.pair_fix_warn_shift_mm if warn_shift_mm is None else warn_shift_mm
+    for row in rows.values():
+        # A large fix means one photo is probably off (armpit or hem in the wrong place): changing the
+        # length moves only the hem corner or shoulder point, so the user should look at the photos. For the
+        # user's own length the shift is how far it is from the photos, so judge the photos by their gap.
+        if row["source"] == "user" and "front_mm" in row and "back_mm" in row:
+            row["check_photos"] = abs(row["front_mm"] - row["back_mm"]) > 2 * limit
+        else:
+            row["check_photos"] = row["max_shift_mm"] > limit
+    return list(rows.values())
+
+
+INFERRED_LABELS = {"front_neck_depth": "front neck depth", "back_neck_depth": "back neck depth",
+                   "sleeve_cap": "sleeve cap (half) length"}
+
+
+def inferred_values(spec: PanelSpec, provenance: dict[str, str]) -> list[dict]:
+    """The values that no photo measures (neck depths, sleeve cap) with their length in mm and where they came
+    from. A key with no label in ``provenance`` (a run folder from before labels existed) is left out."""
+    value_mm = {"front_neck_depth": neck_depth_mm(spec.panel("front")), "back_neck_depth": neck_depth_mm(spec.panel("back")),
+                "sleeve_cap": edge_length(spec.panel("sleeve"), "cap")}
+    return [{"key": k, "label": INFERRED_LABELS[k], "value_mm": value_mm[k], "provenance": provenance[k]}
+            for k in INFERRED_LABELS if k in provenance]
+
+
+def cap_review(seam_log: list[dict]) -> dict | None:
+    """When the code fix drew the sleeve's top edge straight and widened it to the arm hole: the numbers."""
+    for row in reversed(seam_log):
+        for change in row.get("applied") or []:
+            if isinstance(change, dict) and change.get("flat_cap"):
+                return change
+    return None
+
+
+def cap_note(review: dict) -> str:
+    if abs(review["to_mm"] - review["from_mm"]) < 2.0:  # the photo's length already matched the arm hole
+        start = (f"The sleeve's top edge (the sleeve hole) is drawn straight at {review['to_mm']:.0f} mm to match the "
+                 f"arm hole on the body, so the sleeve is ")
+    else:
+        start = (f"The sleeve's top edge (the sleeve hole) was {review['from_mm']:.0f} mm on the sleeve photo but must "
+                 f"match the arm hole on the body: it is drawn straight at {review['to_mm']:.0f} mm, so the sleeve is ")
+    return (start +
+            f"{review['sleeve_width_mm']:.0f} mm wide at the top (half, on the fold) and its underarm seam is "
+            f"{review['underarm_to_mm']:.0f} mm (photo: {review['underarm_from_mm']:.0f} mm). A sleeve laid flat "
+            f"bunches at that seam. Tape-measure the sleeve's underarm seam on the tee to check.")
+
+
+def run(
+    garment_dir: str | Path, out_dir: str | Path, client: MetaClient | None = None,
+    overrides: dict[str, float] | None = None, debug: bool = True, full: bool = False,
+) -> RunResult:
+    """Photos -> pattern files. ``overrides`` sets the shoulder or side seam to the user's own length
+    (a tape measure on the tee), in place of the value picked from the front and back photos. ``full``
+    prints whole pieces (each half mirrored across its fold) instead of halves to cut on the fold."""
+    garment_dir, out_dir = Path(garment_dir), Path(out_dir)
+    client = client or MetaClient()
+    calls_before = client.calls
+    photos = photo_set(garment_dir)
+    prompts = client.config.sam.prompts
+    # Check all three photos before the first paid call (REQ-CAP-01, REQ-CAP-02, REQ-SCL-03).
+    scale = {view: photo_scale(view, path) for view, path in photos}
+
+    # Debug images go in <out>_debug, written before the seam check so a failed run still shows what
+    # the outline step found. Not in out_dir: a failed run leaves that empty (REQ-SEW-04).
+    debug_dir = out_dir.parent / f"{out_dir.name}_debug" if debug else None
+    notes: list[str] = []
+    front, front_edges = trace(client, photos.front, scale["front"], prompts.garment, debug_dir=debug_dir, notes=notes)
+    back, back_edges = trace(client, photos.back, scale["back"], prompts.garment, debug_dir=debug_dir, notes=notes)
+    sleeve, sleeve_edges = trace(client, photos.sleeve, scale["sleeve"], prompts.sleeve, sleeve=True, debug_dir=debug_dir)
+    measurements = measure_tee(front, front_edges, back, back_edges, sleeve, sleeve_edges)
+
+    draft = draft_spec(front, front_edges, back, back_edges, sleeve, sleeve_edges)
+    attempts: list[dict] = []
+    try:
+        spec = infer_panels(client, photos, draft, measurements, history=attempts)
+    except ValueError as err:  # e.g. a draft neck curve with no depth to scale
+        raise PanelInferenceFailed(
+            f"panel inference: {err}. Take the front and back photos again with the whole neck in view."
+        ) from err
+    inference = "model" if any(a.get("result") == "accepted" for a in attempts) else "fallback"
+    user_rows: list[dict] = []
+    if overrides:
+        check_overrides(spec, overrides, client.config.seam.user_length_max_off_mm)
+        spec, applied = set_measured_pairs(spec, overrides)
+        user_rows = [{"iteration": -1, "source": "user", "applied": applied}]
+    spec, seam_log = adjust_loop(client, spec)
+    seam_log = user_rows + seam_log
+    spec = refresh_derived(spec)  # the cap may have changed: notches follow it
+    try:
+        require_seams_ok(spec, seam_log)  # REQ-SEW-04: before any file is written
+    except SeamCheckFailed as err:
+        err.measurements = measurements  # lets eval report what was measured
+        raise
+
+    # Nested before any file is written: a piece wider than the roll leaves no half-written folder.
+    made = manufacture.plan_manufacture(spec, client.config)
+    provenance = build_provenance(seam_log, inference)
+    files = {**render_outputs(spec, out_dir, full), **write_records(spec, measurements, seam_log, provenance, out_dir)}
+    # Manufacturing files come after the pattern files, and only on success (REQ-SEW-04).
+    files.update(manufacture.write_files(made, out_dir))
+    files["bundle"] = manufacture.write_bundle(out_dir, debug_dir)
+    return RunResult(spec, measurements, seam_log, files, client.calls - calls_before, notes, provenance, inference)
+
+
+def render_outputs(spec: PanelSpec, out_dir: Path, full: bool = False) -> dict[str, Path]:
+    """pattern.pdf, pattern.svg and pattern.dxf in ``out_dir``. ``full`` prints whole pieces (each half
+    mirrored across its fold); the seam check is always made on the halves, before this."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    printed = unfold_spec(spec) if full else spec
+    return {
+        "pdf": render_pdf(printed, out_dir / "pattern.pdf"),
+        "svg": render_svg(printed, out_dir / "pattern.svg"),
+        "dxf": render_dxf(printed, out_dir / "pattern.dxf"),
+    }
+
+
+def write_records(
+    spec: PanelSpec, measurements: dict[str, float], seam_log: list[dict], provenance: dict[str, str], out_dir: Path,
+) -> dict[str, Path]:
+    """spec.json, measurements.json and seam_log.json. measurements.json keeps the six measurement keys
+    as they were and adds one more, ``provenance``."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = {"spec": out_dir / "spec.json", "measurements": out_dir / "measurements.json",
+             "seam_log": out_dir / "seam_log.json"}
+    files["spec"].write_text(spec.model_dump_json(indent=1))
+    files["measurements"].write_text(json.dumps({**measurements, "provenance": provenance}, indent=1))
+    files["seam_log"].write_text(json.dumps(seam_log, indent=1, default=str))
+    return files
+
+
+class RunFolderError(ValueError):
+    """The folder of a finished run is missing a file or holds one that cannot be read."""
+
+
+def load_state(out_dir: str | Path) -> PatternState:
+    """A finished run from its folder: spec.json and measurements.json are needed, seam_log.json is not.
+    A folder from before provenance existed gets the labels its seam log gives."""
+    out_dir = Path(out_dir)
+    try:
+        spec = PanelSpec.model_validate_json((out_dir / "spec.json").read_text())
+        raw = json.loads((out_dir / "measurements.json").read_text())
+        log_file = out_dir / "seam_log.json"
+        seam_log = json.loads(log_file.read_text()) if log_file.is_file() else []
+        measurements = {k: float(raw[k]) for k in MEASUREMENT_KEYS}
+    except (OSError, ValueError, KeyError, TypeError) as err:  # pydantic's ValidationError is a ValueError
+        raise RunFolderError(
+            f"{out_dir} is not a finished run folder ({type(err).__name__}: {err}). "
+            "Run sewtrace run first, or give the folder it wrote."
+        ) from err
+    provenance = raw.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = build_provenance(seam_log, None)
+    return PatternState(spec, measurements, seam_log, provenance)
+
+
+def save_state(state: PatternState, out_dir: str | Path, full: bool = False) -> dict[str, Path]:
+    """Pattern files, records and manufacturing files of an edited pattern, in the same names as ``run``
+    writes, so the cut plan, BOM, instructions and bundle follow the edit."""
+    out_dir = Path(out_dir)
+    made = manufacture.plan_manufacture(state.spec, get_config())  # before any write: PieceTooWide leaves files as they were
+    files = {**render_outputs(state.spec, out_dir, full),
+             **write_records(state.spec, state.measurements, state.seam_log, state.provenance, out_dir)}
+    files.update(manufacture.write_files(made, out_dir))
+    debug_dir = out_dir.parent / f"{out_dir.name}_debug"
+    files["bundle"] = manufacture.write_bundle(out_dir, debug_dir if debug_dir.is_dir() else None)
+    return files

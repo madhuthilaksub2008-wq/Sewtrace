@@ -1,0 +1,210 @@
+"""Day 1 test (REQ-API-09): exactly one real SAM call and one real Spark call on one photo.
+
+Prints the model ID, input tokens, latency and cost of each call, and the ledger total before
+and after. It never loops and never retries by itself. It refuses to run without
+``--yes-spend``, and prints the worst-case cost first. Run it only after the user approves."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from pydantic import ValidationError
+
+from sewtrace.api.client import CHARS_PER_TOKEN, ApiError, MetaClient, Usage, cost_usd
+from sewtrace.reason.panels import PanelInference
+
+# The Spark call sends the production schema (PanelInference through strict_json_schema, the same
+# path as the pipeline), so Day 1 shows whether the API accepts it. The prompt is short on purpose.
+DAY1_PROMPT = (
+    "The photo shows one kids' t-shirt laid flat. Estimate these four fields: front_neck_depth_mm, "
+    "back_neck_depth_mm, sleeve_cap (crown_run_mm and underarm_run_mm) and grain_line. "
+    "Return only JSON with exactly these fields."
+)
+
+
+def worst_case_usd(client: MetaClient) -> dict[str, float]:
+    """The cost the budget guard assumes for each of the two calls."""
+    cfg = client.config
+    spark = Usage(
+        input_tokens=len(DAY1_PROMPT) // CHARS_PER_TOKEN + cfg.reasoning.est_image_tokens,
+        output_tokens=cfg.reasoning.max_tokens, images=1,
+    )
+    return {
+        cfg.models.sam.id: cost_usd(cfg.models.sam, Usage(images=1)),
+        cfg.reasoning_model.id: cost_usd(cfg.reasoning_model, spark),
+    }
+
+
+def _ledger_rows(client: MetaClient) -> list[dict[str, str]]:
+    if not client.ledger_path.exists():
+        return []
+    with client.ledger_path.open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _report(label: str, rows: list[dict[str, str]], seconds: float, text: str) -> None:
+    if not rows:
+        print(f"{label}: no ledger row. The answer came from the cache, so nothing was spent.")
+        return
+    for r in rows:
+        estimated = r["estimated"] == "1"
+        print(f"{label}: model {r['model']}  input tokens {r['input_tokens']}  cached {r['cached_tokens']}  "
+              f"output tokens {r['output_tokens']}  latency {seconds:.1f} s  cost ${float(r['cost_usd']):.6f}"
+              f"{'  (ESTIMATED: the call failed, timed out or reported no usage)' if estimated else ''}")
+        if estimated or int(r["input_tokens"]) == 0:
+            print(f"{label}: image tokens unknown (no usage reported)")
+            continue
+        # Input tokens minus the text we sent (4 characters per token). The schema and the
+        # system overhead are counted as image tokens, so the number is an upper bound.
+        image_tokens = int(r["input_tokens"]) - len(text) // CHARS_PER_TOKEN
+        print(f"{label}: image tokens APPROXIMATELY {image_tokens} "
+              "(input tokens minus estimated text tokens). Use it to update reasoning.est_image_tokens.")
+
+
+def _print_sam_facts(client: MetaClient, photo: Path, prompt: str) -> list[tuple[str, float, float, float, float]]:
+    """Print what the stored SAM answer says and return its boxes in the photo frame. Needs no good frame,
+    so it also shows the facts of an answer that ``segment`` refused."""
+    inspection = client.sam_inspect(photo, prompt)
+    width, height = inspection.image_wh
+    print(f"SAM frame check: image {width} x {height} px (as cv2.imread reads it, EXIF applied)")
+    sent = inspection.sent_wh
+    reported = ", ".join(f"{w} x {h} px" for w, h in inspection.reported_wh)
+    if not reported:
+        reported = "size unreadable (sent size assumed)"
+    elif inspection.reported_wh != [sent]:
+        reported += "  (DIFFERS from sent)"
+    print(f"  sent to SAM {sent[0]} x {sent[1]} px; SAM reported source {reported}")
+    for r in inspection.records:
+        conf = "none" if r.confidence is None else f"{r.confidence:.3f}"
+        box_conf = "none" if r.box_confidence is None else f"{r.box_confidence:.3f}"
+        print(f"  record {r.object_id}: mask confidence {conf}  box confidence {box_conf}  bounds {r.bounds[0]:g},{r.bounds[1]:g} to "
+              f"{r.bounds[2]:g},{r.bounds[3]:g}  raster {r.raster_wh[0]} x {r.raster_wh[1]}")
+    boxes = [(r.object_id, *r.box_in_photo) for r in inspection.records if r.box_in_photo]
+    for object_id, left, top, right, bottom in boxes:
+        print(f"  box {object_id}: left {left:g}  top {top:g}  right {right:g}  bottom {bottom:g}")
+    if not boxes:
+        print("  no box records in the answer")
+    return boxes
+
+
+def _write_overlay(client: MetaClient, photo: Path, prompt: str, mask: np.ndarray, out_dir: Path) -> Path:
+    """Mask (red) and SAM boxes (green) over the photo, in the frame the pipeline reads, so the
+    user can check by eye that they line up. Boxes are also printed next to the image size."""
+    boxes = _print_sam_facts(client, photo, prompt)
+    image = cv2.imread(str(photo))
+    shaded = image.copy()
+    shaded[mask] = (0, 0, 255)
+    overlay = cv2.addWeighted(shaded, 0.5, image, 0.5, 0)
+    for object_id, left, top, right, bottom in boxes:
+        cv2.rectangle(overlay, (round(left), round(top)), (round(right), round(bottom)), (0, 200, 0), 3)
+        cv2.putText(overlay, str(object_id), (round(left) + 4, round(top) + 24), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8, (0, 200, 0), 2)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{photo.stem}.sam_overlay.png"
+    cv2.imwrite(str(path), overlay)
+    return path
+
+
+def _print_stored_sam_facts(client: MetaClient, photo: Path, prompt: str) -> None:
+    """After a refused SAM answer: show its facts from the cache (no API call). The caller re-raises."""
+    try:
+        _print_sam_facts(client, photo, prompt)
+    except ApiError as err:  # nothing stored (failed stream) or unreadable: the original error still follows
+        print(f"SAM facts: not available ({err})")
+
+
+def run_day1(
+    photo: str | Path, *, yes_spend: bool, client: MetaClient | None = None, out_dir: str | Path = "out/day1",
+) -> None:
+    client = client or MetaClient()
+    photo = Path(photo)
+    if not photo.is_file():
+        raise ApiError(f"Photo {photo} not found. Check the path.")
+    worst = worst_case_usd(client)
+    print(f"Day 1 test on {photo.name}: one call to each model.")
+    for model_id, usd in worst.items():
+        print(f"  {model_id}: worst case ${usd:.4f}")
+    print(f"  total worst case ${sum(worst.values()):.4f}. Ledger limit ${client.config.api.budget_limit_usd:.2f}.")
+    if not yes_spend:
+        raise ApiError("Nothing was called. Add --yes-spend to make the two paid calls.")
+    if client.settings.mock or client.settings.offline:
+        raise ApiError("Mock or offline mode is on. Set META_API_KEY and unset SEWTRACE_MOCK and SEWTRACE_OFFLINE.")
+
+    before_total = client.ledger_total_usd()
+    print(f"Ledger total before: ${before_total:.6f}")
+    try:
+        # One call each, in this order, no loop. A failure of the first stops the run.
+        sam_prompt = client.config.sam.prompts.garment
+        n = len(_ledger_rows(client))
+        start = time.monotonic()
+        try:
+            mask = client.segment(photo, sam_prompt)
+        except ApiError:
+            _print_stored_sam_facts(client, photo, sam_prompt)
+            raise
+        _report("SAM", _ledger_rows(client)[n:], time.monotonic() - start, sam_prompt)
+        print(f"SAM mask: {int(mask.sum())} px of {mask.size}")
+        print(f"SAM overlay: {_write_overlay(client, photo, sam_prompt, mask, Path(out_dir))}")
+
+        n = len(_ledger_rows(client))
+        start = time.monotonic()
+        answer = client.reason(DAY1_PROMPT, [photo], schema=PanelInference.model_json_schema())
+        _report("Spark", _ledger_rows(client)[n:], time.monotonic() - start, DAY1_PROMPT)
+        try:
+            print(f"Spark answer: {PanelInference.model_validate(answer)}")
+        except ValidationError as err:
+            print("Spark schema check: FAIL. The answer does not match PanelInference.")
+            raise ApiError(f"Spark answered, but not with PanelInference: {err}") from err
+        print("Spark schema check: PASS. The API accepted the production schema and the answer validates.")
+    finally:
+        after_total = client.ledger_total_usd()
+        print(f"Ledger total after: ${after_total:.6f}  (this run: ${after_total - before_total:.6f})")
+        print("Compare with the Usage page: they must agree within 10% (REQ-API-09).")
+
+
+def run_probe(
+    photo: str | Path, prompt: str, *, yes_spend: bool, client: MetaClient | None = None,
+    out_dir: str | Path = "out/probe",
+) -> Path:
+    """One SAM call with any text prompt (REQ-SEG-01), to try a prompt before code depends on it.
+
+    Prints every mask record and box SAM returned, and writes an overlay: the mask segment() selects in red,
+    every box in green with its record id. Refuses without ``yes_spend`` and in mock or offline
+    mode. A second run with the same photo and prompt is read from the cache and costs nothing."""
+    client = client or MetaClient()
+    photo = Path(photo)
+    if not photo.is_file():
+        raise ApiError(f"Photo {photo} not found. Check the path.")
+    prompt = prompt.strip()  # one cache key per prompt: "t-shirt " must not pay again for "t-shirt"
+    if not prompt:
+        raise ApiError("The prompt is empty. Give a text prompt, for example: sleeve")
+    usd = cost_usd(client.config.models.sam, Usage(images=1))
+    print(f"Probe {photo.name} with SAM prompt {prompt!r}: one call, worst case ${usd:.4f}. "
+          f"Ledger limit ${client.config.api.budget_limit_usd:.2f}.")
+    if not yes_spend:
+        raise ApiError("Nothing was called. Add --yes-spend to make the paid call.")
+    if client.settings.mock or client.settings.offline:
+        raise ApiError("Mock or offline mode is on. Set META_API_KEY and unset SEWTRACE_MOCK and SEWTRACE_OFFLINE.")
+
+    n = len(_ledger_rows(client))
+    start = time.monotonic()
+    try:
+        mask = client.segment(photo, prompt)
+    except ApiError:
+        _print_stored_sam_facts(client, photo, prompt)
+        raise
+    _report("SAM", _ledger_rows(client)[n:], time.monotonic() - start, prompt)
+    count = len(client.sam_inspect(photo, prompt).records)
+    print(f"SAM returned {count} mask record(s) for {prompt!r}. The overlay shades the one segment() selects "
+          "(highest confidence; the largest if a confidence is missing). Green boxes show every record.")
+    print(f"Selected mask: {int(mask.sum())} px of {mask.size}")
+    slug = "".join(c if c.isalnum() else "_" for c in prompt)[:60]
+    folder = Path(out_dir) / f"{slug}_{hashlib.sha256(prompt.encode()).hexdigest()[:8]}"
+    path = _write_overlay(client, photo, prompt, mask, folder)
+    print(f"Overlay: {path}")
+    return path
