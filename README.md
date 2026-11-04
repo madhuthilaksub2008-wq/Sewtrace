@@ -59,7 +59,10 @@ The models feed each other two times (SPEC sections 6 and 15).
 4. The Co-pilot turns a plain request, such as "make it 2 cm longer", into one Muse Spark proposal. Code applies it and checks every seam again.
 5. SAM 3.1 then measures the printed result, on the proof photo.
 
-Without SAM, there is no outline and no proof. Without Muse Spark, there is no hidden geometry and no Co-pilot.
+Without SAM, there is no outline and no proof. Sewtrace has no fallback for it.
+Without Muse Spark, the pattern is still made, but the hidden geometry comes from a fixed rule instead of the photos:
+after two unusable answers, code sets the front neck depth to the back neck depth plus 40 mm
+(`fallback_front_minus_back_mm` in `config.toml`, `sewtrace/reason/panels.py`). There is also no Co-pilot without it.
 Every model call goes through one client, `sewtrace/api/client.py`.
 
 A run is cheap: about $0.21 in the worst case (SPEC section 8.1), $0.027 on the real run above.
