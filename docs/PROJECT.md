@@ -120,7 +120,7 @@ as the half panel with the fold on x = 0. Every Meta call goes through
 
 ## Demo (3 minutes)
 
-The recorded video (`docs/sewtrace_demo.mp4`, 2:47, voice-over) is a screen
+The recorded video (`docs/sewtrace_demo.mp4`, 2:59, voice-over) is a screen
 recording of the real web page in REAL mode, replayed from the cache ($0):
 
 | Time | On screen |
@@ -128,9 +128,11 @@ recording of the real web page in REAL mode, replayed from the cache ($0):
 | 0:00 to 0:30 | title; the tee laid flat with the 100 mm marker; three photos uploaded |
 | 0:30 to 1:18 | run (SAM 3.1, then Muse Spark); measurements with source labels; seam check, all 4 pairs pass |
 | 1:18 to 1:46 | pattern studio (seam pairs, sewing order); export: tiled A4 PDF, SVG, DXF |
-| 1:46 to 2:04 | cut plan on a fabric roll with the cutter path; manufacturing files; next step: automated cutting and sewing |
-| 2:04 to 2:15 | photo of the printed pattern laid on the real tee (visual comparison, not measured) |
-| 2:15 to 2:47 | Co-pilot "make it 2 cm longer": proposal, Apply, body length 515.5 to 535.5 mm; end card |
+| 1:46 to 1:57 | cut plan on a fabric roll with the cutter path; manufacturing files |
+| 1:57 to 2:07 | next step, concept only: the robot cell animation from the CopyCut prototype (synthetic tote bag, not part of Sewtrace) |
+| 2:07 to 2:18 | photo of the printed pattern laid on the real tee (visual comparison, not measured) |
+| 2:18 to 2:42 | Co-pilot "make it 2 cm longer": proposal, Apply, body length 515.5 to 535.5 mm |
+| 2:42 to 2:59 | pipeline diagram (`docs/img/architecture.svg`); end card |
 
 The photo backgrounds in the video were replaced for presentation. Not in the
 video: the 5-tee error table, a sewn copy, and a measured fit check.

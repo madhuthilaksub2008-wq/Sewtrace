@@ -13,7 +13,8 @@ It uses only Meta models, through the Meta Model API.
 | --- | --- |
 | <img src="docs/img/dreampets-front.jpg" width="380" alt="A pink child's t-shirt laid flat next to a printed marker"> | <img src="docs/img/dreampets-pattern.png" width="380" alt="Front, back and sleeve pattern panels with seam pairs marked"> |
 
-[Watch the demo (2:47, with voice-over)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, pattern studio, export, cut plan and a Co-pilot edit, plus a photo of the printed pattern laid on the real t-shirt (a visual comparison, not measured).
+[Watch the demo (2:59, with voice-over)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, pattern studio, export, cut plan and a Co-pilot edit, plus a photo of the printed pattern laid on the real t-shirt (a visual comparison, not measured) and the pipeline diagram.
+For the next step, automated cutting and sewing, the video shows the robot cell from our earlier CopyCut prototype for a short while. It is an illustrative animation on synthetic data (a tote bag), not part of Sewtrace.
 The recorded run on this t-shirt: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 seam pairs matching.
 The photo backgrounds in the demo and in the image above were replaced with a plain backdrop for presentation. The pattern image and the numbers below come from the original photos, taken on a floor.
 
