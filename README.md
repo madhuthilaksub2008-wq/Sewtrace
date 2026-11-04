@@ -9,7 +9,7 @@ It uses only Meta models, through the Meta Model API.
 | --- | --- |
 | <img src="docs/img/dreampets-front.jpg" width="380" alt="A pink child's t-shirt laid flat next to a printed marker"> | <img src="docs/img/dreampets-pattern.png" width="380" alt="Front, back and sleeve pattern panels with seam pairs marked"> |
 
-[Watch the demo (about 2 minutes, no sound)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, cut plan and a Co-pilot edit.
+[Watch the demo (2:47, with voice-over)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, pattern studio, export, cut plan and a Co-pilot edit, plus a photo of the printed pattern laid on the real t-shirt (a visual comparison, not measured).
 The recorded run on this t-shirt: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 seam pairs matching.
 The photo backgrounds in the demo and in the image above were replaced with a plain backdrop for presentation. The pattern image and the numbers below come from the original photos, taken on a floor.
 
@@ -28,23 +28,31 @@ A run has eight steps:
   3. Contours, smoothing, symmetry, edges (mm)       sewtrace/vision/contour.py
   4. Six measurements                                sewtrace/vision/measure.py
   5. Muse Spark 1.3: panel spec JSON                 sewtrace/reason/panels.py
-  6. Seam check loop (max 3 model calls + code fix)  sewtrace/reason/seams.py
+  6. Seam check + code fix                           sewtrace/reason/seams.py
   7. Tiled A4 PDF, SVG, DXF                          sewtrace/output/
   8. Proof: paper-on-t-shirt photo, edge gap in mm   sewtrace/vision/verify.py
 ```
 
 Sewtrace never exports a pattern that fails a seam pair.
 
+The same pattern also becomes manufacturing files (`sewtrace/output/manufacture.py`, code only, no model call):
+a cut plan with every piece nested on a fabric roll, an ordered cut path, a bill of materials, assembly
+instructions and one zip of the run. The cutter profile is illustrative, a sample, not a real machine.
+
 ## Why Meta models
 
 The models feed each other two times (SPEC sections 6 and 15).
 
 1. SAM 3.1 makes the first outline of the t-shirt from a text prompt.
-2. Muse Spark 1.3 adds the geometry that the camera cannot see: the neck depths, the sleeve cap and the grain line.
-3. Muse Spark 1.3 also repairs the seam pairs that do not match.
-4. SAM 3.1 then measures the printed result, on the proof photo.
+2. Muse Spark 1.3 adds the geometry that the camera cannot see: the front and back neck depths and the grain line.
+   It also proposes a sleeve cap curve. With the default `cap_style = "flat"` (`sewtrace/config.toml`), code
+   replaces that curve with a straight sleeve top, as long as the arm hole needs.
+3. Seam pairs that do not match are fixed by code. With the default flat sleeve top this needs no model call.
+   The optional `cap_style = "curve"` asks Muse Spark for a new cap shape, at most 3 calls, before the code fix.
+4. The Co-pilot turns a plain request, such as "make it 2 cm longer", into one Muse Spark proposal. Code applies it and checks every seam again.
+5. SAM 3.1 then measures the printed result, on the proof photo.
 
-Without SAM, there is no outline. Without Muse Spark, there is no hidden geometry and no seam repair.
+Without SAM, there is no outline and no proof. Without Muse Spark, there is no hidden geometry and no Co-pilot.
 Every model call goes through one client, `sewtrace/api/client.py`.
 
 A run is cheap: about $0.21 in the worst case (SPEC section 8.1), $0.027 on the real run above.
@@ -86,6 +94,11 @@ The shoulder width error is the weak point on hard tees.
 - A perfect paper gives a mean edge gap of 0.08 mm (tee1) and 0.04 mm (tee3).
 - Tests check that a paper that is 2% too big, or shifted by 4 mm, reads within 0.5 mm of the exact gap.
 - Sewtrace refuses a paper fold that bows 8 mm or more. It asks you to take the proof photo again. Bows of 3 and 5 mm are absorbed. Tested on folds of 320, 480 and 700 mm, at bows of 3, 5, 8, 12 mm (and 8 mm bowed the other way). The limit is a share of the fold length (`fold_bow_limit_frac` in `config.toml`).
+
+**Real proof photo: not working yet.** On a real photo SAM 3.1 masks only the t-shirt it can see, not the part under the paper.
+The underarm corners are hidden, so the check stops with "found no underarm corners".
+The `paper` prompt also picked the marker sheet instead of the pattern paper.
+A planned fix: one photo of the t-shirt alone and one with the paper on it, without moving either, aligned by the marker.
 
 **Real t-shirt run (pink child's tee, three phone photos, REAL mode).**
 

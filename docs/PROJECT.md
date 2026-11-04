@@ -5,8 +5,7 @@
 > together.
 
 Meta Global AI Developer Hackathon 2026, Indie Developer track, theme *Push the
-Frontier* (pending confirmation): turn a physical object into a manufacturable
-file. Team: Madhu (dev lead, on camera, submits) and Bala (marker, PDF and
+Frontier*: turn a physical object into a manufacturable file. Team: Madhu (dev lead, on camera, submits) and Bala (marker, PDF and
 DXF modules; capture, proof, script, video).
 
 ## Key dates
@@ -39,17 +38,27 @@ curves (armhole, neckline, sleeve cap) are where people get it wrong.
 2. **See.** SAM 3.1 segments the garment and its regions (body, sleeve).
 3. **Measure.** The marker gives a homography from pixels to mm; masks become
    smooth outlines, halves are mirrored for symmetry, edges are labelled.
-4. **Reason.** Muse Spark (or Wonder, after the Day 1 cost test) infers what the
-   photos can't show directly: front vs back neck depth, sleeve cap shape,
-   grain. It returns a structured panel spec.
+4. **Reason.** Muse Spark 1.3 infers what the photos can't show directly: front
+   and back neck depth, sleeve cap shape, grain. It returns a structured panel
+   spec. With the default `cap_style = "flat"` (`sewtrace/config.toml`), code
+   replaces its sleeve cap curve with a straight sleeve top.
 5. **Check.** Seams that must join (shoulders, side seams, sleeve cap vs
-   armhole) are measured. If they are out of tolerance the model adjusts, up to
-   3 calls, then a deterministic code fix.
+   armhole) are measured. With the default flat sleeve top, code fixes a failing
+   pair with no model call. Only the optional `cap_style = "curve"` asks the
+   model for a new cap shape, up to 3 calls, before the code fix. A pattern that
+   still fails is never exported.
 6. **Output.** A tiled A4 PDF at 1:1 with a 100 mm test square, SVG/DXF cut
-   files, and the sewing order.
-7. **Verify.** Photograph the printed paper panel laid on the original tee.
+   files, and the sewing order. Also manufacturing files, code only: a cut plan
+   nested on a fabric roll, an ordered cut path, a bill of materials, assembly
+   instructions and one zip. The cutter profile is illustrative, not a real
+   machine.
+7. **Co-pilot.** A plain request ("make it 2 cm longer") becomes one Muse Spark
+   proposal. Nothing changes until the user presses Apply; then code makes the
+   change and checks every seam again.
+8. **Verify.** Photograph the printed paper panel laid on the original tee.
    SAM masks both, code measures the edge gap in mm, and an overlay shows green
-   (under 3 mm) or red.
+   (under 3 mm) or red. Works on synthetic proof photos only so far (see
+   "Where we are (Nov 3)").
 
 **Hero object:** a kid's round neck t-shirt (knit, set-in sleeves).
 
@@ -57,16 +66,16 @@ curves (armhole, neckline, sleeve cap) are where people get it wrong.
 
 - Without **SAM 3.1** there are no garment outlines, so no measurements and no
   verification.
-- Without **Muse Spark/Wonder** there is no panel inference: no hidden geometry
-  and no adjust loop.
+- Without **Muse Spark** there is no panel inference (no hidden geometry) and
+  no Co-pilot.
 - The two feed each other twice: SAM drafts, the model reasons, SAM verifies.
 
 | Product | Role | Status |
 | --- | --- | --- |
-| SAM 3.1 | Garment and region masks; paper-on-tee verification masks | Mocked; real call pending Day 1 test |
-| Muse Spark 1.3 | Panel inference and seam adjust loop (default, cheaper) | Mocked; real call pending Day 1 test |
-| Muse Wonder | Same job, if the Day 1 A/B shows clearly better output | Pending |
-| Muse Image | Optional: preview of the copy in a new fabric print | Cut first |
+| SAM 3.1 | Garment and region masks; paper-on-tee verification masks | Real: used on the real tee run. Proof masks fail on a real photo (see Nov 3) |
+| Muse Spark 1.3 | Panel inference, Co-pilot edits; seam adjust loop only with `cap_style = "curve"` | Real: 1 Spark call on the real tee run |
+| Muse Wonder | Same job as Spark | Not used: Spark is the configured model |
+| Muse Image | Optional: preview of the copy in a new fabric print | Cut |
 
 ## Pipeline
 
@@ -76,14 +85,16 @@ curves (armhole, neckline, sleeve cap) are where people get it wrong.
   > SAM 3.1 masks (body, sleeve)                       sewtrace/api/client.py
   > contours, smoothing, symmetry, edges (mm)          sewtrace/vision/contour.py
   > six measurements                                   sewtrace/vision/measure.py
-  > Muse Spark/Wonder: panel spec JSON                 sewtrace/reason/panels.py
-  > sewability check loop (max 3 calls + code fix)     sewtrace/reason/seams.py
+  > Muse Spark 1.3: panel spec JSON                    sewtrace/reason/panels.py
+  > seam check + code fix (model only for curve caps)  sewtrace/reason/seams.py
   > tiled A4 PDF, SVG, DXF                             sewtrace/output/
+  > cut plan, cut path, BOM, instructions, zip         sewtrace/output/manufacture.py
+  > Co-pilot edits (one Spark call, applied by code)   sewtrace/reason/edits.py
   > verification: paper-on-tee photo, edge gap in mm   sewtrace/vision/verify.py
 ```
 
 **Stack:** Python, OpenCV, shapely, pydantic, reportlab, svgwrite, ezdxf;
-FastAPI + a simple web page for the UI (not built yet).
+FastAPI + a single web page (`sewtrace/web/index.html`).
 
 **Conventions:** all geometry in mm, x right, y down. On-fold panels are stored
 as the half panel with the fold on x = 0. Every Meta call goes through
@@ -104,19 +115,25 @@ as the half panel with the fold on x = 0. Every Meta call goes through
 | Problem | Approach |
 | --- | --- |
 | Masks into trustworthy millimetres | printed marker, sub-pixel homography, 100 mm test square |
-| Geometry the camera can't see | separate back and sleeve photos; the model infers neck depth and cap shape |
-| A pattern that actually sews | seam lengths checked in code; the model adjusts until joined seams match |
+| Geometry the camera can't see | separate back and sleeve photos; the model infers the front and back neck depths |
+| A pattern that actually sews | seam lengths checked in code; code fixes a failing pair, or the pattern is not exported |
 
 ## Demo (3 minutes)
 
+The recorded video (`docs/sewtrace_demo.mp4`, 2:47, voice-over) is a screen
+recording of the real web page in REAL mode, replayed from the cache ($0):
+
 | Time | On screen |
 | --- | --- |
-| 0:00 to 0:30 | tee laid flat > outlines snap on > panels lift into a printed pattern. "Three photos. One sewing pattern." |
-| 0:30 to 1:00 | parent holding a worn favourite that no longer fits |
-| 1:00 to 1:50 | SAM masks > mm > model infers sleeve cap > seam check turns green |
-| 1:50 to 2:30 | paper panel on the tee, edges go green; error table for 5 tees |
-| 2:30 to 2:50 | (bonus) sewn copy next to original |
-| 2:50 to 3:00 | scale line: photo to cut file to automated cutting and sewing |
+| 0:00 to 0:30 | title; the tee laid flat with the 100 mm marker; three photos uploaded |
+| 0:30 to 1:18 | run (SAM 3.1, then Muse Spark); measurements with source labels; seam check, all 4 pairs pass |
+| 1:18 to 1:46 | pattern studio (seam pairs, sewing order); export: tiled A4 PDF, SVG, DXF |
+| 1:46 to 2:04 | cut plan on a fabric roll with the cutter path; manufacturing files; next step: automated cutting and sewing |
+| 2:04 to 2:15 | photo of the printed pattern laid on the real tee (visual comparison, not measured) |
+| 2:15 to 2:47 | Co-pilot "make it 2 cm longer": proposal, Apply, body length 515.5 to 535.5 mm; end card |
+
+The photo backgrounds in the video were replaced for presentation. Not in the
+video: the 5-tee error table, a sewn copy, and a measured fit check.
 
 Live finals backup: a recorded run with cached results for every step.
 
@@ -135,6 +152,13 @@ overlay proof.
 paid charges start when credits run out. Develop on Spark, cache every call,
 images and JSON only. Checkpoints: over \$40 by Oct 29 or over \$75 by Oct 31
 means Spark only plus cached results.
+
+## Where we are (Nov 3)
+
+- **Real tee run:** one pink child's tee, three phone photos, REAL mode: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 seam pairs pass. No tape-measure ground truth yet, so no real error number.
+- **Real proof photo: not working.** On a real photo SAM 3.1 masks only the t-shirt it can see, not the part under the paper. The underarm corners are hidden, so the check stops with "found no underarm corners". The `paper` prompt also picked the marker sheet instead of the pattern paper. The check is tested on synthetic proof photos only. Planned fix: one photo of the tee alone and one with the paper, without moving either, aligned by the marker; the t-shirt outline comes from the first.
+- **Defaults that changed the design:** `cap_style = "flat"` (Nov 1) draws every sleeve top straight in code, so the seam loop makes no model call and the model's sleeve cap curve is replaced.
+- **Built since Oct 29:** web page (workbench, pattern studio, guided tour), cut plan and manufacturing files, Co-pilot edits, provenance labels on every value.
 
 ## Where we are (Oct 29)
 
@@ -165,7 +189,7 @@ replay, eval (mean error 0.36 mm, all seams pass). CI runs the tests with no key
 
 - `REQ-API-09`: met, except the comparison of the ledger with the Meta Usage page (user, pending).
 - `REQ-RSN-06`: partly. 1 of 20 real calls done (1,036 output tokens, no truncation).
-- `REQ-VER-01`: the real proof photo is due on Oct 31.
+- `REQ-VER-01`: not met. The real proof photo fails (see "Where we are (Nov 3)").
 - `REQ-SEG-03`, `REQ-SEG-04`: partly. SAM sends no confidence (Day 1), so the score rule cannot run. User decision needed.
 
 `REQ-RSN-01` is met: one real Spark call returned a valid answer.
