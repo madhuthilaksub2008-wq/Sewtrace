@@ -5,8 +5,7 @@
 > together.
 
 Meta Global AI Developer Hackathon 2026, Indie Developer track, theme *Push the
-Frontier*: turn a physical object into a manufacturable file. Team: Madhu (dev lead, on camera, submits) and Bala (marker, PDF and
-DXF modules; capture, proof, script, video).
+Frontier*: turn a physical object into a manufacturable file. Team: Madhu.
 
 ## Key dates
 
@@ -65,9 +64,12 @@ curves (armhole, neckline, sleeve cap) are where people get it wrong.
 ## Why only Meta
 
 - Without **SAM 3.1** there are no garment outlines, so no measurements and no
-  verification.
-- Without **Muse Spark** there is no panel inference (no hidden geometry) and
-  no Co-pilot.
+  verification. There is no fallback for it.
+- Without **Muse Spark** the pattern is still made, from a deterministic
+  fallback: after two unusable answers, the front neck depth is the back neck
+  depth plus 40 mm (`fallback_front_minus_back_mm`). Spark's value is reasoning
+  from the actual photos instead of one fixed rule, and the Co-pilot, which has
+  no fallback.
 - The two feed each other twice: SAM drafts, the model reasons, SAM verifies.
 
 | Product | Role | Status |

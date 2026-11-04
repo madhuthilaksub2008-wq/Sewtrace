@@ -16,12 +16,12 @@
 
 | Module | Board task | Owner |
 | --- | --- | --- |
-| `vision/marker.py` marker + homography | T14 | Bala |
+| `vision/marker.py` marker + homography | T14 | Madhu |
 | `vision/contour.py`, `vision/measure.py` | T15 | Madhu |
 | `reason/panels.py` panel inference | T16 | Madhu |
 | `reason/seams.py` seam check loop | T20 | Madhu |
-| `output/pdf.py` tiled A4 PDF | T21 | Bala |
-| `output/vector.py` SVG + DXF | T22 | Bala |
+| `output/pdf.py` tiled A4 PDF | T21 | Madhu |
+| `output/vector.py` SVG + DXF | T22 | Madhu |
 | `vision/verify.py` overlay proof | T25 | Madhu |
 
 ## Mock mode

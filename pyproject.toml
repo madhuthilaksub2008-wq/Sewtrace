@@ -42,7 +42,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["data", "out", "demo", ".claude", "cache"]
+extend-exclude = ["data", "out", "demo", "cache"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

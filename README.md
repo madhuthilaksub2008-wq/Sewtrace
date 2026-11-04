@@ -13,7 +13,7 @@ It uses only Meta models, through the Meta Model API.
 | --- | --- |
 | <img src="docs/img/dreampets-front.jpg" width="380" alt="A pink child's t-shirt laid flat next to a printed marker"> | <img src="docs/img/dreampets-pattern.png" width="380" alt="Front, back and sleeve pattern panels with seam pairs marked"> |
 
-[Watch the demo (2:59, with voice-over)](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, pattern studio, export, cut plan and a Co-pilot edit, plus a photo of the printed pattern laid on the real t-shirt (a visual comparison, not measured) and the pipeline diagram.
+[Watch the demo on YouTube (2:59, with voice-over)](https://youtu.be/rVIq43CZDh8), or [download the video file](docs/sewtrace_demo.mp4). It is a screen recording of the real web page: upload three photos, run, seam check, pattern studio, export, cut plan and a Co-pilot edit, plus a photo of the printed pattern laid on the real t-shirt (a visual comparison, not measured) and the pipeline diagram.
 For the next step, automated cutting and sewing, the video shows the robot cell from our earlier CopyCut prototype for a short while. It is an illustrative animation on synthetic data (a tote bag), not part of Sewtrace.
 The recorded run on this t-shirt: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 seam pairs matching.
 The photo backgrounds in the demo and in the image above were replaced with a plain backdrop for presentation. The pattern image and the numbers below come from the original photos, taken on a floor.
@@ -59,7 +59,10 @@ The models feed each other two times (SPEC sections 6 and 15).
 4. The Co-pilot turns a plain request, such as "make it 2 cm longer", into one Muse Spark proposal. Code applies it and checks every seam again.
 5. SAM 3.1 then measures the printed result, on the proof photo.
 
-Without SAM, there is no outline and no proof. Without Muse Spark, there is no hidden geometry and no Co-pilot.
+Without SAM, there is no outline and no proof. Sewtrace has no fallback for it.
+Without Muse Spark, the pattern is still made, but the hidden geometry comes from a fixed rule instead of the photos:
+after two unusable answers, code sets the front neck depth to the back neck depth plus 40 mm
+(`fallback_front_minus_back_mm` in `config.toml`, `sewtrace/reason/panels.py`). There is also no Co-pilot without it.
 Every model call goes through one client, `sewtrace/api/client.py`.
 
 A run is cheap: about $0.21 in the worst case (SPEC section 8.1), $0.027 on the real run above.

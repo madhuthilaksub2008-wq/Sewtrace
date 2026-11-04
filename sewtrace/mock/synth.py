@@ -1,4 +1,4 @@
-"""Synthetic capture photos, standing in for real tees until Bala's captures land.
+"""Synthetic capture photos, standing in for real tees until the real captures land.
 
 Each tee is drawn from known geometry, so every downstream number can be
 checked against exact ground truth:

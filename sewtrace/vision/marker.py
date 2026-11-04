@@ -1,6 +1,6 @@
 """T14: ArUco marker detection and homography, photo pixels to millimetres.
 
-Owner: Bala. The mm frame has its origin at the marker's top-left corner,
+Owner: Madhu. The mm frame has its origin at the marker's top-left corner,
 x along the marker's top edge, y down along its left edge.
 
 The garment lies several marker widths away, so corner error is amplified by
