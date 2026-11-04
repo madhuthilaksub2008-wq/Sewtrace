@@ -1,5 +1,9 @@
 # Sewtrace
 
+[![tests](https://github.com/madhuthilaksub2008-wq/Sewtrace/actions/workflows/tests.yml/badge.svg)](https://github.com/madhuthilaksub2008-wq/Sewtrace/actions/workflows/tests.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 Three photos of a kid's t-shirt in, a 1:1 sewing pattern out, checked to sew together.
 
 Sewtrace is built for the Meta Global AI Developer Hackathon 2026 (Indie track).
@@ -14,6 +18,8 @@ The recorded run on this t-shirt: 1 Muse Spark call, 3 SAM masks, $0.027, all 4 
 The photo backgrounds in the demo and in the image above were replaced with a plain backdrop for presentation. The pattern image and the numbers below come from the original photos, taken on a floor.
 
 ## What it does
+
+![Sewtrace pipeline: photos, SAM 3.1, code, Muse Spark 1.3, seam check, then pattern files, manufacturing files and the Co-pilot](docs/img/architecture.svg)
 
 You lay a t-shirt flat next to a printed 100 mm marker. You take a front photo, a back photo and a sleeve photo.
 Sewtrace returns a tiled A4 PDF at 1:1 scale, plus SVG and DXF files.
@@ -117,6 +123,12 @@ The photos were not laid straight (shoulder points 9 mm and 15 mm apart). Sewtra
 SAM sent no confidence score, so the minimum-score check was skipped.
 There is no tape-measure ground truth for this tee yet, so there is no error figure for real fabric. The synthetic tables above do not cover it.
 Real SAM edges, fabric that is not flat and lens distortion will add error.
+
+## Prerequisites
+
+- Python 3.11 or newer.
+- A Meta Model API key, only for REAL mode. Mock mode, the tests and the recorded demo need no key.
+- A printer for the 100 mm marker and the A4 pattern pages.
 
 ## Quick start (mock mode, no key, no cost)
 
@@ -230,3 +242,7 @@ The Day 1 test replaces that estimate with a measured value.
 ## Status
 
 Open items, decisions and the Day 1 results are in `docs/PROJECT.md`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
